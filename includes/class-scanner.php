@@ -6,6 +6,9 @@ if (!defined('ABSPATH')) {
 
 class Freesiem_Scanner
 {
+	private const MAX_FILES = 1000;
+	private const MAX_DEPTH = 5;
+
 	public function run(): array
 	{
 		if (!function_exists('get_plugin_updates')) {
@@ -18,7 +21,13 @@ class Freesiem_Scanner
 
 		$metadata = $this->build_metadata();
 		$inventory = $this->build_inventory();
-		$findings = $this->collect_findings($metadata, $inventory);
+		$filesystem = $this->scan_filesystem();
+		$inventory['filesystem'] = $filesystem['summary'];
+		$inventory['filesystem_flagged_files'] = $filesystem['flagged_files'];
+		$findings = array_merge(
+			$this->collect_findings($metadata, $inventory),
+			$filesystem['findings']
+		);
 
 		return [
 			'metadata' => $metadata,
@@ -120,6 +129,12 @@ class Freesiem_Scanner
 					'response' => (string) ($update->response ?? ''),
 				];
 			}, $core_updates) : [],
+			'plugin_counts' => [
+				'all' => count($plugins),
+				'active' => count(array_filter($plugins, static fn(array $plugin): bool => !empty($plugin['active']))),
+				'inactive' => count(array_filter($plugins, static fn(array $plugin): bool => empty($plugin['active']))),
+				'mu' => count($must_use),
+			],
 		];
 	}
 
@@ -139,6 +154,7 @@ class Freesiem_Scanner
 		$xmlrpc_enabled = apply_filters('xmlrpc_enabled', true);
 		$rest_enabled = rest_url() !== '';
 		$wp_debug = defined('WP_DEBUG') && WP_DEBUG;
+		$wp_debug_log = defined('WP_DEBUG_LOG') && WP_DEBUG_LOG;
 		$file_edit_disabled = defined('DISALLOW_FILE_EDIT') && DISALLOW_FILE_EDIT;
 		$file_mods_disabled = defined('DISALLOW_FILE_MODS') && DISALLOW_FILE_MODS;
 		$cron_disabled = defined('DISABLE_WP_CRON') && DISABLE_WP_CRON;
@@ -178,6 +194,10 @@ class Freesiem_Scanner
 
 		if ($wp_debug) {
 			$findings[] = $this->finding('wp_debug_enabled', 'configuration', 'high', 'WP_DEBUG is enabled', 'Debug mode can expose sensitive errors or paths in production.', 'Disable WP_DEBUG in production.', ['wp_debug' => true], 75);
+		}
+
+		if ($wp_debug_log) {
+			$findings[] = $this->finding('wp_debug_log_enabled', 'configuration', 'medium', 'WP_DEBUG_LOG is enabled', 'Debug logging is enabled, which can leave verbose application logs on disk.', 'Disable WP_DEBUG_LOG outside controlled debugging windows and protect any generated logs.', ['wp_debug_log' => true], 84);
 		}
 
 		if (!$file_edit_disabled) {
@@ -221,6 +241,299 @@ class Freesiem_Scanner
 		}
 
 		return array_values($findings);
+	}
+
+	private function scan_filesystem(): array
+	{
+		$targets = $this->get_scan_targets();
+		$summary = [
+			'targets' => array_values(array_map(static fn(array $target): array => [
+				'label' => $target['label'],
+				'path' => $target['path'],
+			], $targets)),
+			'max_files' => self::MAX_FILES,
+			'max_depth' => self::MAX_DEPTH,
+			'inspected_files' => 0,
+			'visited_directories' => 0,
+			'flagged_files' => 0,
+			'partial' => false,
+			'unreadable_paths' => [],
+			'skipped_directories' => [],
+		];
+		$findings = [];
+		$flagged_files = [];
+
+		foreach ($targets as $target) {
+			if ($summary['inspected_files'] >= self::MAX_FILES) {
+				$summary['partial'] = true;
+				break;
+			}
+
+			$this->scan_path(
+				$target['path'],
+				$target['label'],
+				$target['relative'],
+				0,
+				$summary,
+				$findings,
+				$flagged_files
+			);
+		}
+
+		$summary['flagged_files'] = count($flagged_files);
+
+		return [
+			'summary' => $summary,
+			'findings' => array_values($findings),
+			'flagged_files' => array_values($flagged_files),
+		];
+	}
+
+	private function scan_path(string $path, string $target_label, string $relative_root, int $depth, array &$summary, array &$findings, array &$flagged_files): void
+	{
+		if ($summary['inspected_files'] >= self::MAX_FILES) {
+			$summary['partial'] = true;
+			return;
+		}
+
+		if (!file_exists($path)) {
+			return;
+		}
+
+		if (is_file($path)) {
+			if ($summary['inspected_files'] >= self::MAX_FILES) {
+				$summary['partial'] = true;
+				return;
+			}
+
+			$summary['inspected_files']++;
+			$this->flag_file($path, $target_label, $relative_root, $findings, $flagged_files);
+			return;
+		}
+
+		if (!is_readable($path)) {
+			$summary['unreadable_paths'][] = $this->relative_path($path);
+			return;
+		}
+
+		$items = scandir($path);
+
+		if (!is_array($items)) {
+			$summary['unreadable_paths'][] = $this->relative_path($path);
+			return;
+		}
+
+		$summary['visited_directories']++;
+
+		foreach ($items as $item) {
+			if ($item === '.' || $item === '..') {
+				continue;
+			}
+
+			$current = $path . DIRECTORY_SEPARATOR . $item;
+
+			if (is_dir($current)) {
+				if ($depth >= self::MAX_DEPTH) {
+					$summary['partial'] = true;
+					continue;
+				}
+
+				if ($this->should_skip_directory($item, $current)) {
+					$summary['skipped_directories'][] = $this->relative_path($current);
+					continue;
+				}
+
+				$this->scan_path($current, $target_label, $relative_root, $depth + 1, $summary, $findings, $flagged_files);
+				continue;
+			}
+
+			if ($summary['inspected_files'] >= self::MAX_FILES) {
+				$summary['partial'] = true;
+				return;
+			}
+
+			$summary['inspected_files']++;
+			$this->flag_file($current, $target_label, $relative_root, $findings, $flagged_files);
+
+			if ($summary['inspected_files'] >= self::MAX_FILES) {
+				$summary['partial'] = true;
+				return;
+			}
+		}
+	}
+
+	private function flag_file(string $path, string $target_label, string $relative_root, array &$findings, array &$flagged_files): void
+	{
+		$relative = $this->relative_path($path);
+		$basename = strtolower((string) basename($path));
+		$extension = strtolower((string) pathinfo($path, PATHINFO_EXTENSION));
+		$size = is_file($path) ? (int) @filesize($path) : 0;
+		$modified = is_file($path) ? (int) @filemtime($path) : 0;
+		$is_writable = is_writable($path);
+		$reasons = [];
+		$severity = 'low';
+		$score = 95;
+		$uploads_relative = $this->relative_path(WP_CONTENT_DIR . '/uploads');
+		$in_uploads = $uploads_relative !== '' && str_starts_with($relative, $uploads_relative);
+		$in_public_root = !str_contains(trim($relative, '/'), '/');
+
+		if ($in_uploads && in_array($extension, ['php', 'phtml', 'phar', 'php5', 'php7', 'php8'], true)) {
+			$reasons[] = 'Executable PHP-like file in uploads directory';
+			$severity = 'critical';
+			$score = 45;
+		}
+
+		if (in_array($basename, ['shell.php', 'cmd.php', 'eval.php', 'up.php', 'wshell.php', 'mini.php', 'phpinfo.php'], true)) {
+			$reasons[] = 'Matches a common web shell or reconnaissance filename';
+			$severity = 'critical';
+			$score = min($score, 42);
+		}
+
+		if ($basename === 'install.php' && !str_starts_with($relative, 'wp-admin/')) {
+			$reasons[] = 'Standalone install.php found outside the standard admin area';
+			$severity = 'high';
+			$score = min($score, 58);
+		}
+
+		if (in_array($extension, ['zip', 'tar', 'gz', 'tgz', 'sql', 'bak', 'old'], true) && ($in_public_root || $in_uploads || str_starts_with($relative, 'wp-content/'))) {
+			$reasons[] = 'Publicly reachable backup or archive file';
+			$severity = $severity === 'critical' ? 'critical' : 'high';
+			$score = min($score, 60);
+		}
+
+		if (in_array($basename, ['.env', 'debug.log', 'error_log'], true)) {
+			$reasons[] = 'Sensitive environment or log file present in a readable location';
+			$severity = $severity === 'critical' ? 'critical' : 'medium';
+			$score = min($score, 70);
+		}
+
+		if ($in_uploads && $extension === 'php' && $size > 512000) {
+			$reasons[] = 'Large PHP file in uploads directory';
+			$severity = 'high';
+			$score = min($score, 57);
+		}
+
+		if ($in_uploads && preg_match('/\.(jpg|jpeg|png|gif|svg|ico)\.(php|phtml)$/i', $basename)) {
+			$reasons[] = 'Suspicious extension mismatch in uploads';
+			$severity = 'critical';
+			$score = min($score, 40);
+		}
+
+		if ($extension === 'php' && (strlen($basename) > 35 || preg_match('/^[a-f0-9]{16,}\.php$/i', $basename))) {
+			$reasons[] = 'Oddly named or random-looking PHP filename';
+			$severity = $severity === 'critical' ? 'critical' : 'high';
+			$score = min($score, 62);
+		}
+
+		if ($is_writable && in_array($basename, ['wp-config.php', '.env', 'debug.log', 'error_log'], true)) {
+			$reasons[] = 'Sensitive file is writable by the current process';
+			$severity = $severity === 'critical' ? 'critical' : 'medium';
+			$score = min($score, 73);
+		}
+
+		if ($reasons === []) {
+			return;
+		}
+
+		$flagged_file = [
+			'path' => $relative,
+			'target' => $target_label,
+			'extension' => $extension,
+			'size' => $size,
+			'modified_time' => $modified ? gmdate('c', $modified) : '',
+			'writable' => $is_writable,
+			'reasons' => $reasons,
+		];
+
+		$flagged_files[$relative] = $flagged_file;
+		$findings[] = $this->finding(
+			'filesystem_' . md5($relative . implode('|', $reasons)),
+			'filesystem',
+			$severity,
+			'Suspicious filesystem artifact detected',
+			'freeSIEM Sentinel found a file that matches one or more filesystem risk heuristics.',
+			'Review the file, confirm whether it is expected, and remove or restrict access if it is not required.',
+			$flagged_file,
+			$score
+		);
+	}
+
+	private function get_scan_targets(): array
+	{
+		$targets = [
+			['label' => 'WordPress Root', 'path' => untrailingslashit(ABSPATH), 'relative' => ''],
+			['label' => 'wp-admin', 'path' => untrailingslashit(ABSPATH) . '/wp-admin', 'relative' => 'wp-admin'],
+			['label' => 'wp-includes', 'path' => untrailingslashit(ABSPATH) . '/wp-includes', 'relative' => 'wp-includes'],
+			['label' => 'wp-content', 'path' => WP_CONTENT_DIR, 'relative' => 'wp-content'],
+			['label' => 'uploads', 'path' => WP_CONTENT_DIR . '/uploads', 'relative' => 'wp-content/uploads'],
+			['label' => 'plugins', 'path' => WP_PLUGIN_DIR, 'relative' => 'wp-content/plugins'],
+			['label' => 'themes', 'path' => get_theme_root(), 'relative' => 'wp-content/themes'],
+		];
+
+		if (defined('WPMU_PLUGIN_DIR')) {
+			$targets[] = ['label' => 'mu-plugins', 'path' => WPMU_PLUGIN_DIR, 'relative' => 'wp-content/mu-plugins'];
+		}
+
+		$unique = [];
+
+		foreach ($targets as $target) {
+			$path = wp_normalize_path((string) $target['path']);
+
+			if ($path === '' || isset($unique[$path])) {
+				continue;
+			}
+
+			$unique[$path] = [
+				'label' => (string) $target['label'],
+				'path' => $path,
+				'relative' => (string) $target['relative'],
+			];
+		}
+
+		return array_values($unique);
+	}
+
+	private function should_skip_directory(string $basename, string $path): bool
+	{
+		$basename = strtolower($basename);
+		$skip = [
+			'.git',
+			'.svn',
+			'node_modules',
+			'vendor',
+			'cache',
+			'caches',
+			'upgrade',
+			'backups',
+			'backup',
+			'logs',
+			'tmp',
+			'temp',
+		];
+
+		if (in_array($basename, $skip, true)) {
+			return true;
+		}
+
+		$normalized = $this->relative_path($path);
+
+		return str_contains($normalized, 'synchy-backups') || str_contains($normalized, 'cache');
+	}
+
+	private function relative_path(string $path): string
+	{
+		$path = wp_normalize_path($path);
+		$root = untrailingslashit(wp_normalize_path(ABSPATH));
+
+		if (str_starts_with($path, $root . '/')) {
+			return ltrim(substr($path, strlen($root)), '/');
+		}
+
+		if ($path === $root) {
+			return '';
+		}
+
+		return ltrim($path, '/');
 	}
 
 	private function finding(string $key, string $category, string $severity, string $title, string $description, string $recommendation, array $evidence, int $score): array
