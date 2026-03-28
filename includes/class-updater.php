@@ -11,6 +11,7 @@ class Freesiem_Updater
 		add_filter('pre_set_site_transient_update_plugins', [$this, 'inject_update'], 20);
 		add_filter('plugins_api', [$this, 'plugins_api'], 20, 3);
 		add_filter('plugin_action_links_' . freesiem_sentinel_get_plugin_basename(), [$this, 'plugin_action_links']);
+		add_filter('auto_update_plugin', [$this, 'filter_auto_update_plugin'], 20, 2);
 		add_action('admin_post_freesiem_sentinel_check_updates', [$this, 'handle_manual_update_check']);
 		add_action('upgrader_process_complete', [$this, 'clear_after_upgrade'], 10, 2);
 	}
@@ -283,6 +284,28 @@ class Freesiem_Updater
 			self_admin_url('update.php?action=upgrade-plugin&plugin=' . rawurlencode(freesiem_sentinel_get_plugin_basename())),
 			'upgrade-plugin_' . freesiem_sentinel_get_plugin_basename()
 		);
+	}
+
+	public function is_auto_update_enabled(): bool
+	{
+		return !empty(freesiem_sentinel_get_setting('plugin_auto_update', 0));
+	}
+
+	public function filter_auto_update_plugin($update, $item)
+	{
+		$plugin = '';
+
+		if (is_object($item)) {
+			$plugin = safe($item->plugin ?? '');
+		} elseif (is_array($item)) {
+			$plugin = safe($item['plugin'] ?? '');
+		}
+
+		if ($plugin !== freesiem_sentinel_get_plugin_basename()) {
+			return $update;
+		}
+
+		return $this->is_auto_update_enabled();
 	}
 
 	private function get_cache_key(array $config): string

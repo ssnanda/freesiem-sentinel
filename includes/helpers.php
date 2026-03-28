@@ -10,6 +10,14 @@ function freesiem_sentinel_get_default_settings(): array
 		'site_id' => '',
 		'plugin_uuid' => '',
 		'email' => '',
+		'phone_number' => '',
+		'cloud_connection_state' => 'disconnected',
+		'cloud_verification_code' => '',
+		'cloud_connected_at' => '',
+		'allow_remote_scan' => 1,
+		'scan_frequency' => 'daily',
+		'user_sync_enabled' => 0,
+		'plugin_auto_update' => 0,
 		'backend_url' => FREESIEM_SENTINEL_BACKEND_URL,
 		'api_key' => '',
 		'hmac_secret' => '',
@@ -121,6 +129,14 @@ function freesiem_sentinel_sanitize_settings(array $settings): array
 	$settings['site_id'] = sanitize_text_field((string) $settings['site_id']);
 	$settings['plugin_uuid'] = sanitize_text_field((string) $settings['plugin_uuid']);
 	$settings['email'] = sanitize_email((string) $settings['email']);
+	$settings['phone_number'] = freesiem_sentinel_sanitize_phone_number((string) ($settings['phone_number'] ?? ''));
+	$settings['cloud_connection_state'] = in_array((string) ($settings['cloud_connection_state'] ?? 'disconnected'), ['disconnected', 'pending_verification', 'connected'], true) ? (string) $settings['cloud_connection_state'] : 'disconnected';
+	$settings['cloud_verification_code'] = sanitize_text_field((string) ($settings['cloud_verification_code'] ?? ''));
+	$settings['cloud_connected_at'] = freesiem_sentinel_sanitize_datetime((string) ($settings['cloud_connected_at'] ?? ''));
+	$settings['allow_remote_scan'] = empty($settings['allow_remote_scan']) ? 0 : 1;
+	$settings['scan_frequency'] = in_array((string) ($settings['scan_frequency'] ?? 'daily'), ['manual', 'daily', '6hours', 'hourly'], true) ? (string) $settings['scan_frequency'] : 'daily';
+	$settings['user_sync_enabled'] = empty($settings['user_sync_enabled']) ? 0 : 1;
+	$settings['plugin_auto_update'] = empty($settings['plugin_auto_update']) ? 0 : 1;
 	$settings['backend_url'] = freesiem_sentinel_sanitize_backend_url((string) $settings['backend_url']);
 	$settings['api_key'] = sanitize_text_field((string) $settings['api_key']);
 	$settings['hmac_secret'] = sanitize_text_field((string) $settings['hmac_secret']);
@@ -168,6 +184,42 @@ function freesiem_sentinel_sanitize_backend_url(string $url): string
 	}
 
 	return $url;
+}
+
+function freesiem_sentinel_sanitize_phone_number(string $value): string
+{
+	$digits = preg_replace('/\D+/', '', $value);
+	$digits = is_string($digits) ? $digits : '';
+
+	if ($digits === '') {
+		return '';
+	}
+
+	if (strlen($digits) === 11 && str_starts_with($digits, '1')) {
+		$digits = substr($digits, 1);
+	}
+
+	return strlen($digits) === 10 ? $digits : '';
+}
+
+function freesiem_sentinel_is_valid_us_phone(string $value): bool
+{
+	return freesiem_sentinel_sanitize_phone_number($value) !== '';
+}
+
+function freesiem_sentinel_format_phone(string $value, bool $masked = false): string
+{
+	$digits = freesiem_sentinel_sanitize_phone_number($value);
+
+	if ($digits === '') {
+		return '';
+	}
+
+	if ($masked) {
+		return sprintf('+1 XXX-XXX-%s', substr($digits, -4));
+	}
+
+	return sprintf('+1 (%s) %s-%s', substr($digits, 0, 3), substr($digits, 3, 3), substr($digits, 6, 4));
 }
 
 function freesiem_sentinel_sanitize_datetime(string $value): string
