@@ -113,6 +113,8 @@ class Freesiem_Admin
 		$release = is_wp_error($updater) ? [] : $updater;
 		$connection_ok = !empty($settings['site_id']) && !empty($settings['api_key']) && !empty($settings['hmac_secret']);
 		$severity_counts = is_array($cache['severity_counts']) ? $cache['severity_counts'] : [];
+		$filesystem = is_array($cache['local_inventory']['filesystem'] ?? null) ? $cache['local_inventory']['filesystem'] : [];
+		$notices = is_array($cache['notices']) ? $cache['notices'] : [];
 
 		echo '<div class="wrap">';
 		echo '<h1>' . esc_html__('freeSIEM Sentinel', 'freesiem-sentinel') . '</h1>';
@@ -121,6 +123,7 @@ class Freesiem_Admin
 		$this->render_stat_card(__('Connection', 'freesiem-sentinel'), $connection_ok ? __('Connected', 'freesiem-sentinel') : __('Not Connected', 'freesiem-sentinel'), __('Registration status', 'freesiem-sentinel'), strtoupper((string) $settings['registration_status']));
 		$this->render_stat_card(__('Site ID', 'freesiem-sentinel'), (string) ($settings['site_id'] ?: 'Pending'), __('Plugin UUID', 'freesiem-sentinel'), (string) ($settings['plugin_uuid'] ?: 'Pending'));
 		$this->render_stat_card(__('Heartbeat', 'freesiem-sentinel'), freesiem_sentinel_format_datetime((string) $settings['last_heartbeat_at']), __('Last sync', 'freesiem-sentinel'), freesiem_sentinel_format_datetime((string) $settings['last_sync_at']));
+		$this->render_stat_card(__('Last Local Scan', 'freesiem-sentinel'), freesiem_sentinel_format_datetime((string) $settings['last_local_scan_at']), __('Last Remote Scan', 'freesiem-sentinel'), freesiem_sentinel_format_datetime((string) $settings['last_remote_scan_at']));
 		$this->render_stat_card(__('Scores', 'freesiem-sentinel'), 'Overall: ' . esc_html((string) ($summary['overall_score'] ?? ($summary['local_score'] ?? 'N/A'))), __('Remote / Local', 'freesiem-sentinel'), esc_html((string) ($summary['remote_score'] ?? 'N/A')) . ' / ' . esc_html((string) ($summary['local_score'] ?? 'N/A')));
 		echo '</div>';
 
@@ -138,8 +141,8 @@ class Freesiem_Admin
 		echo '</form>';
 		echo '<p><strong>' . esc_html__('Site URL:', 'freesiem-sentinel') . '</strong> ' . esc_html(site_url('/')) . '</p>';
 		echo '<p><strong>' . esc_html__('Home URL:', 'freesiem-sentinel') . '</strong> ' . esc_html(home_url('/')) . '</p>';
-		echo '<p><strong>' . esc_html__('Last local scan:', 'freesiem-sentinel') . '</strong> ' . esc_html(freesiem_sentinel_format_datetime((string) $settings['last_local_scan_at'])) . '</p>';
-		echo '<p><strong>' . esc_html__('Last remote scan:', 'freesiem-sentinel') . '</strong> ' . esc_html(freesiem_sentinel_format_datetime((string) $settings['last_remote_scan_at'])) . '</p>';
+		$this->render_score_badges($summary, $severity_counts);
+		$this->render_notices_panel($notices);
 		echo '</div>';
 
 		echo '<div style="background:#fff;padding:20px;border:1px solid #dcdcde;border-radius:12px;">';
@@ -151,9 +154,16 @@ class Freesiem_Admin
 		echo '<p><a class="button button-secondary button-hero" href="' . esc_url($this->plugin->get_updater()->get_check_updates_url(admin_url('admin.php?page=freesiem-sentinel-about'))) . '">' . esc_html__('Check for Updates', 'freesiem-sentinel') . '</a></p>';
 		echo '<hr />';
 		echo '<h3>' . esc_html__('Severity Counts', 'freesiem-sentinel') . '</h3>';
-		echo '<p>' . esc_html(sprintf('Critical %d | High %d | Medium %d | Low %d | Info %d', (int) ($severity_counts['critical'] ?? 0), (int) ($severity_counts['high'] ?? 0), (int) ($severity_counts['medium'] ?? 0), (int) ($severity_counts['low'] ?? 0), (int) ($severity_counts['info'] ?? 0))) . '</p>';
+		$this->render_severity_counts($severity_counts);
 		if ($release !== []) {
 			echo '<p><strong>' . esc_html__('Latest release:', 'freesiem-sentinel') . '</strong> ' . esc_html((string) ($release['version'] ?? '')) . '</p>';
+		}
+		if ($filesystem !== []) {
+			echo '<hr />';
+			echo '<h3>' . esc_html__('Filesystem Scan Snapshot', 'freesiem-sentinel') . '</h3>';
+			echo '<p><strong>' . esc_html__('Inspected files:', 'freesiem-sentinel') . '</strong> ' . esc_html((string) ($filesystem['inspected_files'] ?? '0')) . '</p>';
+			echo '<p><strong>' . esc_html__('Flagged files:', 'freesiem-sentinel') . '</strong> ' . esc_html((string) ($filesystem['flagged_files'] ?? '0')) . '</p>';
+			echo '<p><strong>' . esc_html__('Partial scan:', 'freesiem-sentinel') . '</strong> ' . esc_html(!empty($filesystem['partial']) ? __('Yes', 'freesiem-sentinel') : __('No', 'freesiem-sentinel')) . '</p>';
 		}
 		echo '</div>';
 		echo '</div>';
@@ -167,23 +177,26 @@ class Freesiem_Admin
 		$findings = is_array($cache['local_findings']) ? $cache['local_findings'] : [];
 		$recommendations = is_array($cache['recommendations']) ? array_filter($cache['recommendations']) : [];
 		$top_issues = is_array($cache['top_issues']) ? $cache['top_issues'] : [];
+		$filesystem = is_array($cache['local_inventory']['filesystem'] ?? null) ? $cache['local_inventory']['filesystem'] : [];
+		$severity_counts = is_array($cache['severity_counts']) ? $cache['severity_counts'] : [];
 
 		echo '<div class="wrap">';
 		echo '<h1>' . esc_html__('Results', 'freesiem-sentinel') . '</h1>';
 		echo '<p>' . esc_html__('Local findings and the latest summary received from freeSIEM Core.', 'freesiem-sentinel') . '</p>';
 		echo '<div style="background:#fff;padding:20px;border:1px solid #dcdcde;border-radius:12px;margin-bottom:20px;">';
 		echo '<h2 style="margin-top:0;">' . esc_html__('Summary', 'freesiem-sentinel') . '</h2>';
-		echo '<p><strong>' . esc_html__('Overall score:', 'freesiem-sentinel') . '</strong> ' . esc_html((string) ($summary['overall_score'] ?? ($summary['local_score'] ?? 'N/A'))) . '</p>';
-		echo '<p><strong>' . esc_html__('Local score:', 'freesiem-sentinel') . '</strong> ' . esc_html((string) ($summary['local_score'] ?? 'N/A')) . '</p>';
-		echo '<p><strong>' . esc_html__('Remote score:', 'freesiem-sentinel') . '</strong> ' . esc_html((string) ($summary['remote_score'] ?? 'N/A')) . '</p>';
+		$this->render_score_badges($summary, $severity_counts);
 		echo '<p><strong>' . esc_html__('Fetched:', 'freesiem-sentinel') . '</strong> ' . esc_html(freesiem_sentinel_format_datetime((string) ($cache['fetched_at'] ?? ''))) . '</p>';
+		if ($filesystem !== []) {
+			echo '<p><strong>' . esc_html__('Filesystem scan:', 'freesiem-sentinel') . '</strong> ' . esc_html(sprintf(__('Inspected %1$s files, flagged %2$s, partial %3$s', 'freesiem-sentinel'), (string) ($filesystem['inspected_files'] ?? '0'), (string) ($filesystem['flagged_files'] ?? '0'), !empty($filesystem['partial']) ? __('yes', 'freesiem-sentinel') : __('no', 'freesiem-sentinel'))) . '</p>';
+		}
 		echo '</div>';
 
 		echo '<div style="display:grid;grid-template-columns:1fr 1fr;gap:20px;margin-bottom:20px;">';
 		echo '<div style="background:#fff;padding:20px;border:1px solid #dcdcde;border-radius:12px;">';
 		echo '<h2 style="margin-top:0;">' . esc_html__('Top Issues', 'freesiem-sentinel') . '</h2>';
 		if ($top_issues === []) {
-			echo '<p>' . esc_html__('No findings cached yet.', 'freesiem-sentinel') . '</p>';
+			$this->render_empty_state(__('No top issues yet', 'freesiem-sentinel'), __('Run a local scan or sync results from freeSIEM Core to populate this area.', 'freesiem-sentinel'));
 		} else {
 			echo '<ul>';
 			foreach ($top_issues as $issue) {
@@ -198,7 +211,7 @@ class Freesiem_Admin
 		echo '<div style="background:#fff;padding:20px;border:1px solid #dcdcde;border-radius:12px;">';
 		echo '<h2 style="margin-top:0;">' . esc_html__('Recommendations', 'freesiem-sentinel') . '</h2>';
 		if ($recommendations === []) {
-			echo '<p>' . esc_html__('No recommendations available yet.', 'freesiem-sentinel') . '</p>';
+			$this->render_empty_state(__('No recommendations yet', 'freesiem-sentinel'), __('Recommendations will appear here after local or remote analysis is available.', 'freesiem-sentinel'));
 		} else {
 			echo '<ul>';
 			foreach ($recommendations as $recommendation) {
@@ -212,7 +225,7 @@ class Freesiem_Admin
 		echo '<div style="background:#fff;padding:20px;border:1px solid #dcdcde;border-radius:12px;">';
 		echo '<h2 style="margin-top:0;">' . esc_html__('Findings', 'freesiem-sentinel') . '</h2>';
 		if ($findings === []) {
-			echo '<p>' . esc_html__('Run a local scan to populate findings.', 'freesiem-sentinel') . '</p>';
+			$this->render_empty_state(__('No findings cached', 'freesiem-sentinel'), __('Run a local scan to populate local findings or use Sync Results to refresh remote summary data.', 'freesiem-sentinel'));
 		} else {
 			echo '<table class="widefat striped"><thead><tr><th>' . esc_html__('Severity', 'freesiem-sentinel') . '</th><th>' . esc_html__('Title', 'freesiem-sentinel') . '</th><th>' . esc_html__('Category', 'freesiem-sentinel') . '</th><th>' . esc_html__('Recommendation', 'freesiem-sentinel') . '</th><th>' . esc_html__('Detected', 'freesiem-sentinel') . '</th></tr></thead><tbody>';
 			foreach ($findings as $finding) {
@@ -238,6 +251,7 @@ class Freesiem_Admin
 		$settings = freesiem_sentinel_get_settings();
 		$release = $this->plugin->get_updater()->get_github_release_data();
 		$release = is_wp_error($release) ? [] : $release;
+		$release_body = trim((string) ($release['body'] ?? ''));
 
 		echo '<div class="wrap">';
 		echo '<h1>' . esc_html__('About freeSIEM Sentinel', 'freesiem-sentinel') . '</h1>';
@@ -265,6 +279,14 @@ class Freesiem_Admin
 		echo '<h2 style="margin-top:0;">' . esc_html__('Updater Cache', 'freesiem-sentinel') . '</h2>';
 		echo '<pre style="white-space:pre-wrap;overflow:auto;">' . esc_html(wp_json_encode($settings['updater_cache'], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES)) . '</pre>';
 		echo '</div>';
+		echo '<div style="background:#fff;padding:20px;border:1px solid #dcdcde;border-radius:12px;margin-top:20px;">';
+		echo '<h2 style="margin-top:0;">' . esc_html__('Latest Release Notes', 'freesiem-sentinel') . '</h2>';
+		if ($release_body === '') {
+			$this->render_empty_state(__('No release notes available', 'freesiem-sentinel'), __('The latest GitHub release did not include a changelog body.', 'freesiem-sentinel'));
+		} else {
+			echo '<pre style="white-space:pre-wrap;overflow:auto;">' . esc_html($release_body) . '</pre>';
+		}
+		echo '</div>';
 		echo '</div>';
 	}
 
@@ -279,6 +301,67 @@ class Freesiem_Admin
 		echo '<p style="margin:0 0 8px;font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:#50575e;">' . esc_html($title) . '</p>';
 		echo '<p style="margin:0;font-size:24px;font-weight:600;word-break:break-word;">' . esc_html($value) . '</p>';
 		echo '<p style="margin:12px 0 0;color:#50575e;"><strong>' . esc_html($label) . ':</strong> ' . esc_html($meta) . '</p>';
+		echo '</div>';
+	}
+
+	private function render_score_badges(array $summary, array $severity_counts): void
+	{
+		echo '<div style="display:flex;flex-wrap:wrap;gap:10px;margin:16px 0;">';
+		$badges = [
+			sprintf(__('Overall %s', 'freesiem-sentinel'), (string) ($summary['overall_score'] ?? ($summary['local_score'] ?? 'N/A'))),
+			sprintf(__('Local %s', 'freesiem-sentinel'), (string) ($summary['local_score'] ?? 'N/A')),
+			sprintf(__('Remote %s', 'freesiem-sentinel'), (string) ($summary['remote_score'] ?? 'N/A')),
+			sprintf(__('High+ %d', 'freesiem-sentinel'), (int) (($severity_counts['critical'] ?? 0) + ($severity_counts['high'] ?? 0))),
+		];
+
+		foreach ($badges as $badge) {
+			echo '<span style="display:inline-flex;align-items:center;padding:6px 10px;border-radius:999px;background:#f0f6fc;border:1px solid #c3d0dd;font-weight:600;">' . esc_html($badge) . '</span>';
+		}
+
+		echo '</div>';
+	}
+
+	private function render_severity_counts(array $severity_counts): void
+	{
+		echo '<ul style="margin:0;padding-left:18px;">';
+		foreach (['critical', 'high', 'medium', 'low', 'info'] as $severity) {
+			echo '<li>' . esc_html(ucfirst($severity) . ': ' . (int) ($severity_counts[$severity] ?? 0)) . '</li>';
+		}
+		echo '</ul>';
+	}
+
+	private function render_notices_panel(array $notices): void
+	{
+		echo '<h3>' . esc_html__('Core Notices', 'freesiem-sentinel') . '</h3>';
+
+		if ($notices === []) {
+			$this->render_empty_state(__('No notices yet', 'freesiem-sentinel'), __('Heartbeat notices from freeSIEM Core will appear here.', 'freesiem-sentinel'));
+			return;
+		}
+
+		echo '<ul>';
+		foreach ($notices as $notice) {
+			if (!is_array($notice)) {
+				continue;
+			}
+
+			$type = strtoupper((string) ($notice['type'] ?? 'INFO'));
+			$message = (string) ($notice['message'] ?? '');
+
+			if ($message === '') {
+				continue;
+			}
+
+			echo '<li><strong>' . esc_html($type) . ':</strong> ' . esc_html($message) . '</li>';
+		}
+		echo '</ul>';
+	}
+
+	private function render_empty_state(string $title, string $description): void
+	{
+		echo '<div style="padding:12px 14px;border:1px dashed #c3c4c7;border-radius:8px;background:#f9f9f9;">';
+		echo '<p style="margin:0 0 6px;font-weight:600;">' . esc_html($title) . '</p>';
+		echo '<p style="margin:0;color:#50575e;">' . esc_html($description) . '</p>';
 		echo '</div>';
 	}
 

@@ -30,7 +30,7 @@ class Freesiem_Results
 	{
 		$cache = $this->get_cache();
 		$cache['fetched_at'] = freesiem_sentinel_get_iso8601_time();
-		$cache['local_findings'] = array_values($scan['findings'] ?? []);
+		$cache['local_findings'] = $this->sort_findings(array_values($scan['findings'] ?? []));
 		$cache['local_inventory'] = $scan['inventory'] ?? [];
 		$cache['severity_counts'] = $this->count_severities($cache['local_findings']);
 		$cache['summary'] = array_merge(
@@ -100,5 +100,30 @@ class Freesiem_Results
 		}
 
 		return $counts;
+	}
+
+	private function sort_findings(array $findings): array
+	{
+		usort($findings, static function (array $left, array $right): int {
+			$order = [
+				'critical' => 0,
+				'high' => 1,
+				'medium' => 2,
+				'low' => 3,
+				'info' => 4,
+			];
+			$left_severity = freesiem_sentinel_normalize_severity((string) ($left['severity'] ?? 'info'));
+			$right_severity = freesiem_sentinel_normalize_severity((string) ($right['severity'] ?? 'info'));
+			$left_rank = $order[$left_severity] ?? 4;
+			$right_rank = $order[$right_severity] ?? 4;
+
+			if ($left_rank === $right_rank) {
+				return strcmp((string) ($left['title'] ?? ''), (string) ($right['title'] ?? ''));
+			}
+
+			return $left_rank <=> $right_rank;
+		});
+
+		return $findings;
 	}
 }
