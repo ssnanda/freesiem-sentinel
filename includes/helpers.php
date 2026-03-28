@@ -32,6 +32,35 @@ function freesiem_sentinel_get_default_settings(): array
 	];
 }
 
+function freesiem_sentinel_safe_string($value): string
+{
+	if (is_string($value)) {
+		return $value;
+	}
+
+	if (is_numeric($value)) {
+		return (string) $value;
+	}
+
+	if (is_bool($value)) {
+		return $value ? '1' : '0';
+	}
+
+	return '';
+}
+
+function freesiem_sentinel_safe_array($value): array
+{
+	return is_array($value) ? $value : [];
+}
+
+function freesiem_sentinel_safe_json_pretty($value): string
+{
+	$json = wp_json_encode($value, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
+
+	return is_string($json) ? $json : '';
+}
+
 function freesiem_sentinel_get_settings(): array
 {
 	$saved = get_option(FREESIEM_SENTINEL_OPTION, []);
@@ -90,7 +119,7 @@ function freesiem_sentinel_sanitize_settings(array $settings): array
 
 function freesiem_sentinel_sanitize_backend_url(string $url): string
 {
-	$url = trim($url);
+	$url = trim(freesiem_sentinel_safe_string($url));
 	$url = $url === '' ? FREESIEM_SENTINEL_BACKEND_URL : $url;
 	$url = esc_url_raw(untrailingslashit($url));
 
@@ -111,7 +140,7 @@ function freesiem_sentinel_sanitize_backend_url(string $url): string
 
 function freesiem_sentinel_sanitize_datetime(string $value): string
 {
-	$value = trim($value);
+	$value = trim(freesiem_sentinel_safe_string($value));
 
 	if ($value === '') {
 		return '';
@@ -131,7 +160,7 @@ function freesiem_sentinel_get_iso8601_time(?int $timestamp = null): string
 
 function freesiem_sentinel_mask_secret(string $value, int $visible = 4): string
 {
-	$value = trim($value);
+	$value = trim(freesiem_sentinel_safe_string($value));
 
 	if ($value === '') {
 		return '';
@@ -272,6 +301,8 @@ function freesiem_sentinel_score_from_findings(array $findings): int
 
 function freesiem_sentinel_format_datetime(string $value): string
 {
+	$value = freesiem_sentinel_safe_string($value);
+
 	if ($value === '') {
 		return 'Never';
 	}

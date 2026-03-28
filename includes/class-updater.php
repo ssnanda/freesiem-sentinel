@@ -162,14 +162,14 @@ class Freesiem_Updater
 			'name' => 'freeSIEM Sentinel',
 			'slug' => freesiem_sentinel_get_plugin_slug(),
 			'version' => (string) ($release['version'] ?? FREESIEM_SENTINEL_VERSION),
-			'author' => '<a href="' . esc_url((string) ($release['repository_url'] ?? '')) . '">freeSIEM Sentinel</a>',
+			'author' => '<a href="' . esc_url(freesiem_sentinel_safe_string($release['repository_url'] ?? '')) . '">freeSIEM Sentinel</a>',
 			'author_profile' => (string) ($release['repository_url'] ?? ''),
 			'homepage' => (string) ($release['html_url'] ?? $release['repository_url'] ?? ''),
 			'download_link' => (string) ($release['package_url'] ?? ''),
 			'last_updated' => (string) ($release['published_at'] ?? ''),
 			'sections' => [
 				'description' => '<p>' . esc_html__('freeSIEM Sentinel updates are served from the configured GitHub releases feed.', 'freesiem-sentinel') . '</p>',
-				'changelog' => trim((string) ($release['body'] ?? '')) !== '' ? wpautop(esc_html((string) $release['body'])) : '<p>' . esc_html__('No changelog was provided in the latest release.', 'freesiem-sentinel') . '</p>',
+				'changelog' => trim(freesiem_sentinel_safe_string($release['body'] ?? '')) !== '' ? wpautop(esc_html(freesiem_sentinel_safe_string($release['body'] ?? ''))) : '<p>' . esc_html__('No changelog was provided in the latest release.', 'freesiem-sentinel') . '</p>',
 			],
 			'banners' => [],
 		];
@@ -247,6 +247,7 @@ class Freesiem_Updater
 	public function get_check_updates_url(string $redirect_to = ''): string
 	{
 		$url = add_query_arg(['action' => 'freesiem_sentinel_check_updates'], admin_url('admin-post.php'));
+		$redirect_to = freesiem_sentinel_safe_string($redirect_to);
 
 		if ($redirect_to !== '') {
 			$url = add_query_arg('redirect_to', $redirect_to, $url);
@@ -288,7 +289,7 @@ class Freesiem_Updater
 
 	private function parse_github_repository(string $value): string
 	{
-		$value = trim(preg_replace('#\.git$#i', '', $value) ?? '');
+		$value = trim(preg_replace('#\.git$#i', '', freesiem_sentinel_safe_string($value)) ?? '');
 
 		if ($value === '') {
 			return '';

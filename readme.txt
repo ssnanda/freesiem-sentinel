@@ -3,7 +3,7 @@ Contributors: freesiem
 Requires at least: 6.4
 Tested up to: 6.8
 Requires PHP: 8.1
-Stable tag: 0.0.3
+Stable tag: 0.0.4
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -46,6 +46,10 @@ That zip should contain:
 `  readme.txt`
 
 == Changelog ==
+
+= 0.0.4 =
+
+* Fix wp-admin deprecation-prone output handling and redesign the Results experience
 
 = 0.0.3 =
 
