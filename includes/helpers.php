@@ -251,7 +251,10 @@ function freesiem_sentinel_require_admin_post_nonce(): void
 
 function freesiem_sentinel_admin_post_url(string $action, array $args = []): string
 {
-	$url = add_query_arg(array_merge(['action' => $action], $args), admin_url('admin-post.php'));
+	$url = add_query_arg(
+		freesiem_sentinel_safe_query_args(array_merge(['action' => $action], $args)),
+		admin_url('admin-post.php')
+	);
 
 	return wp_nonce_url($url, FREESIEM_SENTINEL_NONCE_ACTION);
 }
@@ -259,9 +262,34 @@ function freesiem_sentinel_admin_post_url(string $action, array $args = []): str
 function freesiem_sentinel_admin_page_url(string $page, array $args = []): string
 {
 	$page = sanitize_key($page);
-	$url = add_query_arg(array_merge(['page' => $page], $args), admin_url('admin.php'));
+	$url = add_query_arg(
+		freesiem_sentinel_safe_query_args(array_merge(['page' => $page], $args)),
+		admin_url('admin.php')
+	);
 
 	return (string) $url;
+}
+
+function freesiem_sentinel_safe_query_args(array $args): array
+{
+	$safe = [];
+
+	foreach ($args as $key => $value) {
+		$key = freesiem_sentinel_safe_string($key);
+
+		if ($key === '' || $value === null) {
+			continue;
+		}
+
+		if (is_array($value)) {
+			$safe[$key] = array_values(array_map(static fn($item): string => freesiem_sentinel_safe_string($item), $value));
+			continue;
+		}
+
+		$safe[$key] = freesiem_sentinel_safe_string($value);
+	}
+
+	return $safe;
 }
 
 function freesiem_sentinel_current_user_can_manage(): bool

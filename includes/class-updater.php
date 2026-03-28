@@ -23,11 +23,11 @@ class Freesiem_Updater
 
 		return [
 			'enabled' => $repository !== '',
-			'repository' => $repository,
+			'repository' => freesiem_sentinel_safe_string($repository),
 			'branch' => $branch !== '' ? $branch : 'main',
-			'asset_name' => $asset_name,
-			'html_url' => $repository !== '' ? 'https://github.com/' . $repository : '',
-			'api_url' => $repository !== '' ? 'https://api.github.com/repos/' . $repository . '/releases/latest' : '',
+			'asset_name' => freesiem_sentinel_safe_string($asset_name),
+			'html_url' => $repository !== '' ? 'https://github.com/' . freesiem_sentinel_safe_string($repository) : '',
+			'api_url' => $repository !== '' ? 'https://api.github.com/repos/' . freesiem_sentinel_safe_string($repository) . '/releases/latest' : '',
 		];
 	}
 
@@ -178,8 +178,8 @@ class Freesiem_Updater
 	public function plugin_action_links(array $actions): array
 	{
 		$links = [
-			'check_updates' => '<a href="' . esc_url($this->get_check_updates_url(self_admin_url('plugins.php'))) . '">' . esc_html__('Check for Updates', 'freesiem-sentinel') . '</a>',
-			'about' => '<a href="' . esc_url(freesiem_sentinel_admin_page_url('freesiem-about')) . '">' . esc_html__('About', 'freesiem-sentinel') . '</a>',
+			'check_updates' => '<a href="' . esc_url(freesiem_sentinel_safe_string($this->get_check_updates_url(self_admin_url('plugins.php')))) . '">' . esc_html__('Check for Updates', 'freesiem-sentinel') . '</a>',
+			'about' => '<a href="' . esc_url(freesiem_sentinel_safe_string(freesiem_sentinel_admin_page_url('freesiem-about'))) . '">' . esc_html__('About', 'freesiem-sentinel') . '</a>',
 		];
 
 		return array_merge($links, $actions);
@@ -246,14 +246,20 @@ class Freesiem_Updater
 
 	public function get_check_updates_url(string $redirect_to = ''): string
 	{
-		$url = add_query_arg(['action' => 'freesiem_sentinel_check_updates'], admin_url('admin-post.php'));
+		$url = add_query_arg(
+			freesiem_sentinel_safe_query_args(['action' => 'freesiem_sentinel_check_updates']),
+			admin_url('admin-post.php')
+		);
 		$redirect_to = freesiem_sentinel_safe_string($redirect_to);
 
 		if ($redirect_to !== '') {
-			$url = add_query_arg('redirect_to', $redirect_to, $url);
+			$url = add_query_arg(
+				freesiem_sentinel_safe_query_args(['redirect_to' => $redirect_to]),
+				(string) $url
+			);
 		}
 
-		return wp_nonce_url($url, FREESIEM_SENTINEL_NONCE_ACTION);
+		return wp_nonce_url((string) $url, FREESIEM_SENTINEL_NONCE_ACTION);
 	}
 
 	public function get_plugin_upgrade_url(): string
@@ -266,18 +272,18 @@ class Freesiem_Updater
 
 	private function get_cache_key(array $config): string
 	{
-		return 'freesiem_sentinel_release_' . md5($config['repository'] . '|' . $config['asset_name']);
+		return 'freesiem_sentinel_release_' . md5(freesiem_sentinel_safe_string($config['repository'] ?? '') . '|' . freesiem_sentinel_safe_string($config['asset_name'] ?? ''));
 	}
 
 	private function build_update_payload(array $release): object
 	{
 		return (object) [
-			'id' => (string) ($release['html_url'] ?? ''),
+			'id' => freesiem_sentinel_safe_string($release['html_url'] ?? ''),
 			'slug' => freesiem_sentinel_get_plugin_slug(),
 			'plugin' => freesiem_sentinel_get_plugin_basename(),
-			'new_version' => (string) ($release['version'] ?? FREESIEM_SENTINEL_VERSION),
-			'url' => (string) ($release['html_url'] ?? ''),
-			'package' => (string) ($release['package_url'] ?? ''),
+			'new_version' => freesiem_sentinel_safe_string($release['version'] ?? FREESIEM_SENTINEL_VERSION),
+			'url' => freesiem_sentinel_safe_string($release['html_url'] ?? ''),
+			'package' => freesiem_sentinel_safe_string($release['package_url'] ?? ''),
 			'icons' => [],
 			'banners' => [],
 			'banners_rtl' => [],
