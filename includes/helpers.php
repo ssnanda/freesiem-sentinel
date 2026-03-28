@@ -13,6 +13,7 @@ function freesiem_sentinel_get_default_settings(): array
 		'backend_url' => FREESIEM_SENTINEL_BACKEND_URL,
 		'api_key' => '',
 		'hmac_secret' => '',
+		'plan' => 'free',
 		'registration_status' => 'unregistered',
 		'last_local_scan_at' => '',
 		'last_remote_scan_at' => '',
@@ -23,6 +24,14 @@ function freesiem_sentinel_get_default_settings(): array
 		'fim_last_diff_at' => '',
 		'fim_baseline' => [],
 		'fim_diff_cache' => [],
+		'scan_preferences' => [
+			'scan_wordpress' => 1,
+			'scan_filesystem' => 1,
+			'scan_fim' => 0,
+			'include_uploads' => 0,
+			'max_files' => 1000,
+			'max_depth' => 5,
+		],
 		'summary_cache' => [
 			'fetched_at' => '',
 			'summary' => [],
@@ -110,6 +119,7 @@ function freesiem_sentinel_sanitize_settings(array $settings): array
 	$settings['backend_url'] = freesiem_sentinel_sanitize_backend_url((string) $settings['backend_url']);
 	$settings['api_key'] = sanitize_text_field((string) $settings['api_key']);
 	$settings['hmac_secret'] = sanitize_text_field((string) $settings['hmac_secret']);
+	$settings['plan'] = in_array((string) ($settings['plan'] ?? 'free'), ['free', 'pro'], true) ? (string) $settings['plan'] : 'free';
 	$settings['registration_status'] = sanitize_key((string) $settings['registration_status']);
 	$settings['last_local_scan_at'] = freesiem_sentinel_sanitize_datetime((string) $settings['last_local_scan_at']);
 	$settings['last_remote_scan_at'] = freesiem_sentinel_sanitize_datetime((string) $settings['last_remote_scan_at']);
@@ -120,6 +130,13 @@ function freesiem_sentinel_sanitize_settings(array $settings): array
 	$settings['fim_last_diff_at'] = freesiem_sentinel_sanitize_datetime((string) $settings['fim_last_diff_at']);
 	$settings['fim_baseline'] = is_array($settings['fim_baseline']) ? $settings['fim_baseline'] : [];
 	$settings['fim_diff_cache'] = is_array($settings['fim_diff_cache']) ? $settings['fim_diff_cache'] : [];
+	$settings['scan_preferences'] = is_array($settings['scan_preferences']) ? $settings['scan_preferences'] : $defaults['scan_preferences'];
+	$settings['scan_preferences']['scan_wordpress'] = empty($settings['scan_preferences']['scan_wordpress']) ? 0 : 1;
+	$settings['scan_preferences']['scan_filesystem'] = empty($settings['scan_preferences']['scan_filesystem']) ? 0 : 1;
+	$settings['scan_preferences']['scan_fim'] = empty($settings['scan_preferences']['scan_fim']) ? 0 : 1;
+	$settings['scan_preferences']['include_uploads'] = empty($settings['scan_preferences']['include_uploads']) ? 0 : 1;
+	$settings['scan_preferences']['max_files'] = max(100, min(5000, (int) ($settings['scan_preferences']['max_files'] ?? 1000)));
+	$settings['scan_preferences']['max_depth'] = max(1, min(10, (int) ($settings['scan_preferences']['max_depth'] ?? 5)));
 
 	$settings['summary_cache'] = is_array($settings['summary_cache']) ? $settings['summary_cache'] : $defaults['summary_cache'];
 	$settings['updater_cache'] = is_array($settings['updater_cache']) ? $settings['updater_cache'] : [];
@@ -239,6 +256,14 @@ function freesiem_sentinel_admin_post_url(string $action, array $args = []): str
 	return wp_nonce_url($url, FREESIEM_SENTINEL_NONCE_ACTION);
 }
 
+function freesiem_sentinel_admin_page_url(string $page, array $args = []): string
+{
+	$page = sanitize_key($page);
+	$url = add_query_arg(array_merge(['page' => $page], $args), admin_url('admin.php'));
+
+	return (string) $url;
+}
+
 function freesiem_sentinel_current_user_can_manage(): bool
 {
 	return current_user_can('manage_options');
@@ -259,6 +284,7 @@ function freesiem_sentinel_get_allowed_remote_setting_keys(): array
 	return [
 		'backend_url',
 		'email',
+		'plan',
 	];
 }
 

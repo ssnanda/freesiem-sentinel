@@ -3,7 +3,7 @@ Contributors: freesiem
 Requires at least: 6.4
 Tested up to: 6.8
 Requires PHP: 8.1
-Stable tag: 0.0.6
+Stable tag: 0.0.7
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -46,6 +46,10 @@ That zip should contain:
 `  readme.txt`
 
 == Changelog ==
+
+= 0.0.7 =
+
+* Add feature gating and restructure the admin UI for productized freeSIEM workflows
 
 = 0.0.6 =
 

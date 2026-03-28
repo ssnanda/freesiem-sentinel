@@ -10,12 +10,22 @@ class Freesiem_Scanner
 	private const MAX_DEPTH = 5;
 	private const MAX_HASHED_FILES = 500;
 	private const MAX_STORED_DIFFS = 200;
+	private int $max_files = self::MAX_FILES;
+	private int $max_depth = self::MAX_DEPTH;
+	private int $max_hashed_files = self::MAX_HASHED_FILES;
+	private bool $include_uploads = false;
+	private bool $scan_wordpress = true;
+	private bool $scan_filesystem_enabled = true;
+	private bool $scan_fim_enabled = false;
+	private bool $filesystem_advanced_enabled = false;
 
-	public function run(): array
+	public function run(array $options = []): array
 	{
 		if (!function_exists('get_plugin_updates')) {
 			require_once ABSPATH . 'wp-admin/includes/update.php';
 		}
+
+		$this->apply_scan_preferences($options);
 
 		wp_version_check();
 		wp_update_plugins();
@@ -24,11 +34,32 @@ class Freesiem_Scanner
 		$metadata = $this->build_metadata();
 		$inventory = $this->build_inventory();
 		$filesystem = $this->scan_filesystem();
-		$integrity = $this->run_file_integrity_monitor($filesystem['flagged_files']);
+		$integrity = $this->scan_fim_enabled ? $this->run_file_integrity_monitor($filesystem['flagged_files']) : [
+			'summary' => [
+				'enabled' => false,
+				'baseline_created' => false,
+				'partial' => false,
+				'hashed_files' => 0,
+				'new_files_count' => 0,
+				'modified_files_count' => 0,
+				'deleted_files_count' => 0,
+				'last_baseline_at' => '',
+				'last_diff_at' => '',
+			],
+			'findings' => [],
+		];
 
 		$inventory['filesystem'] = $filesystem['summary'];
 		$inventory['filesystem_flagged_files'] = $filesystem['flagged_files'];
 		$inventory['file_integrity'] = $integrity['summary'];
+		$inventory['scan_profile'] = [
+			'scan_wordpress' => $this->scan_wordpress,
+			'scan_filesystem' => $this->scan_filesystem_enabled,
+			'scan_fim' => $this->scan_fim_enabled,
+			'include_uploads' => $this->include_uploads,
+			'max_files' => $this->max_files,
+			'max_depth' => $this->max_depth,
+		];
 
 		$findings = array_merge(
 			$this->collect_findings($metadata, $inventory),
@@ -45,6 +76,22 @@ class Freesiem_Scanner
 			],
 			'score' => freesiem_sentinel_score_from_findings($findings),
 		];
+	}
+
+	private function apply_scan_preferences(array $options): void
+	{
+		$settings = freesiem_sentinel_get_settings();
+		$saved = freesiem_sentinel_safe_array($settings['scan_preferences'] ?? []);
+		$resolved = wp_parse_args($options, $saved);
+
+		$this->scan_wordpress = !empty($resolved['scan_wordpress']);
+		$this->scan_filesystem_enabled = !empty($resolved['scan_filesystem']) && Freesiem_Features::is_enabled('filesystem_basic');
+		$this->filesystem_advanced_enabled = Freesiem_Features::is_enabled('filesystem_advanced');
+		$this->scan_fim_enabled = !empty($resolved['scan_fim']) && Freesiem_Features::is_enabled('fim');
+		$this->include_uploads = !empty($resolved['include_uploads']);
+		$this->max_files = max(100, min(5000, (int) ($resolved['max_files'] ?? self::MAX_FILES)));
+		$this->max_depth = max(1, min(10, (int) ($resolved['max_depth'] ?? self::MAX_DEPTH)));
+		$this->max_hashed_files = max(100, min(self::MAX_HASHED_FILES, $this->max_files));
 	}
 
 	private function build_metadata(): array
@@ -147,6 +194,10 @@ class Freesiem_Scanner
 
 	private function collect_findings(array $metadata, array $inventory): array
 	{
+		if (!$this->scan_wordpress) {
+			return [];
+		}
+
 		global $wpdb;
 
 		$findings = [];
@@ -252,26 +303,46 @@ class Freesiem_Scanner
 
 	private function scan_filesystem(): array
 	{
+		if (!$this->scan_filesystem_enabled) {
+			return [
+				'summary' => [
+					'targets' => [],
+					'max_files' => $this->max_files,
+					'max_depth' => $this->max_depth,
+					'inspected_files' => 0,
+					'visited_directories' => 0,
+					'flagged_files' => 0,
+					'partial' => false,
+					'unreadable_paths' => [],
+					'skipped_directories' => [],
+					'enabled' => false,
+				],
+				'findings' => [],
+				'flagged_files' => [],
+			];
+		}
+
 		$targets = $this->get_scan_targets();
 		$summary = [
 			'targets' => array_values(array_map(static fn(array $target): array => [
 				'label' => $target['label'],
 				'path' => $target['path'],
 			], $targets)),
-			'max_files' => self::MAX_FILES,
-			'max_depth' => self::MAX_DEPTH,
+			'max_files' => $this->max_files,
+			'max_depth' => $this->max_depth,
 			'inspected_files' => 0,
 			'visited_directories' => 0,
 			'flagged_files' => 0,
 			'partial' => false,
 			'unreadable_paths' => [],
 			'skipped_directories' => [],
+			'enabled' => true,
 		];
 		$findings = [];
 		$flagged_files = [];
 
 		foreach ($targets as $target) {
-			if ($summary['inspected_files'] >= self::MAX_FILES) {
+			if ($summary['inspected_files'] >= $this->max_files) {
 				$summary['partial'] = true;
 				break;
 			}
@@ -400,7 +471,7 @@ class Freesiem_Scanner
 		$this->hash_root_files($summary, $snapshot);
 
 		foreach ($this->get_integrity_targets() as $target) {
-			if ($summary['hashed_files'] >= self::MAX_HASHED_FILES) {
+			if ($summary['hashed_files'] >= $this->max_hashed_files) {
 				$summary['partial'] = true;
 				break;
 			}
@@ -419,7 +490,7 @@ class Freesiem_Scanner
 				continue;
 			}
 
-			if ($summary['hashed_files'] >= self::MAX_HASHED_FILES) {
+			if ($summary['hashed_files'] >= $this->max_hashed_files) {
 				$summary['partial'] = true;
 				break;
 			}
@@ -610,7 +681,7 @@ class Freesiem_Scanner
 				continue;
 			}
 
-			if ($summary['hashed_files'] >= self::MAX_HASHED_FILES) {
+			if ($summary['hashed_files'] >= $this->max_hashed_files) {
 				$summary['partial'] = true;
 				return;
 			}
@@ -628,7 +699,7 @@ class Freesiem_Scanner
 
 	private function hash_path(string $path, int $depth, array &$summary, array &$snapshot): void
 	{
-		if ($summary['hashed_files'] >= self::MAX_HASHED_FILES) {
+		if ($summary['hashed_files'] >= $this->max_hashed_files) {
 			$summary['partial'] = true;
 			return;
 		}
@@ -670,7 +741,7 @@ class Freesiem_Scanner
 			$current = $path . DIRECTORY_SEPARATOR . $item;
 
 			if (is_dir($current)) {
-				if ($depth >= self::MAX_DEPTH) {
+				if ($depth >= $this->max_depth) {
 					$summary['partial'] = true;
 					continue;
 				}
@@ -684,7 +755,7 @@ class Freesiem_Scanner
 				continue;
 			}
 
-			if ($summary['hashed_files'] >= self::MAX_HASHED_FILES) {
+			if ($summary['hashed_files'] >= $this->max_hashed_files) {
 				$summary['partial'] = true;
 				return;
 			}
@@ -725,7 +796,7 @@ class Freesiem_Scanner
 
 	private function scan_path(string $path, string $target_label, int $depth, array &$summary, array &$findings, array &$flagged_files): void
 	{
-		if ($summary['inspected_files'] >= self::MAX_FILES) {
+		if ($summary['inspected_files'] >= $this->max_files) {
 			$summary['partial'] = true;
 			return;
 		}
@@ -735,7 +806,7 @@ class Freesiem_Scanner
 		}
 
 		if (is_file($path)) {
-			if ($summary['inspected_files'] >= self::MAX_FILES) {
+			if ($summary['inspected_files'] >= $this->max_files) {
 				$summary['partial'] = true;
 				return;
 			}
@@ -767,7 +838,7 @@ class Freesiem_Scanner
 			$current = $path . DIRECTORY_SEPARATOR . $item;
 
 			if (is_dir($current)) {
-				if ($depth >= self::MAX_DEPTH) {
+				if ($depth >= $this->max_depth) {
 					$summary['partial'] = true;
 					continue;
 				}
@@ -781,7 +852,7 @@ class Freesiem_Scanner
 				continue;
 			}
 
-			if ($summary['inspected_files'] >= self::MAX_FILES) {
+			if ($summary['inspected_files'] >= $this->max_files) {
 				$summary['partial'] = true;
 				return;
 			}
@@ -837,27 +908,35 @@ class Freesiem_Scanner
 		}
 
 		if ($in_uploads && $extension === 'php' && $size > 512000) {
-			$reasons[] = 'Large PHP file in uploads directory';
-			$severity = 'high';
-			$score = min($score, 57);
+			if ($this->filesystem_advanced_enabled) {
+				$reasons[] = 'Large PHP file in uploads directory';
+				$severity = 'high';
+				$score = min($score, 57);
+			}
 		}
 
 		if ($in_uploads && preg_match('/\.(jpg|jpeg|png|gif|svg|ico)\.(php|phtml)$/i', $basename)) {
-			$reasons[] = 'Suspicious extension mismatch in uploads';
-			$severity = 'critical';
-			$score = min($score, 40);
+			if ($this->filesystem_advanced_enabled) {
+				$reasons[] = 'Suspicious extension mismatch in uploads';
+				$severity = 'critical';
+				$score = min($score, 40);
+			}
 		}
 
 		if ($extension === 'php' && (strlen($basename) > 35 || preg_match('/^[a-f0-9]{16,}\.php$/i', $basename))) {
-			$reasons[] = 'Oddly named or random-looking PHP filename';
-			$severity = $severity === 'critical' ? 'critical' : 'high';
-			$score = min($score, 62);
+			if ($this->filesystem_advanced_enabled) {
+				$reasons[] = 'Oddly named or random-looking PHP filename';
+				$severity = $severity === 'critical' ? 'critical' : 'high';
+				$score = min($score, 62);
+			}
 		}
 
 		if ($is_writable && in_array($basename, ['wp-config.php', '.env', 'debug.log', 'error_log'], true)) {
-			$reasons[] = 'Sensitive file is writable by the current process';
-			$severity = $severity === 'critical' ? 'critical' : 'medium';
-			$score = min($score, 73);
+			if ($this->filesystem_advanced_enabled) {
+				$reasons[] = 'Sensitive file is writable by the current process';
+				$severity = $severity === 'critical' ? 'critical' : 'medium';
+				$score = min($score, 73);
+			}
 		}
 
 		if ($reasons === []) {
@@ -894,10 +973,13 @@ class Freesiem_Scanner
 			['label' => 'wp-admin', 'path' => untrailingslashit(ABSPATH) . '/wp-admin'],
 			['label' => 'wp-includes', 'path' => untrailingslashit(ABSPATH) . '/wp-includes'],
 			['label' => 'wp-content', 'path' => WP_CONTENT_DIR],
-			['label' => 'uploads', 'path' => WP_CONTENT_DIR . '/uploads'],
 			['label' => 'plugins', 'path' => WP_PLUGIN_DIR],
 			['label' => 'themes', 'path' => get_theme_root()],
 		];
+
+		if ($this->include_uploads) {
+			$targets[] = ['label' => 'uploads', 'path' => WP_CONTENT_DIR . '/uploads'];
+		}
 
 		if (defined('WPMU_PLUGIN_DIR')) {
 			$targets[] = ['label' => 'mu-plugins', 'path' => WPMU_PLUGIN_DIR];

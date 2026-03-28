@@ -153,7 +153,12 @@ class Freesiem_Plugin
 
 	public function run_local_scan(bool $upload = true)
 	{
-		$scan = $this->scanner->run();
+		return $this->run_local_scan_with_options($upload, []);
+	}
+
+	public function run_local_scan_with_options(bool $upload = true, array $options = [])
+	{
+		$scan = $this->scanner->run($options);
 		$this->results->store_local_scan($scan);
 
 		if (!$upload) {
@@ -246,6 +251,11 @@ class Freesiem_Plugin
 		return $this->register_site($email);
 	}
 
+	public function test_connection()
+	{
+		return $this->api_client->test_connection();
+	}
+
 	public function apply_remote_settings(array $payload)
 	{
 		$allowed_keys = freesiem_sentinel_get_allowed_remote_setting_keys();
@@ -284,6 +294,11 @@ class Freesiem_Plugin
 	public function get_updater(): Freesiem_Updater
 	{
 		return $this->updater;
+	}
+
+	public function get_plan(): string
+	{
+		return Freesiem_Features::get_plan();
 	}
 
 	private function bootstrap_settings(): void
