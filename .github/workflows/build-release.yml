@@ -1,13 +1,17 @@
-name: Build Plugin Zip
+name: Build And Release Plugin
 
 on:
-  workflow_dispatch:
-  release:
-    types: [published]
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
 
 jobs:
-  build-zip:
+  build-release:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -23,8 +27,9 @@ jobs:
           cd dist
           zip -r freesiem-sentinel.zip freesiem-sentinel
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
         with:
-          name: freesiem-sentinel-zip
-          path: dist/freesiem-sentinel.zip
+          files: dist/freesiem-sentinel.zip
+          generate_release_notes: false
+          append_body: false

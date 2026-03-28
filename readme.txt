@@ -3,7 +3,7 @@ Contributors: freesiem
 Requires at least: 6.4
 Tested up to: 6.8
 Requires PHP: 8.1
-Stable tag: 0.1.0
+Stable tag: 0.1.1
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -47,16 +47,32 @@ That zip should contain:
 
 = Release Packaging =
 
-1. Create a GitHub Release for `ssnanda/freesiem-sentinel`.
-2. Attach a ZIP asset named `freesiem-sentinel.zip`.
-3. Ensure the ZIP contains:
+GitHub Releases are the distribution source for freeSIEM Sentinel.
+
+1. Bump the plugin version in `freesiem-sentinel.php` and `readme.txt`.
+2. Commit and push `main`.
+3. Create a matching git tag such as `v0.1.1`.
+4. Push the tag to GitHub.
+5. GitHub Actions will automatically build and publish the ZIP asset for that release.
+
+The release ZIP asset must be named `freesiem-sentinel.zip`.
+
+The ZIP must contain the plugin folder at the top level:
 
 `freesiem-sentinel/`
 `  freesiem-sentinel.php`
 `  includes/`
 `  readme.txt`
 
+Version bumps should always have matching git tags.
+
+GitHub Actions publishes the ZIP automatically when a `v*` tag is pushed.
+
 == Changelog ==
+
+= 0.1.1 =
+
+* Automate GitHub Release publishing from version tags and matching plugin ZIP packaging
 
 = 0.1.0 =
 
