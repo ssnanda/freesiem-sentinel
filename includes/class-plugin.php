@@ -159,6 +159,7 @@ class Freesiem_Plugin
 	public function run_local_scan_with_options(bool $upload = true, array $options = [])
 	{
 		error_log('[freeSIEM] local scan started');
+		$started_at = microtime(true);
 
 		try {
 			$scan = $this->scanner->run($options);
@@ -179,10 +180,22 @@ class Freesiem_Plugin
 		}
 
 		error_log('[freeSIEM] scan completed');
+		$duration_seconds = round(max(0, microtime(true) - $started_at), 2);
 
 		if (!empty($scan['status']) && $scan['status'] === 'error') {
 			return $scan;
 		}
+
+		$filesystem = is_array($scan['inventory']['filesystem'] ?? null) ? $scan['inventory']['filesystem'] : [];
+		$scan_profile = is_array($scan['inventory']['scan_profile'] ?? null) ? $scan['inventory']['scan_profile'] : [];
+		$scan['summary'] = [
+			'files_discovered' => (int) ($filesystem['discovered_files'] ?? 0),
+			'files_analyzed' => (int) ($filesystem['inspected_files'] ?? 0),
+			'files_flagged' => (int) ($filesystem['flagged_files'] ?? 0),
+			'duration_seconds' => $duration_seconds,
+			'scan_modules' => $this->derive_scan_modules($scan_profile),
+		];
+		$scan['inventory']['scan_metrics'] = $scan['summary'];
 
 		$this->results->store_local_scan($scan);
 
@@ -331,6 +344,11 @@ class Freesiem_Plugin
 		return Freesiem_Features::get_plan();
 	}
 
+	public function clear_scan_results(): array
+	{
+		return $this->results->clear_scan_results();
+	}
+
 	private function bootstrap_settings(): void
 	{
 		$settings = freesiem_sentinel_get_settings();
@@ -360,5 +378,22 @@ class Freesiem_Plugin
 	private function refresh_runtime_clients(array $settings): void
 	{
 		$this->api_client = new Freesiem_API_Client($settings);
+	}
+
+	private function derive_scan_modules(array $scan_profile): array
+	{
+		$modules = [];
+
+		if (!empty($scan_profile['scan_wordpress'])) {
+			$modules[] = 'WordPress Config';
+		}
+		if (!empty($scan_profile['scan_filesystem'])) {
+			$modules[] = 'Filesystem';
+		}
+		if (!empty($scan_profile['scan_fim'])) {
+			$modules[] = 'File Integrity';
+		}
+
+		return $modules;
 	}
 }

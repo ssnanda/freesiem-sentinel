@@ -29,6 +29,7 @@ class Freesiem_Results
 	public function store_local_scan(array $scan): array
 	{
 		$cache = $this->get_cache();
+		$scan_summary = is_array($scan['summary'] ?? null) ? $scan['summary'] : [];
 		$cache['fetched_at'] = freesiem_sentinel_get_iso8601_time();
 		$cache['local_findings'] = $this->sort_findings(array_values($scan['findings'] ?? []));
 		$cache['local_inventory'] = $scan['inventory'] ?? [];
@@ -38,6 +39,11 @@ class Freesiem_Results
 			[
 				'local_score' => (int) ($scan['score'] ?? freesiem_sentinel_score_from_findings($cache['local_findings'])),
 				'last_local_scan_at' => freesiem_sentinel_get_iso8601_time(),
+				'files_discovered' => (int) ($scan_summary['files_discovered'] ?? 0),
+				'files_analyzed' => (int) ($scan_summary['files_analyzed'] ?? 0),
+				'files_flagged' => (int) ($scan_summary['files_flagged'] ?? 0),
+				'duration_seconds' => isset($scan_summary['duration_seconds']) ? (float) $scan_summary['duration_seconds'] : 0,
+				'scan_modules' => array_values(is_array($scan_summary['scan_modules'] ?? null) ? $scan_summary['scan_modules'] : []),
 			]
 		);
 		$cache['top_issues'] = array_slice($cache['local_findings'], 0, 5);
@@ -51,6 +57,23 @@ class Freesiem_Results
 		]);
 
 		return $cache;
+	}
+
+	public function clear_scan_results(): array
+	{
+		$defaults = freesiem_sentinel_get_default_settings();
+		$empty_cache = is_array($defaults['summary_cache'] ?? null) ? $defaults['summary_cache'] : [];
+
+		freesiem_sentinel_update_settings([
+			'last_local_scan_at' => '',
+			'last_remote_scan_at' => '',
+			'last_sync_at' => '',
+			'fim_last_diff_at' => '',
+			'fim_diff_cache' => [],
+			'summary_cache' => $empty_cache,
+		]);
+
+		return $this->get_cache();
 	}
 
 	public function store_remote_summary(array $summary): array

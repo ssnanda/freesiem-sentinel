@@ -19,6 +19,7 @@ class Freesiem_Admin
 		add_action('admin_notices', 'freesiem_sentinel_render_notices');
 		add_action('admin_post_freesiem_sentinel_save_settings', [$this, 'handle_save_settings']);
 		add_action('admin_post_freesiem_sentinel_run_configured_scan', [$this, 'handle_run_configured_scan']);
+		add_action('admin_post_freesiem_sentinel_clear_results', [$this, 'handle_clear_results']);
 		add_action('admin_post_freesiem_sentinel_request_remote_scan', [$this, 'handle_request_remote_scan']);
 		add_action('admin_post_freesiem_sentinel_sync_results', [$this, 'handle_sync_results']);
 		add_action('admin_post_freesiem_sentinel_reconnect', [$this, 'handle_reconnect']);
@@ -97,6 +98,15 @@ class Freesiem_Admin
 		$result = $this->plugin->request_remote_scan();
 		freesiem_sentinel_set_notice(is_wp_error($result) ? 'error' : 'success', is_wp_error($result) ? $result->get_error_message() : __('Remote scan request sent.', 'freesiem-sentinel'));
 		$this->redirect_to_page('freesiem-remote');
+	}
+
+	public function handle_clear_results(): void
+	{
+		$this->assert_manage_permissions();
+		freesiem_sentinel_require_admin_post_nonce();
+		$this->plugin->clear_scan_results();
+		freesiem_sentinel_set_notice('success', __('Stored scan results were cleared.', 'freesiem-sentinel'));
+		$this->redirect_to_page('freesiem-scan');
 	}
 
 	public function handle_sync_results(): void
@@ -245,6 +255,18 @@ class Freesiem_Admin
 		$summary = $view['summary'];
 		$filesystem = $view['filesystem'];
 		$scan_profile = freesiem_sentinel_safe_array($view['inventory']['scan_profile'] ?? []);
+		$scan_metrics = array_merge(
+			[
+				'files_discovered' => '',
+				'files_analyzed' => '',
+				'files_flagged' => '',
+				'duration_seconds' => '',
+				'scan_modules' => [],
+			],
+			freesiem_sentinel_safe_array($summary),
+			freesiem_sentinel_safe_array($view['inventory']['scan_metrics'] ?? [])
+		);
+		$clear_results_url = freesiem_sentinel_admin_post_url('freesiem_sentinel_clear_results');
 
 		echo '<div class="wrap">';
 		echo '<h1>' . esc_html__('Scan', 'freesiem-sentinel') . '</h1>';
@@ -281,17 +303,20 @@ class Freesiem_Admin
 			echo '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;">';
 			$this->render_summary_stat(__('Last Scan Time', 'freesiem-sentinel'), freesiem_sentinel_format_datetime((string) ($settings['last_local_scan_at'] ?? '')));
 			$this->render_summary_stat(__('Overall Score', 'freesiem-sentinel'), $this->summary_value_or_fallback($summary['overall_score'] ?? ($summary['local_score'] ?? ''), false));
-			$this->render_summary_stat(__('Files Discovered', 'freesiem-sentinel'), $this->summary_value_or_fallback($filesystem['discovered_files'] ?? '', false));
-			$this->render_summary_stat(__('Files Analyzed', 'freesiem-sentinel'), $this->summary_value_or_fallback($filesystem['inspected_files'] ?? '', false));
-			$this->render_summary_stat(__('Flagged Files', 'freesiem-sentinel'), $this->summary_value_or_fallback($filesystem['flagged_files'] ?? '', false));
+			$this->render_summary_stat(__('Files Discovered', 'freesiem-sentinel'), $this->summary_value_or_fallback($scan_metrics['files_discovered'] ?? ($filesystem['discovered_files'] ?? ''), false));
+			$this->render_summary_stat(__('Files Analyzed', 'freesiem-sentinel'), $this->summary_value_or_fallback($scan_metrics['files_analyzed'] ?? ($filesystem['inspected_files'] ?? ''), false));
+			$this->render_summary_stat(__('Flagged Files', 'freesiem-sentinel'), $this->summary_value_or_fallback($scan_metrics['files_flagged'] ?? ($filesystem['flagged_files'] ?? ''), false));
+			$this->render_summary_stat(__('Scan Duration', 'freesiem-sentinel'), $this->format_duration($scan_metrics['duration_seconds'] ?? ''));
 			echo '</div>';
-			if (!empty($scan_profile)) {
-				echo '<p style="margin:16px 0 0;color:#50575e;"><strong>' . esc_html__('Scan Modules Used', 'freesiem-sentinel') . ':</strong> ' . esc_html($this->format_scan_modules($scan_profile)) . '</p>';
+			if (!empty($scan_metrics['scan_modules']) || !empty($scan_profile)) {
+				echo '<p style="margin:16px 0 0;color:#50575e;"><strong>' . esc_html__('Scan Modules Used', 'freesiem-sentinel') . ':</strong> ' . esc_html($this->format_scan_modules(!empty($scan_metrics['scan_modules']) ? ['scan_modules' => $scan_metrics['scan_modules']] : $scan_profile)) . '</p>';
 			}
 			if (!empty($filesystem['partial'])) {
 				echo '<p style="margin:10px 0 0;color:#50575e;">' . esc_html__('Some directories were skipped or capped by the current scan limits.', 'freesiem-sentinel') . '</p>';
 			}
-			echo '<p style="margin:16px 0 0;"><a class="button button-secondary" href="' . esc_url($this->build_scan_url(['show_results' => '1']) . '#freesiem-results-section') . '">' . esc_html__('View Scan Results', 'freesiem-sentinel') . '</a></p>';
+			echo '<p style="margin:16px 0 0;display:flex;gap:10px;flex-wrap:wrap;"><a class="button button-secondary" href="' . esc_url($this->build_scan_url(['show_results' => '1']) . '#freesiem-results-section') . '">' . esc_html__('View Scan Results', 'freesiem-sentinel') . '</a><a class="button button-secondary" onclick="return confirm(\''
+				. esc_js(__('Clear the stored scan results and findings?', 'freesiem-sentinel'))
+				. '\');" href="' . esc_url($clear_results_url) . '">' . esc_html__('Clear Results', 'freesiem-sentinel') . '</a></p>';
 		}
 		echo '</div>';
 
@@ -421,12 +446,29 @@ class Freesiem_Admin
 		$search = $view['search'];
 		$selected_severities = $view['selected_severities'];
 		$finding = $view['finding'];
+		$clear_results_url = freesiem_sentinel_admin_post_url('freesiem_sentinel_clear_results');
+		$active_change_type = freesiem_sentinel_safe_string($view['change_filters']['change_type'] ?? '');
+		$active_change_path = freesiem_sentinel_safe_string($view['change_filters']['change_path'] ?? '');
+		$scan_metrics = array_merge(
+			[
+				'files_discovered' => '',
+				'files_analyzed' => '',
+				'files_flagged' => '',
+				'duration_seconds' => '',
+				'scan_modules' => [],
+			],
+			freesiem_sentinel_safe_array($view['summary']),
+			freesiem_sentinel_safe_array($view['inventory']['scan_metrics'] ?? [])
+		);
 
 		echo '<div id="freesiem-results-section" style="background:#fff;padding:24px;border:1px solid #dcdcde;border-radius:16px;">';
 		echo '<div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:20px;">';
 		echo '<h2 style="margin:0;">' . esc_html__('Scan Results', 'freesiem-sentinel') . '</h2>';
 		echo '<div style="display:flex;gap:10px;flex-wrap:wrap;">';
 		echo '<a class="button button-primary" href="' . esc_url(freesiem_sentinel_admin_page_url('freesiem-scan')) . '">' . esc_html__('Run Scan Again', 'freesiem-sentinel') . '</a>';
+		echo '<a class="button button-secondary" onclick="return confirm(\''
+			. esc_js(__('Clear the stored scan results and findings?', 'freesiem-sentinel'))
+			. '\');" href="' . esc_url($clear_results_url) . '">' . esc_html__('Clear Results', 'freesiem-sentinel') . '</a>';
 		echo '</div>';
 		echo '</div>';
 
@@ -442,9 +484,12 @@ class Freesiem_Admin
 		if ($all_findings === [] && empty($view['settings']['last_local_scan_at'])) {
 			$this->render_empty_state(__('No scan has been run yet.', 'freesiem-sentinel'), __('Run a scan to populate findings and file change details.', 'freesiem-sentinel'));
 		} else {
-			echo '<p><strong>' . esc_html__('Files analyzed', 'freesiem-sentinel') . ':</strong> ' . esc_html($this->summary_value_or_fallback($filesystem['inspected_files'] ?? '', false)) . '</p>';
-			echo '<p><strong>' . esc_html__('Flagged files', 'freesiem-sentinel') . ':</strong> ' . esc_html($this->summary_value_or_fallback($filesystem['flagged_files'] ?? '', false)) . '</p>';
+			echo '<p><strong>' . esc_html__('Files discovered', 'freesiem-sentinel') . ':</strong> ' . esc_html($this->summary_value_or_fallback($scan_metrics['files_discovered'] ?? ($filesystem['discovered_files'] ?? ''), false)) . '</p>';
+			echo '<p><strong>' . esc_html__('Files analyzed', 'freesiem-sentinel') . ':</strong> ' . esc_html($this->summary_value_or_fallback($scan_metrics['files_analyzed'] ?? ($filesystem['inspected_files'] ?? ''), false)) . '</p>';
+			echo '<p><strong>' . esc_html__('Flagged files', 'freesiem-sentinel') . ':</strong> ' . esc_html($this->summary_value_or_fallback($scan_metrics['files_flagged'] ?? ($filesystem['flagged_files'] ?? ''), false)) . '</p>';
+			echo '<p><strong>' . esc_html__('Scan duration', 'freesiem-sentinel') . ':</strong> ' . esc_html($this->format_duration($scan_metrics['duration_seconds'] ?? '')) . '</p>';
 			echo '<p><strong>' . esc_html__('File integrity changes', 'freesiem-sentinel') . ':</strong> ' . esc_html(sprintf('%s new, %s modified, %s deleted', safe($integrity['new_files_count'] ?? '0'), safe($integrity['modified_files_count'] ?? '0'), safe($integrity['deleted_files_count'] ?? '0'))) . '</p>';
+			echo '<p><strong>' . esc_html__('Scan modules used', 'freesiem-sentinel') . ':</strong> ' . esc_html($this->format_scan_modules(!empty($scan_metrics['scan_modules']) ? ['scan_modules' => $scan_metrics['scan_modules']] : freesiem_sentinel_safe_array($view['inventory']['scan_profile'] ?? []))) . '</p>';
 		}
 		echo '</div>';
 
@@ -453,15 +498,35 @@ class Freesiem_Admin
 		if ($integrity_changes === []) {
 			$this->render_empty_state(__('No file changes detected in the latest scan.', 'freesiem-sentinel'), __('File additions, deletions, and monitored updates will appear here after a scan finds them.', 'freesiem-sentinel'));
 		} else {
+			if ($active_change_type !== '' || $active_change_path !== '') {
+				echo '<p style="margin-top:0;"><strong>' . esc_html__('Active filters', 'freesiem-sentinel') . ':</strong> ';
+				if ($active_change_type !== '') {
+					echo '<code>' . esc_html($active_change_type) . '</code> ';
+				}
+				if ($active_change_path !== '') {
+					echo '<code>' . esc_html($active_change_path) . '</code> ';
+				}
+				echo '<a href="' . esc_url($this->build_scan_url(['show_results' => '1']) . '#freesiem-results-section') . '">' . esc_html__('Clear file filters', 'freesiem-sentinel') . '</a></p>';
+			}
 			echo '<table class="widefat striped"><thead><tr><th>' . esc_html__('Change', 'freesiem-sentinel') . '</th><th>' . esc_html__('Path', 'freesiem-sentinel') . '</th><th>' . esc_html__('Hash', 'freesiem-sentinel') . '</th></tr></thead><tbody>';
 			foreach (array_slice($integrity_changes, 0, 5) as $change) {
 				$change_type = freesiem_sentinel_safe_string($change['change_type'] ?? 'modified');
 				$path = freesiem_sentinel_safe_string($change['path'] ?? '');
 				$current_hash = freesiem_sentinel_safe_string($change['current_hash'] ?? '');
 				$previous_hash = freesiem_sentinel_safe_string($change['previous_hash'] ?? '');
+				$change_type_url = $this->build_scan_url([
+					'show_results' => '1',
+					'change_type' => $change_type,
+					'change_path' => $active_change_path,
+				]) . '#freesiem-results-section';
+				$path_url = $this->build_scan_url([
+					'show_results' => '1',
+					'change_type' => $active_change_type,
+					'change_path' => $path,
+				]) . '#freesiem-results-section';
 				echo '<tr>';
-				echo '<td><span style="' . esc_attr($this->change_badge_style($change_type)) . '">' . esc_html(ucfirst($change_type)) . '</span></td>';
-				echo '<td><code>' . esc_html($path) . '</code></td>';
+				echo '<td><a href="' . esc_url($change_type_url) . '" style="text-decoration:none;"><span style="' . esc_attr($this->change_badge_style($change_type)) . '">' . esc_html(ucfirst($change_type)) . '</span></a></td>';
+				echo '<td><a href="' . esc_url($path_url) . '" style="text-decoration:none;"><code>' . esc_html($path) . '</code></a></td>';
 				echo '<td><code>' . esc_html($current_hash !== '' ? substr($current_hash, 0, 16) : substr($previous_hash, 0, 16)) . '</code></td>';
 				echo '</tr>';
 			}
@@ -533,6 +598,11 @@ class Freesiem_Admin
 		$finding = $finding_ref !== '' ? $this->find_finding_by_reference($all_findings, $finding_ref) : null;
 		$fim_diff_cache = freesiem_sentinel_safe_array($settings['fim_diff_cache'] ?? []);
 		$integrity_changes = array_values(array_filter(freesiem_sentinel_safe_array($fim_diff_cache['changes'] ?? []), 'is_array'));
+		$change_filters = [
+			'change_type' => isset($_GET['change_type']) ? sanitize_key(wp_unslash((string) $_GET['change_type'])) : '',
+			'change_path' => isset($_GET['change_path']) ? sanitize_text_field(wp_unslash((string) $_GET['change_path'])) : '',
+		];
+		$integrity_changes = $this->filter_integrity_changes($integrity_changes, $change_filters);
 
 		return [
 			'settings' => $settings,
@@ -547,6 +617,7 @@ class Freesiem_Admin
 			'selected_severities' => $selected_severities,
 			'finding' => $finding,
 			'integrity_changes' => $integrity_changes,
+			'change_filters' => $change_filters,
 		];
 	}
 
@@ -793,6 +864,10 @@ class Freesiem_Admin
 
 	private function format_scan_modules(array $scan_profile): string
 	{
+		if (!empty($scan_profile['scan_modules']) && is_array($scan_profile['scan_modules'])) {
+			return implode(', ', array_map('freesiem_sentinel_safe_string', $scan_profile['scan_modules']));
+		}
+
 		$labels = [];
 
 		if (!empty($scan_profile['scan_wordpress'])) {
@@ -806,6 +881,43 @@ class Freesiem_Admin
 		}
 
 		return $labels === [] ? __('No modules selected', 'freesiem-sentinel') : implode(', ', $labels);
+	}
+
+	private function filter_integrity_changes(array $changes, array $filters): array
+	{
+		$change_type = freesiem_sentinel_safe_string($filters['change_type'] ?? '');
+		$change_path = freesiem_sentinel_safe_string($filters['change_path'] ?? '');
+
+		return array_values(array_filter($changes, static function ($change) use ($change_type, $change_path): bool {
+			if (!is_array($change)) {
+				return false;
+			}
+
+			if ($change_type !== '' && freesiem_sentinel_safe_string($change['change_type'] ?? '') !== $change_type) {
+				return false;
+			}
+
+			if ($change_path !== '' && freesiem_sentinel_safe_string($change['path'] ?? '') !== $change_path) {
+				return false;
+			}
+
+			return true;
+		}));
+	}
+
+	private function format_duration($duration): string
+	{
+		if ($duration === '' || $duration === null) {
+			return __('No scan yet', 'freesiem-sentinel');
+		}
+
+		$duration = (float) $duration;
+
+		if ($duration <= 0) {
+			return __('No scan yet', 'freesiem-sentinel');
+		}
+
+		return sprintf(__('%s seconds', 'freesiem-sentinel'), number_format_i18n($duration, 2));
 	}
 
 	private function build_scan_url(array $args = []): string

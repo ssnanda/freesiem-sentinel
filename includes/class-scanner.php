@@ -87,6 +87,7 @@ class Freesiem_Scanner
 						'targets' => [],
 						'max_files' => $this->max_files,
 						'max_depth' => $this->max_depth,
+						'discovered_files' => 0,
 						'inspected_files' => 0,
 						'visited_directories' => 0,
 						'flagged_files' => 0,
@@ -347,6 +348,7 @@ class Freesiem_Scanner
 					'targets' => [],
 					'max_files' => $this->max_files,
 					'max_depth' => $this->max_depth,
+					'discovered_files' => 0,
 					'inspected_files' => 0,
 					'visited_directories' => 0,
 					'flagged_files' => 0,
@@ -368,6 +370,7 @@ class Freesiem_Scanner
 			], $targets)),
 			'max_files' => $this->max_files,
 			'max_depth' => $this->max_depth,
+			'discovered_files' => 0,
 			'inspected_files' => 0,
 			'visited_directories' => 0,
 			'flagged_files' => 0,
@@ -844,6 +847,8 @@ class Freesiem_Scanner
 		}
 
 		if (is_file($path)) {
+			$summary['discovered_files']++;
+
 			if ($summary['inspected_files'] >= $this->max_files) {
 				$summary['partial'] = true;
 				return;
@@ -889,6 +894,8 @@ class Freesiem_Scanner
 				$this->scan_path($current, $target_label, $depth + 1, $summary, $findings, $flagged_files);
 				continue;
 			}
+
+			$summary['discovered_files']++;
 
 			if ($summary['inspected_files'] >= $this->max_files) {
 				$summary['partial'] = true;
