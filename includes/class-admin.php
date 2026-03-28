@@ -114,6 +114,7 @@ class Freesiem_Admin
 		$connection_ok = !empty($settings['site_id']) && !empty($settings['api_key']) && !empty($settings['hmac_secret']);
 		$severity_counts = freesiem_sentinel_safe_array($cache['severity_counts'] ?? []);
 		$filesystem = freesiem_sentinel_safe_array($cache['local_inventory']['filesystem'] ?? []);
+		$integrity = freesiem_sentinel_safe_array($cache['local_inventory']['file_integrity'] ?? []);
 		$notices = freesiem_sentinel_safe_array($cache['notices'] ?? []);
 
 		echo '<div class="wrap">';
@@ -165,6 +166,14 @@ class Freesiem_Admin
 			echo '<p><strong>' . esc_html__('Flagged files:', 'freesiem-sentinel') . '</strong> ' . esc_html(freesiem_sentinel_safe_string($filesystem['flagged_files'] ?? '0')) . '</p>';
 			echo '<p><strong>' . esc_html__('Partial scan:', 'freesiem-sentinel') . '</strong> ' . esc_html(!empty($filesystem['partial']) ? __('Yes', 'freesiem-sentinel') : __('No', 'freesiem-sentinel')) . '</p>';
 		}
+		if ($integrity !== []) {
+			echo '<hr />';
+			echo '<h3>' . esc_html__('Integrity Monitor', 'freesiem-sentinel') . '</h3>';
+			echo '<p><strong>' . esc_html__('Hashed files:', 'freesiem-sentinel') . '</strong> ' . esc_html(freesiem_sentinel_safe_string($integrity['hashed_files'] ?? '0')) . '</p>';
+			echo '<p><strong>' . esc_html__('Changes:', 'freesiem-sentinel') . '</strong> ' . esc_html(sprintf(__('new %1$s, modified %2$s, deleted %3$s', 'freesiem-sentinel'), freesiem_sentinel_safe_string($integrity['new_files_count'] ?? '0'), freesiem_sentinel_safe_string($integrity['modified_files_count'] ?? '0'), freesiem_sentinel_safe_string($integrity['deleted_files_count'] ?? '0'))) . '</p>';
+			echo '<p><strong>' . esc_html__('Baseline:', 'freesiem-sentinel') . '</strong> ' . esc_html(freesiem_sentinel_format_datetime((string) ($integrity['last_baseline_at'] ?? ''))) . '</p>';
+			echo '<p><strong>' . esc_html__('Last diff:', 'freesiem-sentinel') . '</strong> ' . esc_html(freesiem_sentinel_format_datetime((string) ($integrity['last_diff_at'] ?? ''))) . '</p>';
+		}
 		echo '</div>';
 		echo '</div>';
 		echo '</div>';
@@ -172,13 +181,17 @@ class Freesiem_Admin
 
 	public function render_results_page(): void
 	{
+		$settings = freesiem_sentinel_get_settings();
 		$cache = $this->plugin->get_results()->get_cache();
 		$summary = freesiem_sentinel_safe_array($cache['summary'] ?? []);
 		$all_findings = array_values(freesiem_sentinel_safe_array($cache['local_findings'] ?? []));
 		$recommendations = array_values(array_filter(freesiem_sentinel_safe_array($cache['recommendations'] ?? [])));
 		$top_issues = freesiem_sentinel_safe_array($cache['top_issues'] ?? []);
 		$filesystem = freesiem_sentinel_safe_array($cache['local_inventory']['filesystem'] ?? []);
+		$integrity = freesiem_sentinel_safe_array($cache['local_inventory']['file_integrity'] ?? []);
 		$severity_counts = freesiem_sentinel_safe_array($cache['severity_counts'] ?? []);
+		$fim_diff_cache = freesiem_sentinel_safe_array($settings['fim_diff_cache'] ?? []);
+		$integrity_changes = array_values(array_filter(freesiem_sentinel_safe_array($fim_diff_cache['changes'] ?? []), 'is_array'));
 		$search = isset($_GET['s']) ? sanitize_text_field(wp_unslash((string) $_GET['s'])) : '';
 		$selected_severities = $this->get_results_severity_filters();
 		$findings = $this->filter_findings($all_findings, $search, $selected_severities);
@@ -201,6 +214,11 @@ class Freesiem_Admin
 		echo '<p><strong>' . esc_html__('Fetched:', 'freesiem-sentinel') . '</strong> ' . esc_html(freesiem_sentinel_format_datetime((string) ($cache['fetched_at'] ?? ''))) . '</p>';
 		if ($filesystem !== []) {
 			echo '<p><strong>' . esc_html__('Filesystem scan:', 'freesiem-sentinel') . '</strong> ' . esc_html(sprintf(__('Inspected %1$s files, flagged %2$s, partial %3$s', 'freesiem-sentinel'), freesiem_sentinel_safe_string($filesystem['inspected_files'] ?? '0'), freesiem_sentinel_safe_string($filesystem['flagged_files'] ?? '0'), !empty($filesystem['partial']) ? __('yes', 'freesiem-sentinel') : __('no', 'freesiem-sentinel'))) . '</p>';
+		}
+		if ($integrity !== []) {
+			echo '<p><strong>' . esc_html__('Integrity monitor:', 'freesiem-sentinel') . '</strong> ' . esc_html(sprintf(__('Hashed %1$s files, new %2$s, modified %3$s, deleted %4$s, partial %5$s', 'freesiem-sentinel'), freesiem_sentinel_safe_string($integrity['hashed_files'] ?? '0'), freesiem_sentinel_safe_string($integrity['new_files_count'] ?? '0'), freesiem_sentinel_safe_string($integrity['modified_files_count'] ?? '0'), freesiem_sentinel_safe_string($integrity['deleted_files_count'] ?? '0'), !empty($integrity['partial']) ? __('yes', 'freesiem-sentinel') : __('no', 'freesiem-sentinel'))) . '</p>';
+			echo '<p><strong>' . esc_html__('Integrity baseline:', 'freesiem-sentinel') . '</strong> ' . esc_html(freesiem_sentinel_format_datetime((string) ($integrity['last_baseline_at'] ?? ''))) . '</p>';
+			echo '<p><strong>' . esc_html__('Last integrity diff:', 'freesiem-sentinel') . '</strong> ' . esc_html(freesiem_sentinel_format_datetime((string) ($integrity['last_diff_at'] ?? ''))) . '</p>';
 		}
 		echo '</div>';
 
@@ -249,6 +267,32 @@ class Freesiem_Admin
 			echo '</ul>';
 		}
 		echo '</div>';
+		echo '</div>';
+
+		echo '<div style="background:#fff;padding:20px;border:1px solid #dcdcde;border-radius:12px;margin-bottom:20px;">';
+		echo '<h2 style="margin-top:0;">' . esc_html__('Recent Integrity Changes', 'freesiem-sentinel') . '</h2>';
+		if ($integrity === []) {
+			$this->render_empty_state(__('Integrity monitor has not reported yet', 'freesiem-sentinel'), __('Run a local scan to establish the first baseline and start tracking file additions, modifications, and deletions.', 'freesiem-sentinel'));
+		} elseif (!empty($integrity['baseline_created']) && $integrity_changes === []) {
+			$this->render_empty_state(__('Baseline established', 'freesiem-sentinel'), __('The initial integrity baseline is in place. Future scans will compare new snapshots against it and list changes here.', 'freesiem-sentinel'));
+		} elseif ($integrity_changes === []) {
+			$this->render_empty_state(__('No integrity changes in the latest diff', 'freesiem-sentinel'), __('The latest integrity comparison did not detect any new, modified, or deleted monitored files.', 'freesiem-sentinel'));
+		} else {
+			echo '<table class="widefat striped"><thead><tr><th>' . esc_html__('Change', 'freesiem-sentinel') . '</th><th>' . esc_html__('Path', 'freesiem-sentinel') . '</th><th>' . esc_html__('Modified', 'freesiem-sentinel') . '</th><th>' . esc_html__('Hash', 'freesiem-sentinel') . '</th></tr></thead><tbody>';
+			foreach ($integrity_changes as $change) {
+				$change_type = freesiem_sentinel_safe_string($change['change_type'] ?? 'modified');
+				$path = freesiem_sentinel_safe_string($change['path'] ?? '');
+				$current_hash = freesiem_sentinel_safe_string($change['current_hash'] ?? '');
+				$previous_hash = freesiem_sentinel_safe_string($change['previous_hash'] ?? '');
+				echo '<tr>';
+				echo '<td><span style="' . esc_attr($this->change_badge_style($change_type)) . '">' . esc_html(strtoupper($change_type)) . '</span></td>';
+				echo '<td><code>' . esc_html($path) . '</code></td>';
+				echo '<td>' . esc_html(freesiem_sentinel_safe_string($change['current_modified_time'] ?? $change['previous_modified_time'] ?? '')) . '</td>';
+				echo '<td><code>' . esc_html($current_hash !== '' ? substr($current_hash, 0, 16) : substr($previous_hash, 0, 16)) . '</code></td>';
+				echo '</tr>';
+			}
+			echo '</tbody></table>';
+		}
 		echo '</div>';
 
 		echo '<div style="background:#fff;padding:20px;border:1px solid #dcdcde;border-radius:12px;">';
@@ -515,6 +559,13 @@ class Freesiem_Admin
 		if ($path !== '') {
 			$this->render_detail_row(__('Path', 'freesiem-sentinel'), $path);
 		}
+		if (!empty($evidence['change_type'])) {
+			$this->render_detail_row(__('Change Type', 'freesiem-sentinel'), strtoupper(freesiem_sentinel_safe_string($evidence['change_type'] ?? '')));
+		}
+		if (array_key_exists('previous_size', $evidence) || array_key_exists('current_size', $evidence)) {
+			$this->render_detail_row(__('Previous Size', 'freesiem-sentinel'), freesiem_sentinel_safe_string($evidence['previous_size'] ?? ''));
+			$this->render_detail_row(__('Current Size', 'freesiem-sentinel'), freesiem_sentinel_safe_string($evidence['current_size'] ?? ''));
+		}
 		if (!empty($evidence['previous_hash']) || !empty($evidence['current_hash'])) {
 			$this->render_detail_row(__('Previous Hash', 'freesiem-sentinel'), freesiem_sentinel_safe_string($evidence['previous_hash'] ?? ''));
 			$this->render_detail_row(__('Current Hash', 'freesiem-sentinel'), freesiem_sentinel_safe_string($evidence['current_hash'] ?? ''));
@@ -554,6 +605,17 @@ class Freesiem_Admin
 			'medium' => 'background:#f79009;color:#111;border:1px solid #d97706;',
 			'low' => 'background:#dbeafe;color:#1d4ed8;border:1px solid #93c5fd;',
 			default => 'background:#f3f4f6;color:#374151;border:1px solid #d1d5db;',
+		};
+
+		return 'display:inline-flex;align-items:center;padding:4px 8px;border-radius:999px;font-weight:700;text-decoration:none;' . $palette;
+	}
+
+	private function change_badge_style(string $change_type): string
+	{
+		$palette = match (strtolower($change_type)) {
+			'new' => 'background:#8b1e1e;color:#fff;border:1px solid #6b0b0b;',
+			'deleted' => 'background:#b42318;color:#fff;border:1px solid #912018;',
+			default => 'background:#f79009;color:#111;border:1px solid #d97706;',
 		};
 
 		return 'display:inline-flex;align-items:center;padding:4px 8px;border-radius:999px;font-weight:700;text-decoration:none;' . $palette;
