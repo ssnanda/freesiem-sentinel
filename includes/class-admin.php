@@ -27,6 +27,7 @@ class Freesiem_Admin
 		add_action('admin_post_freesiem_sentinel_sync_results', [$this, 'handle_sync_results']);
 		add_action('admin_post_freesiem_sentinel_reconnect', [$this, 'handle_reconnect']);
 		add_action('admin_post_freesiem_sentinel_disconnect_cloud', [$this, 'handle_disconnect_cloud']);
+		add_action('admin_post_freesiem_sentinel_save_auto_updates', [$this, 'handle_save_auto_updates']);
 		add_action('admin_post_freesiem_sentinel_test_connection', [$this, 'handle_test_connection']);
 	}
 
@@ -219,6 +220,19 @@ class Freesiem_Admin
 		$this->redirect_to_page('freesiem-remote');
 	}
 
+	public function handle_save_auto_updates(): void
+	{
+		$this->assert_manage_permissions();
+		freesiem_sentinel_require_admin_post_nonce();
+
+		freesiem_sentinel_update_settings([
+			'plugin_auto_update' => empty($_POST['plugin_auto_update']) ? 0 : 1,
+		]);
+
+		freesiem_sentinel_set_notice('success', !empty($_POST['plugin_auto_update']) ? __('Automatic plugin updates enabled.', 'freesiem-sentinel') : __('Automatic plugin updates disabled.', 'freesiem-sentinel'));
+		$this->redirect_to_page('freesiem-about');
+	}
+
 	public function handle_test_connection(): void
 	{
 		$this->assert_manage_permissions();
@@ -364,35 +378,41 @@ class Freesiem_Admin
 		echo '<h1>' . esc_html__('Scan', 'freesiem-sentinel') . '</h1>';
 		echo '<p>' . esc_html__('Configure a scan, run it, and investigate findings from one workflow.', 'freesiem-sentinel') . '</p>';
 
-		echo '<div style="background:#fff;padding:24px;border:1px solid #dcdcde;border-radius:16px;margin-bottom:20px;">';
+		echo '<div style="background:#fff;padding:18px 20px;border:1px solid #dcdcde;border-radius:16px;margin-bottom:16px;">';
 		echo '<h2 style="margin-top:0;">' . esc_html__('Scan Configuration', 'freesiem-sentinel') . '</h2>';
 		echo '<form method="post" action="' . esc_url(admin_url('admin-post.php')) . '">';
 		wp_nonce_field(FREESIEM_SENTINEL_NONCE_ACTION);
 		echo '<input type="hidden" name="action" value="freesiem_sentinel_run_configured_scan" />';
-		echo '<div style="display:grid;grid-template-columns:1fr 1fr;gap:20px;">';
+		echo '<div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;">';
 		echo '<div>';
-		echo '<h3 style="margin-top:0;">' . esc_html__('Scan Modules', 'freesiem-sentinel') . '</h3>';
-		echo '<label style="display:block;margin-bottom:10px;"><input type="checkbox" name="scan_wordpress" value="1"' . checked(!empty($prefs['scan_wordpress']), true, false) . ' /> ' . esc_html__('WordPress Configuration Scan', 'freesiem-sentinel') . '</label>';
-		echo '<label style="display:block;margin-bottom:10px;"><input type="checkbox" name="scan_filesystem" value="1"' . checked(!empty($prefs['scan_filesystem']), true, false) . ' /> ' . esc_html__('Filesystem Scan', 'freesiem-sentinel') . '</label>';
+		echo '<h3 style="margin:0 0 10px;font-size:16px;">' . esc_html__('Scan Modules', 'freesiem-sentinel') . '</h3>';
+		echo '<label style="display:block;margin-bottom:8px;font-size:14px;"><input type="checkbox" name="scan_wordpress" value="1"' . checked(!empty($prefs['scan_wordpress']), true, false) . ' /> ' . esc_html__('WordPress Configuration Scan', 'freesiem-sentinel') . '</label>';
+		echo '<label style="display:block;margin-bottom:8px;font-size:14px;"><input type="checkbox" name="scan_filesystem" value="1"' . checked(!empty($prefs['scan_filesystem']), true, false) . ' /> ' . esc_html__('Filesystem Scan', 'freesiem-sentinel') . '</label>';
 		echo '<label style="display:block;"><input type="checkbox" name="scan_fim" value="1"' . checked(!empty($prefs['scan_fim']), true, false) . ' /> ' . esc_html__('File Integrity Monitoring', 'freesiem-sentinel') . '</label>';
 		echo '</div>';
 		echo '<div>';
-		echo '<h3 style="margin-top:0;">' . esc_html__('Advanced Options', 'freesiem-sentinel') . '</h3>';
-		echo '<p><label>' . esc_html__('Max files', 'freesiem-sentinel') . '<br /><input type="number" min="100" max="5000" step="100" name="max_files" value="' . esc_attr(freesiem_sentinel_safe_string($prefs['max_files'] ?? '1000')) . '" /></label></p>';
-		echo '<p><label>' . esc_html__('Depth limit', 'freesiem-sentinel') . '<br /><input type="number" min="1" max="10" step="1" name="max_depth" value="' . esc_attr(freesiem_sentinel_safe_string($prefs['max_depth'] ?? '5')) . '" /></label></p>';
-		echo '<p><label><input type="checkbox" name="include_uploads" value="1"' . checked(!empty($prefs['include_uploads']), true, false) . ' /> ' . esc_html__('Include uploads', 'freesiem-sentinel') . '</label></p>';
+		echo '<h3 style="margin:0 0 10px;font-size:16px;">' . esc_html__('Advanced Options', 'freesiem-sentinel') . '</h3>';
+		echo '<p style="margin:0 0 10px;"><label>' . esc_html__('Max files', 'freesiem-sentinel') . '<br /><input type="number" min="100" max="5000" step="100" name="max_files" value="' . esc_attr(freesiem_sentinel_safe_string($prefs['max_files'] ?? '1000')) . '" /></label></p>';
+		echo '<p style="margin:0 0 10px;"><label>' . esc_html__('Depth limit', 'freesiem-sentinel') . '<br /><input type="number" min="1" max="10" step="1" name="max_depth" value="' . esc_attr(freesiem_sentinel_safe_string($prefs['max_depth'] ?? '5')) . '" /></label></p>';
+		echo '<p style="margin:0;"><label><input type="checkbox" name="include_uploads" value="1"' . checked(!empty($prefs['include_uploads']), true, false) . ' /> ' . esc_html__('Include uploads', 'freesiem-sentinel') . '</label></p>';
 		echo '</div>';
 		echo '</div>';
-		submit_button(__('Run Scan', 'freesiem-sentinel'));
+		echo '<p style="margin:16px 0 0;display:flex;gap:10px;flex-wrap:wrap;">';
+		echo '<button type="submit" class="button button-primary">' . esc_html__('Run Scan', 'freesiem-sentinel') . '</button>';
+		echo '<a class="button button-secondary" href="' . esc_url($this->build_scan_url(['show_results' => '1']) . '#freesiem-results-section') . '">' . esc_html__('View Scan Results', 'freesiem-sentinel') . '</a>';
+		echo '<a class="button button-secondary" onclick="return confirm(\''
+			. esc_js(__('Clear the stored scan results and findings?', 'freesiem-sentinel'))
+			. '\');" href="' . esc_url($clear_results_url) . '">' . esc_html__('Clear Results', 'freesiem-sentinel') . '</a>';
+		echo '</p>';
 		echo '</form>';
 		echo '</div>';
 
-		echo '<div style="background:#fff;padding:24px;border:1px solid #dcdcde;border-radius:16px;margin-bottom:20px;">';
+		echo '<div style="background:#fff;padding:18px 20px;border:1px solid #dcdcde;border-radius:16px;margin-bottom:20px;">';
 		echo '<h2 style="margin-top:0;">' . esc_html__('Scan Summary', 'freesiem-sentinel') . '</h2>';
 		if (empty($settings['last_local_scan_at'])) {
 			$this->render_empty_state(__('No scan has been run yet.', 'freesiem-sentinel'), __('Run your first scan to review findings, file changes, and summary metrics here.', 'freesiem-sentinel'));
 		} else {
-			echo '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;">';
+			echo '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;">';
 			$this->render_summary_stat(__('Last Scan Time', 'freesiem-sentinel'), freesiem_sentinel_format_datetime((string) ($settings['last_local_scan_at'] ?? '')));
 			$this->render_summary_stat(__('Overall Score', 'freesiem-sentinel'), $this->summary_value_or_fallback($summary['overall_score'] ?? ($summary['local_score'] ?? ''), false));
 			$this->render_summary_stat(__('Files Discovered', 'freesiem-sentinel'), $this->summary_value_or_fallback($scan_metrics['files_discovered'] ?? ($filesystem['discovered_files'] ?? ''), false));
@@ -401,14 +421,11 @@ class Freesiem_Admin
 			$this->render_summary_stat(__('Scan Duration', 'freesiem-sentinel'), $this->format_duration($scan_metrics['duration_seconds'] ?? ''));
 			echo '</div>';
 			if (!empty($scan_metrics['scan_modules']) || !empty($scan_profile)) {
-				echo '<p style="margin:16px 0 0;color:#50575e;"><strong>' . esc_html__('Scan Modules Used', 'freesiem-sentinel') . ':</strong> ' . esc_html($this->format_scan_modules(!empty($scan_metrics['scan_modules']) ? ['scan_modules' => $scan_metrics['scan_modules']] : $scan_profile)) . '</p>';
+				echo '<p style="margin:12px 0 0;color:#50575e;"><strong>' . esc_html__('Modules Used', 'freesiem-sentinel') . ':</strong> ' . esc_html($this->format_scan_modules(!empty($scan_metrics['scan_modules']) ? ['scan_modules' => $scan_metrics['scan_modules']] : $scan_profile)) . '</p>';
 			}
 			if (!empty($filesystem['partial'])) {
 				echo '<p style="margin:10px 0 0;color:#50575e;">' . esc_html__('Some directories were skipped or capped by the current scan limits.', 'freesiem-sentinel') . '</p>';
 			}
-			echo '<p style="margin:16px 0 0;display:flex;gap:10px;flex-wrap:wrap;"><a class="button button-secondary" href="' . esc_url($this->build_scan_url(['show_results' => '1']) . '#freesiem-results-section') . '">' . esc_html__('View Scan Results', 'freesiem-sentinel') . '</a><a class="button button-secondary" onclick="return confirm(\''
-				. esc_js(__('Clear the stored scan results and findings?', 'freesiem-sentinel'))
-				. '\');" href="' . esc_url($clear_results_url) . '">' . esc_html__('Clear Results', 'freesiem-sentinel') . '</a></p>';
 		}
 		echo '</div>';
 
@@ -529,6 +546,8 @@ class Freesiem_Admin
 		$release_body = trim(safe($release['body'] ?? ''));
 		$release_available = !empty($release['available']);
 		$release_version = safe($release['version'] ?? '');
+		$auto_update_enabled = $this->plugin->get_updater()->is_auto_update_enabled();
+		$update_available = $release_available && version_compare($release_version, FREESIEM_SENTINEL_VERSION, '>');
 
 		echo '<div class="wrap">';
 		echo '<h1>' . esc_html__('About freeSIEM Sentinel', 'freesiem-sentinel') . '</h1>';
@@ -540,15 +559,25 @@ class Freesiem_Admin
 		echo '</div>';
 
 		echo '<div style="background:#fff;padding:20px;border:1px solid #dcdcde;border-radius:12px;margin-top:20px;">';
-		echo '<h2 style="margin-top:0;">' . esc_html__('Credentials', 'freesiem-sentinel') . '</h2>';
+		echo '<h2 style="margin-top:0;">' . esc_html__('Updates & Credentials', 'freesiem-sentinel') . '</h2>';
+		echo '<p><strong>' . esc_html__('Plugin Updates', 'freesiem-sentinel') . ':</strong> ' . esc_html($update_available ? sprintf(__('Version %s is available.', 'freesiem-sentinel'), $release_version) : __('You are on the latest available version.', 'freesiem-sentinel')) . '</p>';
+		if ($update_available) {
+			echo '<p><a class="button button-primary" href="' . esc_url($this->plugin->get_updater()->get_plugin_upgrade_url()) . '">' . esc_html__('Update Plugin', 'freesiem-sentinel') . '</a></p>';
+		} else {
+			echo '<p><button type="button" class="button button-secondary" disabled="disabled">' . esc_html__('Update Plugin', 'freesiem-sentinel') . '</button></p>';
+		}
+		echo '<form method="post" action="' . esc_url(admin_url('admin-post.php')) . '" style="margin:16px 0 20px;">';
+		wp_nonce_field(FREESIEM_SENTINEL_NONCE_ACTION);
+		echo '<input type="hidden" name="action" value="freesiem_sentinel_save_auto_updates" />';
+		echo '<p><label><input type="checkbox" name="plugin_auto_update" value="1"' . checked($auto_update_enabled, true, false) . ' /> ' . esc_html__('Enable automatic plugin updates', 'freesiem-sentinel') . '</label></p>';
+		echo '<p style="margin:0;color:#50575e;">' . esc_html($auto_update_enabled ? __('Automatic updates enabled', 'freesiem-sentinel') : __('Automatic updates disabled', 'freesiem-sentinel')) . '</p>';
+		echo '<p style="margin-top:12px;"><button type="submit" class="button button-secondary">' . esc_html__('Save Update Preference', 'freesiem-sentinel') . '</button></p>';
+		echo '</form>';
 		echo '<p><strong>' . esc_html__('API Key:', 'freesiem-sentinel') . '</strong> <code>' . esc_html(freesiem_sentinel_mask_secret((string) ($settings['api_key'] ?? ''))) . '</code></p>';
 		echo '<p><strong>' . esc_html__('HMAC Secret:', 'freesiem-sentinel') . '</strong> <code>' . esc_html(freesiem_sentinel_mask_secret((string) ($settings['hmac_secret'] ?? ''))) . '</code></p>';
 		echo '<p><strong>' . esc_html__('Check for Updates:', 'freesiem-sentinel') . '</strong> <a class="button button-secondary" href="' . esc_url(freesiem_sentinel_safe_string($this->plugin->get_updater()->get_check_updates_url(freesiem_sentinel_admin_page_url('freesiem-about')))) . '">' . esc_html__('Check for Updates', 'freesiem-sentinel') . '</a></p>';
 		if (!empty($release['published_at'])) {
 			echo '<p><strong>' . esc_html__('Release Published:', 'freesiem-sentinel') . '</strong> ' . esc_html(freesiem_sentinel_format_datetime((string) ($release['published_at'] ?? ''))) . '</p>';
-		}
-		if (!empty($release['html_url'])) {
-			echo '<p><strong>' . esc_html__('Release URL:', 'freesiem-sentinel') . '</strong> <a href="' . esc_url(freesiem_sentinel_safe_string($release['html_url'] ?? '')) . '" target="_blank" rel="noopener noreferrer">' . esc_html(freesiem_sentinel_safe_string($release['html_url'] ?? '')) . '</a></p>';
 		}
 		echo '</div>';
 
@@ -598,7 +627,6 @@ class Freesiem_Admin
 		echo '<div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:20px;">';
 		echo '<h2 style="margin:0;">' . esc_html__('Scan Results', 'freesiem-sentinel') . '</h2>';
 		echo '<div style="display:flex;gap:10px;flex-wrap:wrap;">';
-		echo '<a class="button button-primary" href="' . esc_url(freesiem_sentinel_admin_page_url('freesiem-scan')) . '">' . esc_html__('Run Scan Again', 'freesiem-sentinel') . '</a>';
 		echo '<a class="button button-secondary" onclick="return confirm(\''
 			. esc_js(__('Clear the stored scan results and findings?', 'freesiem-sentinel'))
 			. '\');" href="' . esc_url($clear_results_url) . '">' . esc_html__('Clear Results', 'freesiem-sentinel') . '</a>';
@@ -790,9 +818,21 @@ class Freesiem_Admin
 
 	private function render_summary_stat(string $label, string $value): void
 	{
-		echo '<div style="padding:16px;border:1px solid #dbe3ea;border-radius:12px;background:#f8fafc;">';
-		echo '<span style="display:block;font-size:12px;text-transform:uppercase;letter-spacing:.08em;color:#64748b;">' . esc_html($label) . '</span>';
-		echo '<strong style="display:block;font-size:24px;line-height:1.2;margin-top:8px;">' . esc_html($value) . '</strong>';
+		static $palette_index = 0;
+		$palettes = [
+			['bg' => '#ecfeff', 'border' => '#a5f3fc'],
+			['bg' => '#eff6ff', 'border' => '#bfdbfe'],
+			['bg' => '#fef3c7', 'border' => '#fcd34d'],
+			['bg' => '#ecfccb', 'border' => '#bef264'],
+			['bg' => '#fee2e2', 'border' => '#fca5a5'],
+			['bg' => '#f5f3ff', 'border' => '#c4b5fd'],
+		];
+		$palette = $palettes[$palette_index % count($palettes)];
+		$palette_index++;
+
+		echo '<div style="padding:14px;border:1px solid ' . esc_attr($palette['border']) . ';border-radius:12px;background:' . esc_attr($palette['bg']) . ';">';
+		echo '<span style="display:block;font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:#64748b;">' . esc_html($label) . '</span>';
+		echo '<strong style="display:block;font-size:20px;line-height:1.2;margin-top:6px;">' . esc_html($value) . '</strong>';
 		echo '</div>';
 	}
 
