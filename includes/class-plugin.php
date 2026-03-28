@@ -15,6 +15,7 @@ class Freesiem_Plugin
 	private Freesiem_Cron $cron;
 	private Freesiem_Updater $updater;
 	private Freesiem_Admin $admin;
+	private Freesiem_Cloud_Connect_Client $cloud_connect_client;
 
 	public static function instance(): self
 	{
@@ -29,6 +30,7 @@ class Freesiem_Plugin
 	{
 		$this->bootstrap_settings();
 		$this->api_client = new Freesiem_API_Client();
+		$this->cloud_connect_client = new Freesiem_Cloud_Connect_Client();
 		$this->scanner = new Freesiem_Scanner();
 		$this->results = new Freesiem_Results();
 		$this->updater = new Freesiem_Updater();
@@ -294,9 +296,139 @@ class Freesiem_Plugin
 
 	public function test_connection()
 	{
-		$response = $this->api_client->test_connection();
+		$response = $this->heartbeat_cloud_connect();
 
 		return is_array($response) && $response !== [] ? $response : new WP_Error('freesiem_test_connection_failed', __('freeSIEM Sentinel connection test failed safely.', 'freesiem-sentinel'));
+	}
+
+	public function start_cloud_connect(string $email, string $phone)
+	{
+		$settings = Freesiem_Cloud_Connect_State::ensure_initialized();
+		$payload = [
+			'plugin_uuid' => (string) ($settings['plugin_uuid'] ?? ''),
+			'site_url' => site_url(),
+			'home_url' => home_url(),
+			'site_name' => get_bloginfo('name'),
+			'wp_version' => get_bloginfo('version'),
+			'plugin_version' => FREESIEM_SENTINEL_VERSION,
+			'timezone' => freesiem_sentinel_get_timezone_string(),
+			'email' => $email,
+			'phone' => $phone,
+		];
+		$response = $this->cloud_connect_client->start_connection($payload);
+
+		if (is_wp_error($response)) {
+			return $response;
+		}
+
+		$connection_id = sanitize_text_field((string) ($response['connection_id'] ?? ''));
+
+		if ($connection_id === '') {
+			return new WP_Error('freesiem_cloud_missing_connection_id', __('freeSIEM Core did not return a connection identifier.', 'freesiem-sentinel'));
+		}
+
+		$updated = Freesiem_Cloud_Connect_State::set_pending([
+			'connection_id' => $connection_id,
+			'email' => $email,
+			'phone' => $phone,
+			'connect_expires_at' => (string) ($response['expires_at'] ?? ''),
+		]);
+		$this->refresh_runtime_clients($updated);
+
+		return $response;
+	}
+
+	public function verify_cloud_connect(string $code)
+	{
+		$settings = freesiem_sentinel_get_settings();
+		$connection_id = sanitize_text_field((string) ($settings['connection_id'] ?? ''));
+		$plugin_uuid = sanitize_text_field((string) ($settings['plugin_uuid'] ?? ''));
+
+		if ($connection_id === '' || $plugin_uuid === '') {
+			return new WP_Error('freesiem_cloud_missing_pending_state', __('Start a Cloud Connect session before verifying the code.', 'freesiem-sentinel'));
+		}
+
+		$response = $this->cloud_connect_client->verify_connection([
+			'connection_id' => $connection_id,
+			'plugin_uuid' => $plugin_uuid,
+			'verification_code' => $code,
+		]);
+
+		if (is_wp_error($response)) {
+			return $response;
+		}
+
+		$required = ['site_id', 'api_key', 'hmac_secret'];
+
+		foreach ($required as $key) {
+			if (!is_string($response[$key] ?? null) || trim((string) $response[$key]) === '') {
+				return new WP_Error('freesiem_cloud_incomplete_credentials', __('freeSIEM Core returned incomplete site credentials.', 'freesiem-sentinel'));
+			}
+		}
+
+		$updated = Freesiem_Cloud_Connect_State::set_connected($response);
+		$this->refresh_runtime_clients($updated);
+
+		return $response;
+	}
+
+	public function heartbeat_cloud_connect()
+	{
+		$settings = freesiem_sentinel_get_settings();
+
+		if (!Freesiem_Cloud_Connect_State::is_connected($settings)) {
+			return new WP_Error('freesiem_cloud_not_connected', __('Connect this site to freeSIEM Cloud before sending a heartbeat.', 'freesiem-sentinel'));
+		}
+
+		$summary_cache = freesiem_sentinel_safe_array($settings['summary_cache'] ?? []);
+		$local_inventory = freesiem_sentinel_safe_array($summary_cache['local_inventory'] ?? []);
+		$scan_metrics = freesiem_sentinel_safe_array($local_inventory['scan_metrics'] ?? []);
+		$response = $this->cloud_connect_client->heartbeat([
+			'plugin_version' => FREESIEM_SENTINEL_VERSION,
+			'wp_version' => get_bloginfo('version'),
+			'site_health_summary' => [
+				'wordpress_version' => get_bloginfo('version'),
+				'php_version' => PHP_VERSION,
+				'last_local_scan_at' => (string) ($settings['last_local_scan_at'] ?? ''),
+			],
+			'last_scan_metadata' => [
+				'last_local_scan_at' => (string) ($settings['last_local_scan_at'] ?? ''),
+				'files_discovered' => (int) ($scan_metrics['files_discovered'] ?? 0),
+				'files_flagged' => (int) ($scan_metrics['files_flagged'] ?? 0),
+			],
+		]);
+
+		if (is_wp_error($response)) {
+			Freesiem_Cloud_Connect_State::update_from_heartbeat([], false, $response->get_error_message());
+			return $response;
+		}
+
+		$updated = Freesiem_Cloud_Connect_State::update_from_heartbeat($response, true, __('Heartbeat successful.', 'freesiem-sentinel'));
+		$this->refresh_runtime_clients($updated);
+
+		return $response;
+	}
+
+	public function disconnect_cloud_connect()
+	{
+		$settings = freesiem_sentinel_get_settings();
+		$response = null;
+
+		if (Freesiem_Cloud_Connect_State::is_connected($settings)) {
+			$response = $this->cloud_connect_client->disconnect([
+				'plugin_uuid' => (string) ($settings['plugin_uuid'] ?? ''),
+				'site_url' => site_url(),
+			]);
+
+			if (is_wp_error($response)) {
+				return $response;
+			}
+		}
+
+		$updated = Freesiem_Cloud_Connect_State::clear_remote_credentials();
+		$this->refresh_runtime_clients($updated);
+
+		return is_array($response) ? $response : ['disconnected' => true];
 	}
 
 	public function apply_remote_settings(array $payload)
@@ -357,27 +489,18 @@ class Freesiem_Plugin
 			add_option(FREESIEM_SENTINEL_OPTION, freesiem_sentinel_sanitize_settings($settings), '', false);
 		}
 
-		$this->ensure_plugin_uuid();
+		Freesiem_Cloud_Connect_State::ensure_initialized();
 	}
 
 	private function ensure_plugin_uuid(): array
 	{
-		$settings = freesiem_sentinel_get_settings();
-
-		if (!empty($settings['plugin_uuid'])) {
-			return $settings;
-		}
-
-		$settings = freesiem_sentinel_update_settings([
-			'plugin_uuid' => wp_generate_uuid4(),
-		]);
-
-		return $settings;
+		return Freesiem_Cloud_Connect_State::ensure_initialized();
 	}
 
 	private function refresh_runtime_clients(array $settings): void
 	{
 		$this->api_client = new Freesiem_API_Client($settings);
+		$this->cloud_connect_client = new Freesiem_Cloud_Connect_Client($settings);
 	}
 
 	private function derive_scan_modules(array $scan_profile): array

@@ -3,7 +3,7 @@ Contributors: freesiem
 Requires at least: 6.4
 Tested up to: 6.8
 Requires PHP: 8.1
-Stable tag: 0.1.6
+Stable tag: 0.1.7
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -69,6 +69,10 @@ Version bumps should always have matching git tags.
 GitHub Actions publishes the ZIP automatically when a `v*` tag is pushed.
 
 == Changelog ==
+
+= 0.1.7 =
+
+* Extend Cloud Connect MVP with signed heartbeat/disconnect, status management, and local testing support via a custom backend URL override
 
 = 0.1.6 =
 

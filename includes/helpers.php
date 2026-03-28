@@ -9,9 +9,16 @@ function freesiem_sentinel_get_default_settings(): array
 	return [
 		'site_id' => '',
 		'plugin_uuid' => '',
+		'local_seed' => '',
+		'connection_state' => 'disconnected',
+		'connection_id' => '',
+		'cloud_backend_base_url' => '',
+		'connected_backend_base_url' => '',
 		'email' => '',
+		'phone' => '',
 		'phone_number' => '',
 		'cloud_users' => [],
+		'connect_expires_at' => '',
 		'cloud_connection_state' => 'disconnected',
 		'cloud_verification_code' => '',
 		'cloud_connected_at' => '',
@@ -28,6 +35,7 @@ function freesiem_sentinel_get_default_settings(): array
 		'last_remote_scan_at' => '',
 		'last_sync_at' => '',
 		'last_heartbeat_at' => '',
+		'last_heartbeat_result' => '',
 		'fim_enabled' => 1,
 		'fim_last_baseline_at' => '',
 		'fim_last_diff_at' => '',
@@ -126,13 +134,21 @@ function freesiem_sentinel_sanitize_settings(array $settings): array
 {
 	$defaults = freesiem_sentinel_get_default_settings();
 	$settings = wp_parse_args($settings, $defaults);
+	$valid_connection_states = ['disconnected', 'pending_verification', 'connected', 'suspended', 'revoked'];
 
 	$settings['site_id'] = sanitize_text_field((string) $settings['site_id']);
 	$settings['plugin_uuid'] = sanitize_text_field((string) $settings['plugin_uuid']);
+	$settings['local_seed'] = sanitize_text_field((string) ($settings['local_seed'] ?? ''));
+	$settings['connection_id'] = sanitize_text_field((string) ($settings['connection_id'] ?? ''));
+	$settings['cloud_backend_base_url'] = freesiem_sentinel_sanitize_cloud_backend_base_url((string) ($settings['cloud_backend_base_url'] ?? ''));
+	$settings['connected_backend_base_url'] = freesiem_sentinel_sanitize_cloud_backend_base_url((string) ($settings['connected_backend_base_url'] ?? ''));
 	$settings['email'] = sanitize_email((string) $settings['email']);
-	$settings['phone_number'] = freesiem_sentinel_sanitize_phone_number((string) ($settings['phone_number'] ?? ''));
+	$settings['phone'] = freesiem_sentinel_sanitize_phone_number((string) ($settings['phone'] ?? ($settings['phone_number'] ?? '')));
+	$settings['phone_number'] = $settings['phone'];
 	$settings['cloud_users'] = array_values(array_filter(array_map('sanitize_email', is_array($settings['cloud_users'] ?? null) ? $settings['cloud_users'] : [])));
-	$settings['cloud_connection_state'] = in_array((string) ($settings['cloud_connection_state'] ?? 'disconnected'), ['disconnected', 'pending_verification', 'connected'], true) ? (string) $settings['cloud_connection_state'] : 'disconnected';
+	$settings['connection_state'] = in_array((string) ($settings['connection_state'] ?? ($settings['cloud_connection_state'] ?? 'disconnected')), $valid_connection_states, true) ? (string) ($settings['connection_state'] ?? $settings['cloud_connection_state']) : 'disconnected';
+	$settings['cloud_connection_state'] = $settings['connection_state'];
+	$settings['connect_expires_at'] = freesiem_sentinel_sanitize_datetime((string) ($settings['connect_expires_at'] ?? ''));
 	$settings['cloud_verification_code'] = sanitize_text_field((string) ($settings['cloud_verification_code'] ?? ''));
 	$settings['cloud_connected_at'] = freesiem_sentinel_sanitize_datetime((string) ($settings['cloud_connected_at'] ?? ''));
 	$settings['allow_remote_scan'] = empty($settings['allow_remote_scan']) ? 0 : 1;
@@ -148,6 +164,7 @@ function freesiem_sentinel_sanitize_settings(array $settings): array
 	$settings['last_remote_scan_at'] = freesiem_sentinel_sanitize_datetime((string) $settings['last_remote_scan_at']);
 	$settings['last_sync_at'] = freesiem_sentinel_sanitize_datetime((string) $settings['last_sync_at']);
 	$settings['last_heartbeat_at'] = freesiem_sentinel_sanitize_datetime((string) $settings['last_heartbeat_at']);
+	$settings['last_heartbeat_result'] = sanitize_text_field((string) ($settings['last_heartbeat_result'] ?? ''));
 	$settings['fim_enabled'] = empty($settings['fim_enabled']) ? 0 : 1;
 	$settings['fim_last_baseline_at'] = freesiem_sentinel_sanitize_datetime((string) $settings['fim_last_baseline_at']);
 	$settings['fim_last_diff_at'] = freesiem_sentinel_sanitize_datetime((string) $settings['fim_last_diff_at']);
@@ -188,6 +205,31 @@ function freesiem_sentinel_sanitize_backend_url(string $url): string
 	return $url;
 }
 
+function freesiem_sentinel_sanitize_cloud_backend_base_url(string $url): string
+{
+	$url = trim(freesiem_sentinel_safe_string($url));
+
+	if ($url === '') {
+		return '';
+	}
+
+	$url = esc_url_raw(untrailingslashit($url));
+
+	if ($url === '') {
+		return '';
+	}
+
+	$parts = wp_parse_url($url);
+	$scheme = strtolower((string) ($parts['scheme'] ?? ''));
+	$host = strtolower((string) ($parts['host'] ?? ''));
+
+	if ($scheme !== 'https' || $host === '') {
+		return '';
+	}
+
+	return $url;
+}
+
 function freesiem_sentinel_sanitize_phone_number(string $value): string
 {
 	$digits = preg_replace('/\D+/', '', $value);
@@ -201,7 +243,16 @@ function freesiem_sentinel_sanitize_phone_number(string $value): string
 		$digits = substr($digits, 1);
 	}
 
-	return strlen($digits) === 10 ? $digits : '';
+	if (strlen($digits) !== 10) {
+		return '';
+	}
+
+	// Basic NANP validation rejects obviously invalid US numbers for MVP.
+	if (!preg_match('/^[2-9]\d{2}[2-9]\d{6}$/', $digits)) {
+		return '';
+	}
+
+	return $digits;
 }
 
 function freesiem_sentinel_is_valid_us_phone(string $value): bool
@@ -242,6 +293,65 @@ function freesiem_sentinel_get_iso8601_time(?int $timestamp = null): string
 	$timestamp = $timestamp ?: time();
 
 	return gmdate('c', $timestamp);
+}
+
+function freesiem_sentinel_generate_random_token(int $length = 32): string
+{
+	$length = max(8, $length);
+	$byte_length = (int) ceil($length / 2);
+
+	try {
+		$token = bin2hex(random_bytes($byte_length));
+	} catch (Throwable $throwable) {
+		if (function_exists('openssl_random_pseudo_bytes')) {
+			$bytes = openssl_random_pseudo_bytes($byte_length);
+			$token = is_string($bytes) ? bin2hex($bytes) : '';
+		} else {
+			$token = '';
+
+			for ($i = 0; $i < $byte_length; $i++) {
+				$token .= str_pad(dechex(mt_rand(0, 255)), 2, '0', STR_PAD_LEFT);
+			}
+		}
+	}
+
+	return substr($token, 0, $length);
+}
+
+function freesiem_sentinel_get_timezone_string(): string
+{
+	if (function_exists('wp_timezone_string')) {
+		$timezone = wp_timezone_string();
+
+		if (is_string($timezone) && $timezone !== '') {
+			return $timezone;
+		}
+	}
+
+	$timezone = get_option('timezone_string');
+
+	if (is_string($timezone) && $timezone !== '') {
+		return $timezone;
+	}
+
+	$offset = (float) get_option('gmt_offset', 0);
+
+	return $offset === 0.0 ? 'UTC' : sprintf('UTC%+g', $offset);
+}
+
+function freesiem_sentinel_get_effective_cloud_backend_base_url(?array $settings = null): string
+{
+	$settings = $settings ?: freesiem_sentinel_get_settings();
+	$custom = freesiem_sentinel_sanitize_cloud_backend_base_url((string) ($settings['cloud_backend_base_url'] ?? ''));
+
+	return $custom !== '' ? $custom : FREESIEM_SENTINEL_BACKEND_URL;
+}
+
+function freesiem_sentinel_is_custom_cloud_backend(?array $settings = null): bool
+{
+	$settings = $settings ?: freesiem_sentinel_get_settings();
+
+	return freesiem_sentinel_sanitize_cloud_backend_base_url((string) ($settings['cloud_backend_base_url'] ?? '')) !== '';
 }
 
 function freesiem_sentinel_mask_secret(string $value, int $visible = 4): string
