@@ -18,6 +18,11 @@ function freesiem_sentinel_get_default_settings(): array
 		'last_remote_scan_at' => '',
 		'last_sync_at' => '',
 		'last_heartbeat_at' => '',
+		'fim_enabled' => 1,
+		'fim_last_baseline_at' => '',
+		'fim_last_diff_at' => '',
+		'fim_baseline' => [],
+		'fim_diff_cache' => [],
 		'summary_cache' => [
 			'fetched_at' => '',
 			'summary' => [],
@@ -110,6 +115,11 @@ function freesiem_sentinel_sanitize_settings(array $settings): array
 	$settings['last_remote_scan_at'] = freesiem_sentinel_sanitize_datetime((string) $settings['last_remote_scan_at']);
 	$settings['last_sync_at'] = freesiem_sentinel_sanitize_datetime((string) $settings['last_sync_at']);
 	$settings['last_heartbeat_at'] = freesiem_sentinel_sanitize_datetime((string) $settings['last_heartbeat_at']);
+	$settings['fim_enabled'] = empty($settings['fim_enabled']) ? 0 : 1;
+	$settings['fim_last_baseline_at'] = freesiem_sentinel_sanitize_datetime((string) $settings['fim_last_baseline_at']);
+	$settings['fim_last_diff_at'] = freesiem_sentinel_sanitize_datetime((string) $settings['fim_last_diff_at']);
+	$settings['fim_baseline'] = is_array($settings['fim_baseline']) ? $settings['fim_baseline'] : [];
+	$settings['fim_diff_cache'] = is_array($settings['fim_diff_cache']) ? $settings['fim_diff_cache'] : [];
 
 	$settings['summary_cache'] = is_array($settings['summary_cache']) ? $settings['summary_cache'] : $defaults['summary_cache'];
 	$settings['updater_cache'] = is_array($settings['updater_cache']) ? $settings['updater_cache'] : [];

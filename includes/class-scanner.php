@@ -8,6 +8,8 @@ class Freesiem_Scanner
 {
 	private const MAX_FILES = 1000;
 	private const MAX_DEPTH = 5;
+	private const MAX_HASHED_FILES = 500;
+	private const MAX_STORED_DIFFS = 200;
 
 	public function run(): array
 	{
@@ -22,11 +24,16 @@ class Freesiem_Scanner
 		$metadata = $this->build_metadata();
 		$inventory = $this->build_inventory();
 		$filesystem = $this->scan_filesystem();
+		$integrity = $this->run_file_integrity_monitor($filesystem['flagged_files']);
+
 		$inventory['filesystem'] = $filesystem['summary'];
 		$inventory['filesystem_flagged_files'] = $filesystem['flagged_files'];
+		$inventory['file_integrity'] = $integrity['summary'];
+
 		$findings = array_merge(
 			$this->collect_findings($metadata, $inventory),
-			$filesystem['findings']
+			$filesystem['findings'],
+			$integrity['findings']
 		);
 
 		return [
@@ -269,15 +276,7 @@ class Freesiem_Scanner
 				break;
 			}
 
-			$this->scan_path(
-				$target['path'],
-				$target['label'],
-				$target['relative'],
-				0,
-				$summary,
-				$findings,
-				$flagged_files
-			);
+			$this->scan_path($target['path'], $target['label'], 0, $summary, $findings, $flagged_files);
 		}
 
 		$summary['flagged_files'] = count($flagged_files);
@@ -289,9 +288,347 @@ class Freesiem_Scanner
 		];
 	}
 
-	private function scan_path(string $path, string $target_label, string $relative_root, int $depth, array &$summary, array &$findings, array &$flagged_files): void
+	private function run_file_integrity_monitor(array $flagged_files): array
 	{
-		if ($summary['inspected_files'] >= self::MAX_FILES) {
+		$settings = freesiem_sentinel_get_settings();
+		$enabled = !empty($settings['fim_enabled']);
+		$now = freesiem_sentinel_get_iso8601_time();
+		$baseline = freesiem_sentinel_safe_array($settings['fim_baseline'] ?? []);
+
+		if (!$enabled) {
+			return [
+				'summary' => [
+					'enabled' => false,
+					'baseline_created' => false,
+					'partial' => false,
+					'hashed_files' => 0,
+					'new_files_count' => 0,
+					'modified_files_count' => 0,
+					'deleted_files_count' => 0,
+					'last_baseline_at' => freesiem_sentinel_safe_string($settings['fim_last_baseline_at'] ?? ''),
+					'last_diff_at' => freesiem_sentinel_safe_string($settings['fim_last_diff_at'] ?? ''),
+				],
+				'findings' => [],
+			];
+		}
+
+		$snapshot_result = $this->build_integrity_snapshot($flagged_files);
+		$current_snapshot = $snapshot_result['snapshot'];
+
+		if ($baseline === []) {
+			$diff_cache = [
+				'generated_at' => $now,
+				'baseline_created' => true,
+				'partial' => !empty($snapshot_result['summary']['partial']),
+				'new_files_count' => 0,
+				'modified_files_count' => 0,
+				'deleted_files_count' => 0,
+				'changes' => [],
+			];
+
+			freesiem_sentinel_update_settings([
+				'fim_baseline' => $current_snapshot,
+				'fim_last_baseline_at' => $now,
+				'fim_last_diff_at' => '',
+				'fim_diff_cache' => $diff_cache,
+			]);
+
+			freesiem_sentinel_set_notice('success', __('freeSIEM Sentinel established the initial file integrity baseline.', 'freesiem-sentinel'));
+
+			return [
+				'summary' => [
+					'enabled' => true,
+					'baseline_created' => true,
+					'partial' => !empty($snapshot_result['summary']['partial']),
+					'hashed_files' => (int) ($snapshot_result['summary']['hashed_files'] ?? 0),
+					'new_files_count' => 0,
+					'modified_files_count' => 0,
+					'deleted_files_count' => 0,
+					'last_baseline_at' => $now,
+					'last_diff_at' => '',
+				],
+				'findings' => [],
+			];
+		}
+
+		$diff = $this->compare_integrity_snapshots($baseline, $current_snapshot);
+		$diff_cache = [
+			'generated_at' => $now,
+			'baseline_created' => false,
+			'partial' => !empty($snapshot_result['summary']['partial']) || !empty($diff['partial']),
+			'new_files_count' => (int) $diff['new_files_count'],
+			'modified_files_count' => (int) $diff['modified_files_count'],
+			'deleted_files_count' => (int) $diff['deleted_files_count'],
+			'changes' => array_slice($diff['changes'], 0, self::MAX_STORED_DIFFS),
+		];
+
+		freesiem_sentinel_update_settings([
+			'fim_baseline' => $current_snapshot,
+			'fim_last_baseline_at' => $now,
+			'fim_last_diff_at' => $now,
+			'fim_diff_cache' => $diff_cache,
+		]);
+
+		return [
+			'summary' => [
+				'enabled' => true,
+				'baseline_created' => false,
+				'partial' => !empty($diff_cache['partial']),
+				'hashed_files' => (int) ($snapshot_result['summary']['hashed_files'] ?? 0),
+				'new_files_count' => (int) $diff['new_files_count'],
+				'modified_files_count' => (int) $diff['modified_files_count'],
+				'deleted_files_count' => (int) $diff['deleted_files_count'],
+				'last_baseline_at' => $now,
+				'last_diff_at' => $now,
+			],
+			'findings' => $diff['findings'],
+		];
+	}
+
+	private function build_integrity_snapshot(array $flagged_files): array
+	{
+		$summary = [
+			'hashed_files' => 0,
+			'visited_directories' => 0,
+			'partial' => false,
+			'unreadable_paths' => [],
+			'skipped_directories' => [],
+			'included_flagged_uploads' => 0,
+		];
+		$snapshot = [];
+
+		$this->hash_root_files($summary, $snapshot);
+
+		foreach ($this->get_integrity_targets() as $target) {
+			if ($summary['hashed_files'] >= self::MAX_HASHED_FILES) {
+				$summary['partial'] = true;
+				break;
+			}
+
+			$this->hash_path($target['path'], 0, $summary, $snapshot);
+		}
+
+		foreach ($flagged_files as $flagged_file) {
+			$path = freesiem_sentinel_safe_string($flagged_file['path'] ?? '');
+
+			if ($path === '' || !str_starts_with($path, 'wp-content/uploads/')) {
+				continue;
+			}
+
+			if (isset($snapshot[$path])) {
+				continue;
+			}
+
+			if ($summary['hashed_files'] >= self::MAX_HASHED_FILES) {
+				$summary['partial'] = true;
+				break;
+			}
+
+			$absolute = wp_normalize_path(untrailingslashit(ABSPATH) . '/' . ltrim($path, '/'));
+
+			if (!is_file($absolute) || !is_readable($absolute)) {
+				continue;
+			}
+
+			$entry = $this->snapshot_entry($absolute);
+
+			if ($entry === null) {
+				continue;
+			}
+
+			$snapshot[$path] = $entry;
+			$summary['hashed_files']++;
+			$summary['included_flagged_uploads']++;
+		}
+
+		ksort($snapshot);
+
+		return [
+			'snapshot' => $snapshot,
+			'summary' => $summary,
+		];
+	}
+
+	private function compare_integrity_snapshots(array $baseline, array $current): array
+	{
+		$findings = [];
+		$changes = [];
+		$new_files_count = 0;
+		$modified_files_count = 0;
+		$deleted_files_count = 0;
+
+		foreach ($current as $path => $entry) {
+			if (!isset($baseline[$path])) {
+				$new_files_count++;
+				$this->append_integrity_change('new', null, $entry, $changes, $findings);
+				continue;
+			}
+
+			$previous = is_array($baseline[$path]) ? $baseline[$path] : [];
+
+			if (($previous['hash'] ?? '') !== ($entry['hash'] ?? '') || (int) ($previous['size'] ?? 0) !== (int) ($entry['size'] ?? 0) || (string) ($previous['modified_time'] ?? '') !== (string) ($entry['modified_time'] ?? '')) {
+				$modified_files_count++;
+				$this->append_integrity_change('modified', $previous, $entry, $changes, $findings);
+			}
+		}
+
+		foreach ($baseline as $path => $entry) {
+			if (isset($current[$path])) {
+				continue;
+			}
+
+			$deleted_files_count++;
+			$this->append_integrity_change('deleted', is_array($entry) ? $entry : [], null, $changes, $findings);
+		}
+
+		return [
+			'findings' => $findings,
+			'changes' => $changes,
+			'new_files_count' => $new_files_count,
+			'modified_files_count' => $modified_files_count,
+			'deleted_files_count' => $deleted_files_count,
+			'partial' => count($changes) >= self::MAX_STORED_DIFFS,
+		];
+	}
+
+	private function append_integrity_change(string $change_type, ?array $previous, ?array $current, array &$changes, array &$findings): void
+	{
+		$change = $this->build_integrity_change($change_type, $previous, $current);
+
+		if ($change === null) {
+			return;
+		}
+
+		if (count($changes) < self::MAX_STORED_DIFFS) {
+			$changes[] = $change['evidence'];
+			$findings[] = $change['finding'];
+		}
+	}
+
+	private function build_integrity_change(string $change_type, ?array $previous, ?array $current): ?array
+	{
+		$previous = is_array($previous) ? $previous : [];
+		$current = is_array($current) ? $current : [];
+		$path = freesiem_sentinel_safe_string($current['path'] ?? $previous['path'] ?? '');
+
+		if ($path === '') {
+			return null;
+		}
+
+		$extension = strtolower(freesiem_sentinel_safe_string($current['extension'] ?? $previous['extension'] ?? ''));
+		$is_php = in_array($extension, ['php', 'phtml', 'phar', 'php5', 'php7', 'php8'], true);
+		$is_code_asset = in_array($extension, ['css', 'js'], true);
+		$is_archive = in_array($extension, ['zip', 'tar', 'gz', 'tgz', 'sql', 'bak', 'old'], true);
+		$is_uploads = str_starts_with($path, 'wp-content/uploads/');
+		$is_core_or_code_path = $path === 'wp-config.php' || str_starts_with($path, 'wp-admin/') || str_starts_with($path, 'wp-includes/') || str_starts_with($path, 'wp-content/plugins/') || str_starts_with($path, 'wp-content/themes/') || str_starts_with($path, 'wp-content/mu-plugins/');
+
+		$severity = 'low';
+		$score = 93;
+
+		if ($change_type === 'new' && $is_uploads && $is_php) {
+			$severity = 'critical';
+			$score = 35;
+		} elseif ($change_type === 'new' && $is_archive && !str_contains(trim($path, '/'), '/')) {
+			$severity = 'high';
+			$score = 52;
+		} elseif ($change_type === 'modified' && $is_php && $is_core_or_code_path) {
+			$severity = 'high';
+			$score = 55;
+		} elseif ($change_type === 'deleted' && $is_php && $is_core_or_code_path) {
+			$severity = 'high';
+			$score = 58;
+		} elseif ($change_type === 'modified' && $is_code_asset) {
+			$severity = 'medium';
+			$score = 75;
+		} elseif ($change_type === 'new' && $is_php) {
+			$severity = 'high';
+			$score = 57;
+		}
+
+		$title = match ($change_type) {
+			'new' => 'New monitored file detected',
+			'deleted' => 'Previously monitored file disappeared',
+			default => 'Monitored file changed',
+		};
+
+		$description = match ($change_type) {
+			'new' => 'freeSIEM Sentinel detected a new file within the integrity monitoring scope.',
+			'deleted' => 'freeSIEM Sentinel detected that a previously monitored file is no longer present.',
+			default => 'freeSIEM Sentinel detected a change in a monitored file hash or metadata.',
+		};
+
+		$evidence = [
+			'change_type' => $change_type,
+			'path' => $path,
+			'extension' => $extension,
+			'previous_hash' => freesiem_sentinel_safe_string($previous['hash'] ?? ''),
+			'current_hash' => freesiem_sentinel_safe_string($current['hash'] ?? ''),
+			'previous_size' => (int) ($previous['size'] ?? 0),
+			'current_size' => (int) ($current['size'] ?? 0),
+			'previous_modified_time' => freesiem_sentinel_safe_string($previous['modified_time'] ?? ''),
+			'current_modified_time' => freesiem_sentinel_safe_string($current['modified_time'] ?? ''),
+		];
+
+		return [
+			'evidence' => $evidence,
+			'finding' => $this->finding(
+				'file_integrity_' . $change_type . '_' . md5($path),
+				'file_integrity',
+				$severity,
+				$title,
+				$description,
+				'Review the change, confirm it was expected, and compare deployment or maintenance activity against the detected file event.',
+				$evidence,
+				$score
+			),
+		];
+	}
+
+	private function hash_root_files(array &$summary, array &$snapshot): void
+	{
+		$root = untrailingslashit(wp_normalize_path(ABSPATH));
+
+		if (!is_dir($root) || !is_readable($root)) {
+			return;
+		}
+
+		$items = scandir($root);
+
+		if (!is_array($items)) {
+			$summary['unreadable_paths'][] = '';
+			return;
+		}
+
+		foreach ($items as $item) {
+			if ($item === '.' || $item === '..') {
+				continue;
+			}
+
+			$current = $root . '/' . $item;
+
+			if (!is_file($current)) {
+				continue;
+			}
+
+			if ($summary['hashed_files'] >= self::MAX_HASHED_FILES) {
+				$summary['partial'] = true;
+				return;
+			}
+
+			$entry = $this->snapshot_entry($current);
+
+			if ($entry === null) {
+				continue;
+			}
+
+			$snapshot[$entry['path']] = $entry;
+			$summary['hashed_files']++;
+		}
+	}
+
+	private function hash_path(string $path, int $depth, array &$summary, array &$snapshot): void
+	{
+		if ($summary['hashed_files'] >= self::MAX_HASHED_FILES) {
 			$summary['partial'] = true;
 			return;
 		}
@@ -301,13 +638,13 @@ class Freesiem_Scanner
 		}
 
 		if (is_file($path)) {
-			if ($summary['inspected_files'] >= self::MAX_FILES) {
-				$summary['partial'] = true;
-				return;
+			$entry = $this->snapshot_entry($path);
+
+			if ($entry !== null) {
+				$snapshot[$entry['path']] = $entry;
+				$summary['hashed_files']++;
 			}
 
-			$summary['inspected_files']++;
-			$this->flag_file($path, $target_label, $relative_root, $findings, $flagged_files);
 			return;
 		}
 
@@ -343,7 +680,104 @@ class Freesiem_Scanner
 					continue;
 				}
 
-				$this->scan_path($current, $target_label, $relative_root, $depth + 1, $summary, $findings, $flagged_files);
+				$this->hash_path($current, $depth + 1, $summary, $snapshot);
+				continue;
+			}
+
+			if ($summary['hashed_files'] >= self::MAX_HASHED_FILES) {
+				$summary['partial'] = true;
+				return;
+			}
+
+			$entry = $this->snapshot_entry($current);
+
+			if ($entry === null) {
+				continue;
+			}
+
+			$snapshot[$entry['path']] = $entry;
+			$summary['hashed_files']++;
+		}
+	}
+
+	private function snapshot_entry(string $path): ?array
+	{
+		if (!is_file($path) || !is_readable($path)) {
+			return null;
+		}
+
+		$hash = @hash_file('sha256', $path);
+
+		if (!is_string($hash) || $hash === '') {
+			return null;
+		}
+
+		$modified = @filemtime($path);
+
+		return [
+			'path' => $this->relative_path($path),
+			'hash' => $hash,
+			'size' => (int) @filesize($path),
+			'modified_time' => $modified ? gmdate('c', $modified) : '',
+			'extension' => strtolower((string) pathinfo($path, PATHINFO_EXTENSION)),
+		];
+	}
+
+	private function scan_path(string $path, string $target_label, int $depth, array &$summary, array &$findings, array &$flagged_files): void
+	{
+		if ($summary['inspected_files'] >= self::MAX_FILES) {
+			$summary['partial'] = true;
+			return;
+		}
+
+		if (!file_exists($path)) {
+			return;
+		}
+
+		if (is_file($path)) {
+			if ($summary['inspected_files'] >= self::MAX_FILES) {
+				$summary['partial'] = true;
+				return;
+			}
+
+			$summary['inspected_files']++;
+			$this->flag_file($path, $target_label, $findings, $flagged_files);
+			return;
+		}
+
+		if (!is_readable($path)) {
+			$summary['unreadable_paths'][] = $this->relative_path($path);
+			return;
+		}
+
+		$items = scandir($path);
+
+		if (!is_array($items)) {
+			$summary['unreadable_paths'][] = $this->relative_path($path);
+			return;
+		}
+
+		$summary['visited_directories']++;
+
+		foreach ($items as $item) {
+			if ($item === '.' || $item === '..') {
+				continue;
+			}
+
+			$current = $path . DIRECTORY_SEPARATOR . $item;
+
+			if (is_dir($current)) {
+				if ($depth >= self::MAX_DEPTH) {
+					$summary['partial'] = true;
+					continue;
+				}
+
+				if ($this->should_skip_directory($item, $current)) {
+					$summary['skipped_directories'][] = $this->relative_path($current);
+					continue;
+				}
+
+				$this->scan_path($current, $target_label, $depth + 1, $summary, $findings, $flagged_files);
 				continue;
 			}
 
@@ -353,16 +787,11 @@ class Freesiem_Scanner
 			}
 
 			$summary['inspected_files']++;
-			$this->flag_file($current, $target_label, $relative_root, $findings, $flagged_files);
-
-			if ($summary['inspected_files'] >= self::MAX_FILES) {
-				$summary['partial'] = true;
-				return;
-			}
+			$this->flag_file($current, $target_label, $findings, $flagged_files);
 		}
 	}
 
-	private function flag_file(string $path, string $target_label, string $relative_root, array &$findings, array &$flagged_files): void
+	private function flag_file(string $path, string $target_label, array &$findings, array &$flagged_files): void
 	{
 		$relative = $this->relative_path($path);
 		$basename = strtolower((string) basename($path));
@@ -461,19 +890,40 @@ class Freesiem_Scanner
 	private function get_scan_targets(): array
 	{
 		$targets = [
-			['label' => 'WordPress Root', 'path' => untrailingslashit(ABSPATH), 'relative' => ''],
-			['label' => 'wp-admin', 'path' => untrailingslashit(ABSPATH) . '/wp-admin', 'relative' => 'wp-admin'],
-			['label' => 'wp-includes', 'path' => untrailingslashit(ABSPATH) . '/wp-includes', 'relative' => 'wp-includes'],
-			['label' => 'wp-content', 'path' => WP_CONTENT_DIR, 'relative' => 'wp-content'],
-			['label' => 'uploads', 'path' => WP_CONTENT_DIR . '/uploads', 'relative' => 'wp-content/uploads'],
-			['label' => 'plugins', 'path' => WP_PLUGIN_DIR, 'relative' => 'wp-content/plugins'],
-			['label' => 'themes', 'path' => get_theme_root(), 'relative' => 'wp-content/themes'],
+			['label' => 'WordPress Root', 'path' => untrailingslashit(ABSPATH)],
+			['label' => 'wp-admin', 'path' => untrailingslashit(ABSPATH) . '/wp-admin'],
+			['label' => 'wp-includes', 'path' => untrailingslashit(ABSPATH) . '/wp-includes'],
+			['label' => 'wp-content', 'path' => WP_CONTENT_DIR],
+			['label' => 'uploads', 'path' => WP_CONTENT_DIR . '/uploads'],
+			['label' => 'plugins', 'path' => WP_PLUGIN_DIR],
+			['label' => 'themes', 'path' => get_theme_root()],
 		];
 
 		if (defined('WPMU_PLUGIN_DIR')) {
-			$targets[] = ['label' => 'mu-plugins', 'path' => WPMU_PLUGIN_DIR, 'relative' => 'wp-content/mu-plugins'];
+			$targets[] = ['label' => 'mu-plugins', 'path' => WPMU_PLUGIN_DIR];
 		}
 
+		return $this->unique_targets($targets);
+	}
+
+	private function get_integrity_targets(): array
+	{
+		$targets = [
+			['label' => 'wp-admin', 'path' => untrailingslashit(ABSPATH) . '/wp-admin'],
+			['label' => 'wp-includes', 'path' => untrailingslashit(ABSPATH) . '/wp-includes'],
+			['label' => 'plugins', 'path' => WP_PLUGIN_DIR],
+			['label' => 'themes', 'path' => get_theme_root()],
+		];
+
+		if (defined('WPMU_PLUGIN_DIR')) {
+			$targets[] = ['label' => 'mu-plugins', 'path' => WPMU_PLUGIN_DIR];
+		}
+
+		return $this->unique_targets($targets);
+	}
+
+	private function unique_targets(array $targets): array
+	{
 		$unique = [];
 
 		foreach ($targets as $target) {
@@ -484,9 +934,8 @@ class Freesiem_Scanner
 			}
 
 			$unique[$path] = [
-				'label' => (string) $target['label'],
+				'label' => freesiem_sentinel_safe_string($target['label'] ?? ''),
 				'path' => $path,
-				'relative' => (string) $target['relative'],
 			];
 		}
 
