@@ -82,8 +82,8 @@ class Freesiem_Plugin
 
 		$response = (new Freesiem_API_Client($settings))->register_site($payload);
 
-		if (is_wp_error($response)) {
-			return $response;
+		if (!is_array($response) || $response === []) {
+			return new WP_Error('freesiem_registration_failed', __('freeSIEM Sentinel could not register with the backend.', 'freesiem-sentinel'));
 		}
 
 		$required = ['site_id', 'api_key', 'hmac_secret', 'registration_status'];
@@ -124,8 +124,8 @@ class Freesiem_Plugin
 			'last_remote_scan_at' => (string) $settings['last_remote_scan_at'],
 		]);
 
-		if (is_wp_error($response)) {
-			return $response;
+		if (!is_array($response) || $response === []) {
+			return new WP_Error('freesiem_heartbeat_failed', __('freeSIEM Sentinel heartbeat failed safely.', 'freesiem-sentinel'));
 		}
 
 		freesiem_sentinel_update_settings([
@@ -158,7 +158,32 @@ class Freesiem_Plugin
 
 	public function run_local_scan_with_options(bool $upload = true, array $options = [])
 	{
-		$scan = $this->scanner->run($options);
+		error_log('[freeSIEM] local scan started');
+
+		try {
+			$scan = $this->scanner->run($options);
+		} catch (Throwable $throwable) {
+			error_log('[freeSIEM] local scan failed');
+
+			return [
+				'status' => 'error',
+				'message' => __('Scan failed safely', 'freesiem-sentinel'),
+				'metadata' => [],
+				'inventory' => [],
+				'findings' => [],
+				'scan_timestamps' => [
+					'local' => freesiem_sentinel_get_iso8601_time(),
+				],
+				'score' => 0,
+			];
+		}
+
+		error_log('[freeSIEM] scan completed');
+
+		if (!empty($scan['status']) && $scan['status'] === 'error') {
+			return $scan;
+		}
+
 		$this->results->store_local_scan($scan);
 
 		if (!$upload) {
@@ -181,8 +206,8 @@ class Freesiem_Plugin
 
 		$response = $this->api_client->upload_local_scan($payload);
 
-		if (is_wp_error($response)) {
-			return $response;
+		if (!is_array($response) || $response === []) {
+			return new WP_Error('freesiem_upload_failed', __('freeSIEM Sentinel could not upload the local scan.', 'freesiem-sentinel'));
 		}
 
 		freesiem_sentinel_update_settings(['last_sync_at' => freesiem_sentinel_get_iso8601_time()]);
@@ -198,11 +223,12 @@ class Freesiem_Plugin
 			'timestamp' => freesiem_sentinel_get_iso8601_time(),
 		]);
 
-		if (!is_wp_error($response)) {
+		if (is_array($response) && $response !== []) {
 			freesiem_sentinel_update_settings(['last_remote_scan_at' => freesiem_sentinel_get_iso8601_time()]);
+			return $response;
 		}
 
-		return $response;
+		return new WP_Error('freesiem_remote_scan_failed', __('freeSIEM Sentinel could not request a remote scan.', 'freesiem-sentinel'));
 	}
 
 	public function sync_results()
@@ -215,8 +241,8 @@ class Freesiem_Plugin
 
 		$response = $this->api_client->fetch_summary($site_id);
 
-		if (is_wp_error($response)) {
-			return $response;
+		if (!is_array($response) || $response === []) {
+			return new WP_Error('freesiem_summary_failed', __('freeSIEM Sentinel could not fetch summary results.', 'freesiem-sentinel'));
 		}
 
 		$this->results->store_remote_summary($response);
@@ -229,7 +255,7 @@ class Freesiem_Plugin
 		$scan = $this->scanner->run();
 		$settings = freesiem_sentinel_get_settings();
 
-		return $this->api_client->upload_local_scan([
+		$response = $this->api_client->upload_local_scan([
 			'site_id' => (string) ($settings['site_id'] ?? ''),
 			'metadata' => $scan['metadata'],
 			'findings' => [],
@@ -238,6 +264,8 @@ class Freesiem_Plugin
 				'local' => freesiem_sentinel_get_iso8601_time(),
 			],
 		]);
+
+		return is_array($response) && $response !== [] ? $response : new WP_Error('freesiem_inventory_failed', __('freeSIEM Sentinel could not upload inventory.', 'freesiem-sentinel'));
 	}
 
 	public function reconnect()
@@ -253,7 +281,9 @@ class Freesiem_Plugin
 
 	public function test_connection()
 	{
-		return $this->api_client->test_connection();
+		$response = $this->api_client->test_connection();
+
+		return is_array($response) && $response !== [] ? $response : new WP_Error('freesiem_test_connection_failed', __('freeSIEM Sentinel connection test failed safely.', 'freesiem-sentinel'));
 	}
 
 	public function apply_remote_settings(array $payload)

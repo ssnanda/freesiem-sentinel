@@ -50,7 +50,7 @@ class Freesiem_API_Client
 		$site_id = (string) ($this->settings['site_id'] ?? '');
 
 		if ($site_id === '') {
-			return new WP_Error('freesiem_missing_site_id', __('freeSIEM Sentinel is not registered yet.', 'freesiem-sentinel'));
+			return [];
 		}
 
 		return $this->heartbeat([
@@ -68,7 +68,7 @@ class Freesiem_API_Client
 		$request = $this->build_request($path, $payload, $authenticated, $signed);
 
 		if (is_wp_error($request)) {
-			return $request;
+			return [];
 		}
 
 		$response = wp_remote_post(
@@ -86,11 +86,11 @@ class Freesiem_API_Client
 
 	private function get_json(string $path, array $query, bool $authenticated, bool $signed)
 	{
-		$url = add_query_arg($query, $this->base_url . $path);
+		$url = add_query_arg(freesiem_sentinel_safe_query_args($query), $this->base_url . $path);
 		$headers = $this->build_headers($authenticated, $signed, '');
 
 		if (is_wp_error($headers)) {
-			return $headers;
+			return [];
 		}
 
 		$response = wp_remote_get(
@@ -110,13 +110,13 @@ class Freesiem_API_Client
 		$body = wp_json_encode($payload);
 
 		if (!is_string($body) || $body === '') {
-			return new WP_Error('freesiem_encode_failed', __('freeSIEM Sentinel could not encode the request payload.', 'freesiem-sentinel'));
+			return [];
 		}
 
 		$headers = $this->build_headers($authenticated, $signed, $body);
 
 		if (is_wp_error($headers)) {
-			return $headers;
+			return [];
 		}
 
 		return [
@@ -172,7 +172,7 @@ class Freesiem_API_Client
 	private function parse_response($response, bool $signed)
 	{
 		if (is_wp_error($response)) {
-			return $response;
+			return [];
 		}
 
 		$code = (int) wp_remote_retrieve_response_code($response);
@@ -182,18 +182,17 @@ class Freesiem_API_Client
 		if ($signed) {
 			$validation = $this->validate_response_signature($response, $body);
 
-			if (is_wp_error($validation)) {
-				return $validation;
+			if ($validation !== true) {
+				return [];
 			}
 		}
 
-		if ($code < 200 || $code >= 300) {
-			$message = is_array($data) && !empty($data['message']) ? (string) $data['message'] : __('freeSIEM Sentinel received an unexpected backend response.', 'freesiem-sentinel');
-			return new WP_Error('freesiem_http_error_' . $code, $message, ['status' => $code, 'body' => $data]);
+		if ($code !== 200) {
+			return [];
 		}
 
 		if (!is_array($data)) {
-			return new WP_Error('freesiem_invalid_json', __('freeSIEM Sentinel received invalid JSON from the backend.', 'freesiem-sentinel'));
+			return [];
 		}
 
 		return $data;

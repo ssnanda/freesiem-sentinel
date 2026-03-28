@@ -21,61 +21,99 @@ class Freesiem_Scanner
 
 	public function run(array $options = []): array
 	{
-		if (!function_exists('get_plugin_updates')) {
-			require_once ABSPATH . 'wp-admin/includes/update.php';
+		try {
+			if (!function_exists('get_plugin_updates')) {
+				require_once ABSPATH . 'wp-admin/includes/update.php';
+			}
+
+			$this->apply_scan_preferences($options);
+
+			wp_version_check();
+			wp_update_plugins();
+			wp_update_themes();
+
+			$metadata = $this->build_metadata();
+			$inventory = $this->build_inventory();
+			$filesystem = $this->scan_filesystem();
+			$integrity = $this->scan_fim_enabled ? $this->run_file_integrity_monitor($filesystem['flagged_files']) : [
+				'summary' => [
+					'enabled' => false,
+					'baseline_created' => false,
+					'partial' => false,
+					'hashed_files' => 0,
+					'new_files_count' => 0,
+					'modified_files_count' => 0,
+					'deleted_files_count' => 0,
+					'last_baseline_at' => '',
+					'last_diff_at' => '',
+				],
+				'findings' => [],
+			];
+
+			$inventory['filesystem'] = $filesystem['summary'];
+			$inventory['filesystem_flagged_files'] = $filesystem['flagged_files'];
+			$inventory['file_integrity'] = $integrity['summary'];
+			$inventory['scan_profile'] = [
+				'scan_wordpress' => $this->scan_wordpress,
+				'scan_filesystem' => $this->scan_filesystem_enabled,
+				'scan_fim' => $this->scan_fim_enabled,
+				'include_uploads' => $this->include_uploads,
+				'max_files' => $this->max_files,
+				'max_depth' => $this->max_depth,
+			];
+
+			$findings = array_merge(
+				$this->collect_findings($metadata, $inventory),
+				$filesystem['findings'],
+				$integrity['findings']
+			);
+
+			return [
+				'metadata' => $metadata,
+				'inventory' => $inventory,
+				'findings' => $findings,
+				'scan_timestamps' => [
+					'local' => freesiem_sentinel_get_iso8601_time(),
+				],
+				'score' => freesiem_sentinel_score_from_findings($findings),
+			];
+		} catch (Throwable $throwable) {
+			return [
+				'status' => 'error',
+				'message' => __('Scan failed safely', 'freesiem-sentinel'),
+				'metadata' => [],
+				'inventory' => [
+					'filesystem' => [
+						'targets' => [],
+						'max_files' => $this->max_files,
+						'max_depth' => $this->max_depth,
+						'inspected_files' => 0,
+						'visited_directories' => 0,
+						'flagged_files' => 0,
+						'partial' => true,
+						'unreadable_paths' => [],
+						'skipped_directories' => [],
+						'enabled' => false,
+					],
+					'file_integrity' => [
+						'enabled' => false,
+						'baseline_created' => false,
+						'partial' => true,
+						'hashed_files' => 0,
+						'new_files_count' => 0,
+						'modified_files_count' => 0,
+						'deleted_files_count' => 0,
+						'last_baseline_at' => '',
+						'last_diff_at' => '',
+					],
+				],
+				'findings' => [],
+				'scan_timestamps' => [
+					'local' => freesiem_sentinel_get_iso8601_time(),
+				],
+				'score' => 0,
+			];
 		}
-
-		$this->apply_scan_preferences($options);
-
-		wp_version_check();
-		wp_update_plugins();
-		wp_update_themes();
-
-		$metadata = $this->build_metadata();
-		$inventory = $this->build_inventory();
-		$filesystem = $this->scan_filesystem();
-		$integrity = $this->scan_fim_enabled ? $this->run_file_integrity_monitor($filesystem['flagged_files']) : [
-			'summary' => [
-				'enabled' => false,
-				'baseline_created' => false,
-				'partial' => false,
-				'hashed_files' => 0,
-				'new_files_count' => 0,
-				'modified_files_count' => 0,
-				'deleted_files_count' => 0,
-				'last_baseline_at' => '',
-				'last_diff_at' => '',
-			],
-			'findings' => [],
-		];
-
-		$inventory['filesystem'] = $filesystem['summary'];
-		$inventory['filesystem_flagged_files'] = $filesystem['flagged_files'];
-		$inventory['file_integrity'] = $integrity['summary'];
-		$inventory['scan_profile'] = [
-			'scan_wordpress' => $this->scan_wordpress,
-			'scan_filesystem' => $this->scan_filesystem_enabled,
-			'scan_fim' => $this->scan_fim_enabled,
-			'include_uploads' => $this->include_uploads,
-			'max_files' => $this->max_files,
-			'max_depth' => $this->max_depth,
-		];
-
-		$findings = array_merge(
-			$this->collect_findings($metadata, $inventory),
-			$filesystem['findings'],
-			$integrity['findings']
-		);
-
-		return [
-			'metadata' => $metadata,
-			'inventory' => $inventory,
-			'findings' => $findings,
-			'scan_timestamps' => [
-				'local' => freesiem_sentinel_get_iso8601_time(),
-			],
-			'score' => freesiem_sentinel_score_from_findings($findings),
-		];
 	}
 
 	private function apply_scan_preferences(array $options): void

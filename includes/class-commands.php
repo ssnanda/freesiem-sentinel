@@ -26,7 +26,16 @@ class Freesiem_Commands
 			$type = sanitize_key((string) ($command['type'] ?? ''));
 			$payload = is_array($command['payload'] ?? null) ? $command['payload'] : [];
 
+			if (!$this->is_allowed_command_type($type)) {
+				continue;
+			}
+
 			$result = $this->execute($command_id, $type, $payload);
+
+			if ($result === []) {
+				continue;
+			}
+
 			$results[] = $result;
 			$this->plugin->get_api_client()->send_command_result($result);
 		}
@@ -36,7 +45,6 @@ class Freesiem_Commands
 
 	public function execute(string $command_id, string $type, array $payload): array
 	{
-		$allowed = freesiem_sentinel_get_allowed_command_types();
 		$response = [
 			'command_id' => $command_id,
 			'type' => $type,
@@ -46,18 +54,17 @@ class Freesiem_Commands
 			'completed_at' => freesiem_sentinel_get_iso8601_time(),
 		];
 
-		if (!in_array($type, $allowed, true)) {
-			$response['message'] = __('Rejected non-whitelisted command.', 'freesiem-sentinel');
-			return $response;
+		if (!$this->is_allowed_command_type($type)) {
+			return [];
 		}
 
 		try {
 			switch ($type) {
 				case 'run_local_scan':
 					$scan = $this->plugin->run_local_scan(true);
-					$response['status'] = is_wp_error($scan) ? 'failed' : 'completed';
-					$response['message'] = is_wp_error($scan) ? $scan->get_error_message() : __('Local scan completed.', 'freesiem-sentinel');
-					$response['result'] = is_wp_error($scan) ? [] : ['score' => $scan['score'] ?? null];
+					$response['status'] = is_wp_error($scan) || !empty($scan['status']) ? 'failed' : 'completed';
+					$response['message'] = is_wp_error($scan) ? $scan->get_error_message() : safe($scan['message'] ?? __('Local scan completed.', 'freesiem-sentinel'));
+					$response['result'] = is_wp_error($scan) || !empty($scan['status']) ? [] : ['score' => $scan['score'] ?? null];
 					break;
 
 				case 'sync_results':
@@ -71,7 +78,7 @@ class Freesiem_Commands
 					$request = $this->plugin->request_remote_scan();
 					$response['status'] = is_wp_error($request) ? 'failed' : 'completed';
 					$response['message'] = is_wp_error($request) ? $request->get_error_message() : __('Remote scan requested.', 'freesiem-sentinel');
-					$response['result'] = is_wp_error($request) ? [] : $request;
+					$response['result'] = is_wp_error($request) ? [] : (is_array($request) ? $request : []);
 					break;
 
 				case 'send_inventory':
@@ -92,14 +99,18 @@ class Freesiem_Commands
 					$refresh = $this->plugin->get_updater()->refresh_plugin_update_state();
 					$response['status'] = is_wp_error($refresh) ? 'failed' : 'completed';
 					$response['message'] = is_wp_error($refresh) ? $refresh->get_error_message() : __('Update check refreshed.', 'freesiem-sentinel');
-					$response['result'] = is_wp_error($refresh) ? [] : $refresh;
+					$response['result'] = is_wp_error($refresh) ? [] : (is_array($refresh) ? $refresh : []);
 					break;
 
 				case 'update_settings':
 					$updated = $this->plugin->apply_remote_settings($payload);
 					$response['status'] = is_wp_error($updated) ? 'failed' : 'completed';
 					$response['message'] = is_wp_error($updated) ? $updated->get_error_message() : __('Settings updated.', 'freesiem-sentinel');
-					$response['result'] = is_wp_error($updated) ? [] : $updated;
+					$response['result'] = is_wp_error($updated) ? [] : (is_array($updated) ? $updated : []);
+					break;
+
+				default:
+					return [];
 					break;
 			}
 		} catch (Throwable $throwable) {
@@ -107,5 +118,21 @@ class Freesiem_Commands
 		}
 
 		return $response;
+	}
+
+	private function is_allowed_command_type(string $type): bool
+	{
+		switch ($type) {
+			case 'run_local_scan':
+			case 'sync_results':
+			case 'request_remote_scan':
+			case 'send_inventory':
+			case 'reconnect':
+			case 'refresh_update_check':
+			case 'update_settings':
+				return true;
+			default:
+				return false;
+		}
 	}
 }

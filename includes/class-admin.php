@@ -85,7 +85,9 @@ class Freesiem_Admin
 		freesiem_sentinel_update_settings(['scan_preferences' => $options]);
 
 		$result = $this->plugin->run_local_scan_with_options(true, $options);
-		freesiem_sentinel_set_notice(is_wp_error($result) ? 'error' : 'success', is_wp_error($result) ? $result->get_error_message() : __('Local scan completed with the selected options.', 'freesiem-sentinel'));
+		$is_error = is_wp_error($result) || !empty($result['status']);
+		$message = is_wp_error($result) ? $result->get_error_message() : safe($result['message'] ?? __('Local scan completed with the selected options.', 'freesiem-sentinel'));
+		freesiem_sentinel_set_notice($is_error ? 'error' : 'success', $message);
 		$this->redirect_to_page('freesiem-local-scan');
 	}
 
@@ -164,6 +166,9 @@ class Freesiem_Admin
 	{
 		$settings = freesiem_sentinel_get_settings();
 		$prefs = freesiem_sentinel_safe_array($settings['scan_preferences'] ?? []);
+		$cache = $this->plugin->get_results()->get_cache();
+		$inventory = freesiem_sentinel_safe_array($cache['local_inventory'] ?? []);
+		$filesystem = freesiem_sentinel_safe_array($inventory['filesystem'] ?? []);
 
 		echo '<div class="wrap">';
 		echo '<h1>' . esc_html__('Local Scan', 'freesiem-sentinel') . '</h1>';
@@ -186,6 +191,12 @@ class Freesiem_Admin
 		echo '</table>';
 		submit_button(__('Run Local Scan', 'freesiem-sentinel'));
 		echo '</form>';
+		echo '</div>';
+		echo '<div style="background:#fff;padding:20px;border:1px solid #dcdcde;border-radius:12px;max-width:900px;margin-top:20px;">';
+		echo '<h2 style="margin-top:0;">' . esc_html__('Filesystem Scan Snapshot', 'freesiem-sentinel') . '</h2>';
+		echo '<p><strong>' . esc_html__('Inspected files:', 'freesiem-sentinel') . '</strong> ' . esc_html(safe($filesystem['inspected_files'] ?? '0')) . '</p>';
+		echo '<p><strong>' . esc_html__('Flagged files:', 'freesiem-sentinel') . '</strong> ' . esc_html(safe($filesystem['flagged_files'] ?? '0')) . '</p>';
+		echo '<p><strong>' . esc_html__('Partial scan:', 'freesiem-sentinel') . '</strong> ' . esc_html(!empty($filesystem['partial']) ? __('Yes', 'freesiem-sentinel') : __('No', 'freesiem-sentinel')) . '</p>';
 		echo '</div>';
 		echo '</div>';
 	}
