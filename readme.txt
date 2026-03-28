@@ -3,7 +3,7 @@ Contributors: freesiem
 Requires at least: 6.4
 Tested up to: 6.8
 Requires PHP: 8.1
-Stable tag: 0.1.5
+Stable tag: 0.1.6
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -28,7 +28,7 @@ Features:
 
 1. Upload the `freesiem-sentinel` folder to `/wp-content/plugins/`.
 2. Activate the plugin in WordPress.
-3. Open `freeSIEM > Dashboard`.
+3. Open `freeSIEM > Portal`.
 4. Enter the site owner email address.
 5. Click `Register / Save`.
 
@@ -69,6 +69,10 @@ Version bumps should always have matching git tags.
 GitHub Actions publishes the ZIP automatically when a `v*` tag is pushed.
 
 == Changelog ==
+
+= 0.1.6 =
+
+* Refine the Portal landing page, Cloud onboarding, Scan layout, and About page update experience
 
 = 0.1.5 =
 

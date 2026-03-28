@@ -64,14 +64,15 @@ class Freesiem_Results
 		$defaults = freesiem_sentinel_get_default_settings();
 		$empty_cache = is_array($defaults['summary_cache'] ?? null) ? $defaults['summary_cache'] : [];
 
-		freesiem_sentinel_update_settings([
-			'last_local_scan_at' => '',
-			'last_remote_scan_at' => '',
-			'last_sync_at' => '',
-			'fim_last_diff_at' => '',
-			'fim_diff_cache' => [],
-			'summary_cache' => $empty_cache,
-		]);
+		$settings = freesiem_sentinel_get_settings();
+		$settings['last_local_scan_at'] = '';
+		$settings['last_remote_scan_at'] = '';
+		$settings['last_sync_at'] = '';
+		$settings['fim_last_diff_at'] = '';
+		$settings['fim_diff_cache'] = [];
+		$settings['summary_cache'] = $empty_cache;
+
+		update_option(FREESIEM_SENTINEL_OPTION, freesiem_sentinel_sanitize_settings($settings), false);
 
 		return $this->get_cache();
 	}

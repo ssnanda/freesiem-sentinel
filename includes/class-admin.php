@@ -23,11 +23,12 @@ class Freesiem_Admin
 		add_action('admin_post_freesiem_sentinel_start_cloud_connect', [$this, 'handle_start_cloud_connect']);
 		add_action('admin_post_freesiem_sentinel_verify_cloud_connect', [$this, 'handle_verify_cloud_connect']);
 		add_action('admin_post_freesiem_sentinel_save_cloud_preferences', [$this, 'handle_save_cloud_preferences']);
+		add_action('admin_post_freesiem_sentinel_add_cloud_user', [$this, 'handle_add_cloud_user']);
+		add_action('admin_post_freesiem_sentinel_delete_cloud_user', [$this, 'handle_delete_cloud_user']);
 		add_action('admin_post_freesiem_sentinel_request_remote_scan', [$this, 'handle_request_remote_scan']);
 		add_action('admin_post_freesiem_sentinel_sync_results', [$this, 'handle_sync_results']);
 		add_action('admin_post_freesiem_sentinel_reconnect', [$this, 'handle_reconnect']);
 		add_action('admin_post_freesiem_sentinel_disconnect_cloud', [$this, 'handle_disconnect_cloud']);
-		add_action('admin_post_freesiem_sentinel_save_auto_updates', [$this, 'handle_save_auto_updates']);
 		add_action('admin_post_freesiem_sentinel_test_connection', [$this, 'handle_test_connection']);
 	}
 
@@ -37,15 +38,14 @@ class Freesiem_Admin
 			__('freeSIEM', 'freesiem-sentinel'),
 			__('freeSIEM', 'freesiem-sentinel'),
 			'manage_options',
-			'freesiem-dashboard',
+			'freesiem-portal',
 			[$this, 'render_dashboard_page'],
 			'dashicons-shield-alt'
 		);
 
-		add_submenu_page('freesiem-dashboard', __('Dashboard', 'freesiem-sentinel'), __('Dashboard', 'freesiem-sentinel'), 'manage_options', 'freesiem-dashboard', [$this, 'render_dashboard_page']);
-		add_submenu_page('freesiem-dashboard', __('Scan', 'freesiem-sentinel'), __('Scan', 'freesiem-sentinel'), 'manage_options', 'freesiem-scan', [$this, 'render_scan_page']);
-		add_submenu_page('freesiem-dashboard', __('freeSIEM Cloud', 'freesiem-sentinel'), __('freeSIEM Cloud', 'freesiem-sentinel'), 'manage_options', 'freesiem-remote', [$this, 'render_remote_page']);
-		add_submenu_page('freesiem-dashboard', __('About', 'freesiem-sentinel'), __('About', 'freesiem-sentinel'), 'manage_options', 'freesiem-about', [$this, 'render_about_page']);
+		add_submenu_page('freesiem-portal', __('Scan', 'freesiem-sentinel'), __('Scan', 'freesiem-sentinel'), 'manage_options', 'freesiem-scan', [$this, 'render_scan_page']);
+		add_submenu_page('freesiem-portal', __('Cloud', 'freesiem-sentinel'), __('Cloud', 'freesiem-sentinel'), 'manage_options', 'freesiem-remote', [$this, 'render_remote_page']);
+		add_submenu_page('freesiem-portal', __('About', 'freesiem-sentinel'), __('About', 'freesiem-sentinel'), 'manage_options', 'freesiem-about', [$this, 'render_about_page']);
 	}
 
 	public function handle_save_settings(): void
@@ -119,7 +119,13 @@ class Freesiem_Admin
 		$this->assert_manage_permissions();
 		freesiem_sentinel_require_admin_post_nonce();
 
+		$email = isset($_POST['email']) ? sanitize_email(wp_unslash((string) $_POST['email'])) : '';
 		$phone_number = isset($_POST['phone_number']) ? wp_unslash((string) $_POST['phone_number']) : '';
+
+		if ($email === '') {
+			freesiem_sentinel_set_notice('error', __('Enter a valid email address to continue.', 'freesiem-sentinel'));
+			$this->redirect_to_page('freesiem-remote');
+		}
 
 		if (!freesiem_sentinel_is_valid_us_phone($phone_number)) {
 			freesiem_sentinel_set_notice('error', __('Enter a valid US phone number to continue.', 'freesiem-sentinel'));
@@ -127,6 +133,7 @@ class Freesiem_Admin
 		}
 
 		freesiem_sentinel_update_settings([
+			'email' => $email,
 			'phone_number' => $phone_number,
 			'cloud_connection_state' => 'pending_verification',
 			'cloud_verification_code' => '',
@@ -182,6 +189,46 @@ class Freesiem_Admin
 		$this->redirect_to_page('freesiem-remote');
 	}
 
+	public function handle_add_cloud_user(): void
+	{
+		$this->assert_manage_permissions();
+		freesiem_sentinel_require_admin_post_nonce();
+
+		$email = isset($_POST['cloud_user_email']) ? sanitize_email(wp_unslash((string) $_POST['cloud_user_email'])) : '';
+
+		if ($email === '') {
+			freesiem_sentinel_set_notice('error', __('Enter a valid user email address to add it to Cloud user sync.', 'freesiem-sentinel'));
+			$this->redirect_to_page('freesiem-remote');
+		}
+
+		$settings = freesiem_sentinel_get_settings();
+		$users = array_values(array_unique(array_filter(array_merge(
+			freesiem_sentinel_safe_array($settings['cloud_users'] ?? []),
+			[$email]
+		))));
+
+		freesiem_sentinel_update_settings(['cloud_users' => $users]);
+		freesiem_sentinel_set_notice('success', __('Cloud user added.', 'freesiem-sentinel'));
+		$this->redirect_to_page('freesiem-remote');
+	}
+
+	public function handle_delete_cloud_user(): void
+	{
+		$this->assert_manage_permissions();
+		freesiem_sentinel_require_admin_post_nonce();
+
+		$email = isset($_GET['email']) ? sanitize_email(wp_unslash((string) $_GET['email'])) : '';
+		$settings = freesiem_sentinel_get_settings();
+		$users = array_values(array_filter(
+			freesiem_sentinel_safe_array($settings['cloud_users'] ?? []),
+			static fn(string $user_email): bool => $user_email !== $email
+		));
+
+		freesiem_sentinel_update_settings(['cloud_users' => $users]);
+		freesiem_sentinel_set_notice('success', __('Cloud user removed.', 'freesiem-sentinel'));
+		$this->redirect_to_page('freesiem-remote');
+	}
+
 	public function handle_sync_results(): void
 	{
 		$this->assert_manage_permissions();
@@ -220,19 +267,6 @@ class Freesiem_Admin
 		$this->redirect_to_page('freesiem-remote');
 	}
 
-	public function handle_save_auto_updates(): void
-	{
-		$this->assert_manage_permissions();
-		freesiem_sentinel_require_admin_post_nonce();
-
-		freesiem_sentinel_update_settings([
-			'plugin_auto_update' => empty($_POST['plugin_auto_update']) ? 0 : 1,
-		]);
-
-		freesiem_sentinel_set_notice('success', !empty($_POST['plugin_auto_update']) ? __('Automatic plugin updates enabled.', 'freesiem-sentinel') : __('Automatic plugin updates disabled.', 'freesiem-sentinel'));
-		$this->redirect_to_page('freesiem-about');
-	}
-
 	public function handle_test_connection(): void
 	{
 		$this->assert_manage_permissions();
@@ -260,7 +294,7 @@ class Freesiem_Admin
 		$remote_url = freesiem_sentinel_admin_page_url('freesiem-remote');
 
 		echo '<div class="wrap">';
-		echo '<h1>' . esc_html__('Dashboard', 'freesiem-sentinel') . '</h1>';
+		echo '<h1>' . esc_html__('Portal', 'freesiem-sentinel') . '</h1>';
 		echo '<p>' . esc_html__('Your freeSIEM control center for current risk, scan activity, and next actions.', 'freesiem-sentinel') . '</p>';
 
 		echo '<div style="background:linear-gradient(135deg,#09111c,#15253b);padding:22px;border-radius:16px;color:#fff;margin:20px 0 24px;">';
@@ -290,7 +324,7 @@ class Freesiem_Admin
 		echo '<div style="display:flex;gap:12px;flex-wrap:wrap;">';
 		echo '<a class="button button-primary" style="padding:10px 18px;" href="' . esc_url(freesiem_sentinel_admin_page_url('freesiem-scan')) . '">' . esc_html__('Run Scan', 'freesiem-sentinel') . '</a>';
 		echo '<a class="button button-secondary" style="padding:10px 18px;" href="' . esc_url($show_results_url) . '">' . esc_html__('View Results', 'freesiem-sentinel') . '</a>';
-		echo '<a class="button button-secondary" style="padding:10px 18px;" href="' . esc_url($remote_url) . '">' . esc_html__('freeSIEM Cloud', 'freesiem-sentinel') . '</a>';
+		echo '<a class="button button-secondary" style="padding:10px 18px;" href="' . esc_url($remote_url) . '">' . esc_html__('Cloud', 'freesiem-sentinel') . '</a>';
 		echo '</div>';
 		echo '</div>';
 
@@ -378,7 +412,8 @@ class Freesiem_Admin
 		echo '<h1>' . esc_html__('Scan', 'freesiem-sentinel') . '</h1>';
 		echo '<p>' . esc_html__('Configure a scan, run it, and investigate findings from one workflow.', 'freesiem-sentinel') . '</p>';
 
-		echo '<div style="background:#fff;padding:18px 20px;border:1px solid #dcdcde;border-radius:16px;margin-bottom:16px;">';
+		echo '<div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;align-items:start;margin-bottom:20px;">';
+		echo '<div style="background:#fff;padding:18px 20px;border:1px solid #dcdcde;border-radius:16px;">';
 		echo '<h2 style="margin-top:0;">' . esc_html__('Scan Configuration', 'freesiem-sentinel') . '</h2>';
 		echo '<form method="post" action="' . esc_url(admin_url('admin-post.php')) . '">';
 		wp_nonce_field(FREESIEM_SENTINEL_NONCE_ACTION);
@@ -407,7 +442,7 @@ class Freesiem_Admin
 		echo '</form>';
 		echo '</div>';
 
-		echo '<div style="background:#fff;padding:18px 20px;border:1px solid #dcdcde;border-radius:16px;margin-bottom:20px;">';
+		echo '<div style="background:#fff;padding:18px 20px;border:1px solid #dcdcde;border-radius:16px;">';
 		echo '<h2 style="margin-top:0;">' . esc_html__('Scan Summary', 'freesiem-sentinel') . '</h2>';
 		if (empty($settings['last_local_scan_at'])) {
 			$this->render_empty_state(__('No scan has been run yet.', 'freesiem-sentinel'), __('Run your first scan to review findings, file changes, and summary metrics here.', 'freesiem-sentinel'));
@@ -428,6 +463,7 @@ class Freesiem_Admin
 			}
 		}
 		echo '</div>';
+		echo '</div>';
 
 		$this->render_scan_results_section($view);
 		echo '</div>';
@@ -447,9 +483,11 @@ class Freesiem_Admin
 	{
 		$settings = freesiem_sentinel_get_settings();
 		$connection_ok = $this->is_cloud_connected($settings);
+		$email = safe($settings['email'] ?? '');
 		$phone_number = freesiem_sentinel_format_phone((string) ($settings['phone_number'] ?? ''));
 		$masked_phone = freesiem_sentinel_format_phone((string) ($settings['phone_number'] ?? ''), true);
 		$pending_verification = ($settings['cloud_connection_state'] ?? '') === 'pending_verification' && !$connection_ok;
+		$cloud_users = array_values(freesiem_sentinel_safe_array($settings['cloud_users'] ?? []));
 
 		echo '<div class="wrap">';
 		echo '<h1>' . esc_html__('freeSIEM Cloud', 'freesiem-sentinel') . '</h1>';
@@ -461,12 +499,14 @@ class Freesiem_Admin
 		if ($connection_ok) {
 			echo '<div style="padding:16px;border-radius:12px;background:#ecfdf5;border:1px solid #a7f3d0;">';
 			echo '<p style="margin:0 0 10px;font-weight:700;color:#166534;">' . esc_html__('Connected to freeSIEM Cloud', 'freesiem-sentinel') . '</p>';
+			echo '<p style="margin:0 0 8px;"><strong>' . esc_html__('Email', 'freesiem-sentinel') . ':</strong> ' . esc_html($email !== '' ? $email : __('Pending Setup', 'freesiem-sentinel')) . '</p>';
 			echo '<p style="margin:0 0 8px;"><strong>' . esc_html__('Phone', 'freesiem-sentinel') . ':</strong> ' . esc_html($masked_phone !== '' ? $masked_phone : __('Pending Setup', 'freesiem-sentinel')) . '</p>';
 			echo '<p style="margin:0 0 8px;"><strong>' . esc_html__('Site ID', 'freesiem-sentinel') . ':</strong> ' . esc_html($this->friendly_site_id($settings['site_id'] ?? '')) . '</p>';
 			echo '<p style="margin:0;"><strong>' . esc_html__('Agent Status', 'freesiem-sentinel') . ':</strong> ' . esc_html__('Active', 'freesiem-sentinel') . '</p>';
 			echo '</div>';
 		} elseif ($pending_verification) {
 			echo '<p>' . esc_html__('Confirm the code sent to your phone to finish connecting this site to freeSIEM Cloud.', 'freesiem-sentinel') . '</p>';
+			echo '<p><strong>' . esc_html__('Email', 'freesiem-sentinel') . ':</strong> ' . esc_html($email !== '' ? $email : __('Pending Setup', 'freesiem-sentinel')) . '</p>';
 			echo '<p><strong>' . esc_html__('Phone Number', 'freesiem-sentinel') . ':</strong> ' . esc_html($phone_number !== '' ? $phone_number : __('Pending Setup', 'freesiem-sentinel')) . '</p>';
 			echo '<form method="post" action="' . esc_url(admin_url('admin-post.php')) . '">';
 			wp_nonce_field(FREESIEM_SENTINEL_NONCE_ACTION);
@@ -477,11 +517,12 @@ class Freesiem_Admin
 			submit_button(__('Verify & Connect', 'freesiem-sentinel'));
 			echo '</form>';
 		} else {
-			echo '<p>' . esc_html__('Start by saving a US phone number for this site.', 'freesiem-sentinel') . '</p>';
+			echo '<p>' . esc_html__('Start by saving the contact details for this site.', 'freesiem-sentinel') . '</p>';
 			echo '<form method="post" action="' . esc_url(admin_url('admin-post.php')) . '">';
 			wp_nonce_field(FREESIEM_SENTINEL_NONCE_ACTION);
 			echo '<input type="hidden" name="action" value="freesiem_sentinel_start_cloud_connect" />';
 			echo '<table class="form-table" role="presentation">';
+			echo '<tr><th scope="row"><label for="freesiem-cloud-email">' . esc_html__('Email', 'freesiem-sentinel') . '</label></th><td><input class="regular-text" id="freesiem-cloud-email" name="email" type="email" value="' . esc_attr($email) . '" required /></td></tr>';
 			echo '<tr><th scope="row"><label for="freesiem-phone-number">' . esc_html__('Phone Number (US only)', 'freesiem-sentinel') . '</label></th><td><input class="regular-text" id="freesiem-phone-number" name="phone_number" type="tel" value="' . esc_attr($phone_number) . '" placeholder="+1 (___) ___-____" /></td></tr>';
 			echo '</table>';
 			submit_button(__('Connect to freeSIEM Cloud', 'freesiem-sentinel'));
@@ -513,6 +554,32 @@ class Freesiem_Admin
 		echo '<p><label><input type="checkbox" name="user_sync_enabled" value="1"' . checked(!empty($settings['user_sync_enabled']), true, false) . ' /> ' . esc_html__('Enable User Sync (Multi-site management)', 'freesiem-sentinel') . '</label><br /><span style="color:#50575e;">' . esc_html__('Access freeSIEM Cloud to manage multiple sites and users.', 'freesiem-sentinel') . '</span></p>';
 		submit_button(__('Save Cloud Preferences', 'freesiem-sentinel'));
 		echo '</form>';
+		if (!empty($settings['user_sync_enabled'])) {
+			echo '<div style="margin-top:18px;padding:14px;border:1px solid #dbe3ea;border-radius:12px;background:#f8fafc;">';
+			echo '<h3 style="margin-top:0;">' . esc_html__('User Sync', 'freesiem-sentinel') . '</h3>';
+			echo '<form method="post" action="' . esc_url(admin_url('admin-post.php')) . '" style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;margin-bottom:14px;">';
+			wp_nonce_field(FREESIEM_SENTINEL_NONCE_ACTION);
+			echo '<input type="hidden" name="action" value="freesiem_sentinel_add_cloud_user" />';
+			echo '<p style="margin:0;"><label for="freesiem-cloud-user-email" style="display:block;font-weight:600;margin-bottom:6px;">' . esc_html__('Add user email', 'freesiem-sentinel') . '</label><input class="regular-text" id="freesiem-cloud-user-email" name="cloud_user_email" type="email" value="" /></p>';
+			echo '<p style="margin:0;"><button type="submit" class="button button-secondary">' . esc_html__('Add User', 'freesiem-sentinel') . '</button></p>';
+			echo '</form>';
+			if ($cloud_users === []) {
+				$this->render_empty_state(__('No synced users yet.', 'freesiem-sentinel'), __('Add a user here to prepare multi-site management access.', 'freesiem-sentinel'));
+			} else {
+				echo '<table class="widefat striped"><thead><tr><th>' . esc_html__('User', 'freesiem-sentinel') . '</th><th>' . esc_html__('Action', 'freesiem-sentinel') . '</th></tr></thead><tbody>';
+				foreach ($cloud_users as $cloud_user) {
+					$delete_url = freesiem_sentinel_admin_post_url('freesiem_sentinel_delete_cloud_user', ['email' => $cloud_user]);
+					echo '<tr>';
+					echo '<td>' . esc_html($cloud_user) . '</td>';
+					echo '<td><a class="button button-secondary" onclick="return confirm(\''
+						. esc_js(__('Remove this user from Cloud sync?', 'freesiem-sentinel'))
+						. '\');" href="' . esc_url($delete_url) . '">' . esc_html__('Delete User', 'freesiem-sentinel') . '</a></td>';
+					echo '</tr>';
+				}
+				echo '</tbody></table>';
+			}
+			echo '</div>';
+		}
 		echo '</div>';
 		echo '</div>';
 
@@ -546,7 +613,6 @@ class Freesiem_Admin
 		$release_body = trim(safe($release['body'] ?? ''));
 		$release_available = !empty($release['available']);
 		$release_version = safe($release['version'] ?? '');
-		$auto_update_enabled = $this->plugin->get_updater()->is_auto_update_enabled();
 		$update_available = $release_available && version_compare($release_version, FREESIEM_SENTINEL_VERSION, '>');
 
 		echo '<div class="wrap">';
@@ -566,13 +632,8 @@ class Freesiem_Admin
 		} else {
 			echo '<p><button type="button" class="button button-secondary" disabled="disabled">' . esc_html__('Update Plugin', 'freesiem-sentinel') . '</button></p>';
 		}
-		echo '<form method="post" action="' . esc_url(admin_url('admin-post.php')) . '" style="margin:16px 0 20px;">';
-		wp_nonce_field(FREESIEM_SENTINEL_NONCE_ACTION);
-		echo '<input type="hidden" name="action" value="freesiem_sentinel_save_auto_updates" />';
-		echo '<p><label><input type="checkbox" name="plugin_auto_update" value="1"' . checked($auto_update_enabled, true, false) . ' /> ' . esc_html__('Enable automatic plugin updates', 'freesiem-sentinel') . '</label></p>';
-		echo '<p style="margin:0;color:#50575e;">' . esc_html($auto_update_enabled ? __('Automatic updates enabled', 'freesiem-sentinel') : __('Automatic updates disabled', 'freesiem-sentinel')) . '</p>';
-		echo '<p style="margin-top:12px;"><button type="submit" class="button button-secondary">' . esc_html__('Save Update Preference', 'freesiem-sentinel') . '</button></p>';
-		echo '</form>';
+		echo '<p><strong>' . esc_html__('Automatic Updates', 'freesiem-sentinel') . ':</strong> ' . esc_html__('Enabled by default for this plugin.', 'freesiem-sentinel') . '</p>';
+		echo '<p style="color:#50575e;">' . esc_html__('WordPress checks for plugin updates on its normal update schedule, roughly every 12 hours, and also whenever you click Check for Updates here. If a newer GitHub release is found, the Update Plugin button appears immediately on this page. Automatic updates are then applied during WordPress background update runs.', 'freesiem-sentinel') . '</p>';
 		echo '<p><strong>' . esc_html__('API Key:', 'freesiem-sentinel') . '</strong> <code>' . esc_html(freesiem_sentinel_mask_secret((string) ($settings['api_key'] ?? ''))) . '</code></p>';
 		echo '<p><strong>' . esc_html__('HMAC Secret:', 'freesiem-sentinel') . '</strong> <code>' . esc_html(freesiem_sentinel_mask_secret((string) ($settings['hmac_secret'] ?? ''))) . '</code></p>';
 		echo '<p><strong>' . esc_html__('Check for Updates:', 'freesiem-sentinel') . '</strong> <a class="button button-secondary" href="' . esc_url(freesiem_sentinel_safe_string($this->plugin->get_updater()->get_check_updates_url(freesiem_sentinel_admin_page_url('freesiem-about')))) . '">' . esc_html__('Check for Updates', 'freesiem-sentinel') . '</a></p>';
@@ -581,10 +642,6 @@ class Freesiem_Admin
 		}
 		echo '</div>';
 
-		echo '<div style="background:#fff;padding:20px;border:1px solid #dcdcde;border-radius:12px;margin-top:20px;">';
-		echo '<h2 style="margin-top:0;">' . esc_html__('Updater Cache', 'freesiem-sentinel') . '</h2>';
-		echo '<pre style="white-space:pre-wrap;overflow:auto;">' . esc_html(freesiem_sentinel_safe_json_pretty($settings['updater_cache'] ?? [])) . '</pre>';
-		echo '</div>';
 		echo '<div style="background:#fff;padding:20px;border:1px solid #dcdcde;border-radius:12px;margin-top:20px;">';
 		echo '<h2 style="margin-top:0;">' . esc_html__('Latest Release Notes', 'freesiem-sentinel') . '</h2>';
 		if (!$release_available) {
@@ -608,7 +665,6 @@ class Freesiem_Admin
 		$search = $view['search'];
 		$selected_severities = $view['selected_severities'];
 		$finding = $view['finding'];
-		$clear_results_url = freesiem_sentinel_admin_post_url('freesiem_sentinel_clear_results');
 		$active_change_type = freesiem_sentinel_safe_string($view['change_filters']['change_type'] ?? '');
 		$active_change_path = freesiem_sentinel_safe_string($view['change_filters']['change_path'] ?? '');
 		$scan_metrics = array_merge(
@@ -626,11 +682,6 @@ class Freesiem_Admin
 		echo '<div id="freesiem-results-section" style="background:#fff;padding:24px;border:1px solid #dcdcde;border-radius:16px;">';
 		echo '<div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:20px;">';
 		echo '<h2 style="margin:0;">' . esc_html__('Scan Results', 'freesiem-sentinel') . '</h2>';
-		echo '<div style="display:flex;gap:10px;flex-wrap:wrap;">';
-		echo '<a class="button button-secondary" onclick="return confirm(\''
-			. esc_js(__('Clear the stored scan results and findings?', 'freesiem-sentinel'))
-			. '\');" href="' . esc_url($clear_results_url) . '">' . esc_html__('Clear Results', 'freesiem-sentinel') . '</a>';
-		echo '</div>';
 		echo '</div>';
 
 		if (is_array($finding)) {

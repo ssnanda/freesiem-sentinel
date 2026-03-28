@@ -288,7 +288,7 @@ class Freesiem_Updater
 
 	public function is_auto_update_enabled(): bool
 	{
-		return !empty(freesiem_sentinel_get_setting('plugin_auto_update', 0));
+		return true;
 	}
 
 	public function filter_auto_update_plugin($update, $item)

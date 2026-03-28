@@ -11,13 +11,14 @@ function freesiem_sentinel_get_default_settings(): array
 		'plugin_uuid' => '',
 		'email' => '',
 		'phone_number' => '',
+		'cloud_users' => [],
 		'cloud_connection_state' => 'disconnected',
 		'cloud_verification_code' => '',
 		'cloud_connected_at' => '',
 		'allow_remote_scan' => 1,
 		'scan_frequency' => 'daily',
 		'user_sync_enabled' => 0,
-		'plugin_auto_update' => 0,
+		'plugin_auto_update' => 1,
 		'backend_url' => FREESIEM_SENTINEL_BACKEND_URL,
 		'api_key' => '',
 		'hmac_secret' => '',
@@ -130,6 +131,7 @@ function freesiem_sentinel_sanitize_settings(array $settings): array
 	$settings['plugin_uuid'] = sanitize_text_field((string) $settings['plugin_uuid']);
 	$settings['email'] = sanitize_email((string) $settings['email']);
 	$settings['phone_number'] = freesiem_sentinel_sanitize_phone_number((string) ($settings['phone_number'] ?? ''));
+	$settings['cloud_users'] = array_values(array_filter(array_map('sanitize_email', is_array($settings['cloud_users'] ?? null) ? $settings['cloud_users'] : [])));
 	$settings['cloud_connection_state'] = in_array((string) ($settings['cloud_connection_state'] ?? 'disconnected'), ['disconnected', 'pending_verification', 'connected'], true) ? (string) $settings['cloud_connection_state'] : 'disconnected';
 	$settings['cloud_verification_code'] = sanitize_text_field((string) ($settings['cloud_verification_code'] ?? ''));
 	$settings['cloud_connected_at'] = freesiem_sentinel_sanitize_datetime((string) ($settings['cloud_connected_at'] ?? ''));
