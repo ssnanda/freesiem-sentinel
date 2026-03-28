@@ -164,7 +164,6 @@ class Freesiem_Admin
 	{
 		$settings = freesiem_sentinel_get_settings();
 		$prefs = freesiem_sentinel_safe_array($settings['scan_preferences'] ?? []);
-		$pro_plan = Freesiem_Features::is_enabled('fim');
 
 		echo '<div class="wrap">';
 		echo '<h1>' . esc_html__('Local Scan', 'freesiem-sentinel') . '</h1>';
@@ -177,11 +176,7 @@ class Freesiem_Admin
 		echo '<tr><th scope="row">' . esc_html__('Scan Modules', 'freesiem-sentinel') . '</th><td>';
 		echo '<label style="display:block;margin-bottom:8px;"><input type="checkbox" name="scan_wordpress" value="1"' . checked(!empty($prefs['scan_wordpress']), true, false) . ' /> ' . esc_html__('WordPress Configuration Scan', 'freesiem-sentinel') . '</label>';
 		echo '<label style="display:block;margin-bottom:8px;"><input type="checkbox" name="scan_filesystem" value="1"' . checked(!empty($prefs['scan_filesystem']), true, false) . ' /> ' . esc_html__('Filesystem Scan', 'freesiem-sentinel') . '</label>';
-		if ($pro_plan) {
-			echo '<label style="display:block;"><input type="checkbox" name="scan_fim" value="1"' . checked(!empty($prefs['scan_fim']), true, false) . ' /> ' . esc_html__('File Integrity Monitoring', 'freesiem-sentinel') . '</label>';
-		} else {
-			echo '<label style="display:block;color:#50575e;"><input type="checkbox" disabled="disabled" /> ' . esc_html__('File Integrity Monitoring (Pro)', 'freesiem-sentinel') . '</label>';
-		}
+		echo '<label style="display:block;"><input type="checkbox" name="scan_fim" value="1"' . checked(!empty($prefs['scan_fim']), true, false) . ' /> ' . esc_html__('File Integrity Monitoring', 'freesiem-sentinel') . '</label>';
 		echo '</td></tr>';
 		echo '<tr><th scope="row">' . esc_html__('Advanced Options', 'freesiem-sentinel') . '</th><td>';
 		echo '<p><label>' . esc_html__('Max files', 'freesiem-sentinel') . ' <input type="number" min="100" max="5000" step="100" name="max_files" value="' . esc_attr(freesiem_sentinel_safe_string($prefs['max_files'] ?? '1000')) . '" /></label></p>';
@@ -396,13 +391,15 @@ class Freesiem_Admin
 		$settings = freesiem_sentinel_get_settings();
 		$release = $this->plugin->get_updater()->get_github_release_data();
 		$release = is_wp_error($release) ? [] : freesiem_sentinel_safe_array($release);
-		$release_body = trim(freesiem_sentinel_safe_string($release['body'] ?? ''));
+		$release_body = trim(safe($release['body'] ?? ''));
+		$release_available = !empty($release['available']);
+		$release_version = safe($release['version'] ?? '');
 
 		echo '<div class="wrap">';
 		echo '<h1>' . esc_html__('About freeSIEM Sentinel', 'freesiem-sentinel') . '</h1>';
 		echo '<p>' . esc_html__('Release, plan, and agent identity details for this WordPress deployment.', 'freesiem-sentinel') . '</p>';
 		$this->render_card_grid_start();
-		$this->render_stat_card(__('Plugin Version', 'freesiem-sentinel'), FREESIEM_SENTINEL_VERSION, __('Latest Release', 'freesiem-sentinel'), freesiem_sentinel_safe_string($release['version'] ?? 'Unavailable'));
+		$this->render_stat_card(__('Plugin Version', 'freesiem-sentinel'), FREESIEM_SENTINEL_VERSION, __('Latest Release', 'freesiem-sentinel'), $release_available ? $release_version : __('No releases available', 'freesiem-sentinel'));
 		$this->render_stat_card(__('Connected To', 'freesiem-sentinel'), __('freeSIEM Core', 'freesiem-sentinel'), __('Registration', 'freesiem-sentinel'), strtoupper(freesiem_sentinel_safe_string($settings['registration_status'] ?? '')));
 		$this->render_stat_card(__('Site ID', 'freesiem-sentinel'), freesiem_sentinel_safe_string($settings['site_id'] ?? 'Pending') ?: 'Pending', __('Plan', 'freesiem-sentinel'), ucfirst($this->plugin->get_plan()));
 		echo '</div>';
@@ -426,7 +423,9 @@ class Freesiem_Admin
 		echo '</div>';
 		echo '<div style="background:#fff;padding:20px;border:1px solid #dcdcde;border-radius:12px;margin-top:20px;">';
 		echo '<h2 style="margin-top:0;">' . esc_html__('Latest Release Notes', 'freesiem-sentinel') . '</h2>';
-		if ($release_body === '') {
+		if (!$release_available) {
+			$this->render_empty_state(__('No releases available', 'freesiem-sentinel'), __('Create a GitHub release and attach freesiem-sentinel.zip to enable packaged updates.', 'freesiem-sentinel'));
+		} elseif ($release_body === '') {
 			$this->render_empty_state(__('No release notes available', 'freesiem-sentinel'), __('The latest GitHub release did not include a changelog body.', 'freesiem-sentinel'));
 		} else {
 			echo '<pre style="white-space:pre-wrap;overflow:auto;">' . esc_html($release_body) . '</pre>';

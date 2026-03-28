@@ -16,22 +16,6 @@ class Freesiem_Features
 
 	public static function is_enabled(string $feature): bool
 	{
-		$plan = self::get_plan();
-
-		$map = [
-			'free' => [
-				'basic_scan' => true,
-				'filesystem_basic' => true,
-			],
-			'pro' => [
-				'basic_scan' => true,
-				'filesystem_basic' => true,
-				'filesystem_advanced' => true,
-				'fim' => true,
-				'high_frequency' => true,
-			],
-		];
-
-		return !empty($map[$plan][$feature]);
+		return true;
 	}
 }

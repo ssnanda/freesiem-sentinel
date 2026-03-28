@@ -1,0 +1,30 @@
+name: Build Plugin Zip
+
+on:
+  workflow_dispatch:
+  release:
+    types: [published]
+
+jobs:
+  build-zip:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build plugin zip
+        run: |
+          mkdir -p dist/freesiem-sentinel
+          rsync -av \
+            --exclude=".git" \
+            --exclude=".github" \
+            --exclude="dist" \
+            ./ dist/freesiem-sentinel/
+          cd dist
+          zip -r freesiem-sentinel.zip freesiem-sentinel
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: freesiem-sentinel-zip
+          path: dist/freesiem-sentinel.zip

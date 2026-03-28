@@ -27,7 +27,7 @@ function freesiem_sentinel_get_default_settings(): array
 		'scan_preferences' => [
 			'scan_wordpress' => 1,
 			'scan_filesystem' => 1,
-			'scan_fim' => 0,
+			'scan_fim' => 1,
 			'include_uploads' => 0,
 			'max_files' => 1000,
 			'max_depth' => 5,
@@ -61,6 +61,11 @@ function freesiem_sentinel_safe_string($value): string
 	}
 
 	return '';
+}
+
+function safe($value): string
+{
+	return is_null($value) ? '' : freesiem_sentinel_safe_string($value);
 }
 
 function freesiem_sentinel_safe_array($value): array
@@ -275,18 +280,18 @@ function freesiem_sentinel_safe_query_args(array $args): array
 	$safe = [];
 
 	foreach ($args as $key => $value) {
-		$key = freesiem_sentinel_safe_string($key);
+		$key = safe($key);
 
 		if ($key === '' || $value === null) {
 			continue;
 		}
 
 		if (is_array($value)) {
-			$safe[$key] = array_values(array_map(static fn($item): string => freesiem_sentinel_safe_string($item), $value));
+			$safe[$key] = array_values(array_map(static fn($item): string => safe($item), $value));
 			continue;
 		}
 
-		$safe[$key] = freesiem_sentinel_safe_string($value);
+		$safe[$key] = safe($value);
 	}
 
 	return $safe;
