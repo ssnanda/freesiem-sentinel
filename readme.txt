@@ -3,7 +3,7 @@ Contributors: freesiem
 Requires at least: 6.4
 Tested up to: 6.8
 Requires PHP: 8.1
-Stable tag: 0.2.1
+Stable tag: 0.2.2
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -70,6 +70,11 @@ Version bumps should always have matching git tags.
 GitHub Actions publishes the ZIP automatically when a `v*` tag is pushed.
 
 == Changelog ==
+
+= 0.2.2 =
+
+* Send an immediate heartbeat back to freeSIEM Core whenever a pending task status changes, including approve, deny, executing, completed, and failed
+* Keep the scheduled priority-heartbeat fallback so task status reporting stays resilient if the immediate send cannot complete
 
 = 0.2.1 =
 

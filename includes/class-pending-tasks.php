@@ -15,6 +15,10 @@ class Freesiem_Pending_Tasks
 	public const HEARTBEAT_THROTTLE_TRANSIENT = 'freesiem_sentinel_task_heartbeat_throttle';
 	private const REPORTABLE_STATUSES = ['pending', 'approved', 'denied', 'auto_approved', 'executing', 'completed', 'failed', 'canceled', 'expired'];
 	private const PASSWORD_KEYS = ['password', 'user_pass', 'pass', 'password_hash', 'hash', 'temporary_password', 'temp_password'];
+	private const CREATE_USER_MODE_RESET = 'send_reset_email';
+	private const CREATE_USER_MODE_PASSWORD = 'explicit_password';
+	private const PROTECTED_PASSWORD_KEY = 'password_protected';
+	private const REDACTED_SECRET = '[REDACTED]';
 
 	private Freesiem_Plugin $plugin;
 
@@ -149,8 +153,10 @@ class Freesiem_Pending_Tasks
 			return new WP_Error('freesiem_invalid_task', __('The task request is missing a valid task identifier or action type.', 'freesiem-sentinel'), ['status' => 400]);
 		}
 
-		if ($this->payload_contains_restricted_secret($payload)) {
-			return new WP_Error('freesiem_password_payload_rejected', __('Task payloads must not include raw passwords or password hashes.', 'freesiem-sentinel'), ['status' => 400]);
+		$payload = $this->validate_incoming_task_payload($action_type, $payload);
+
+		if (is_wp_error($payload)) {
+			return $payload;
 		}
 
 		if ($action_type === 'set_temp_password' || !empty($payload['set_temp_password'])) {
@@ -177,7 +183,12 @@ class Freesiem_Pending_Tasks
 		$auto_approve_at = $policy['auto_approve_enabled']
 			? gmdate('Y-m-d H:i:s', strtotime('+' . (int) $policy['auto_approve_after_minutes'] . ' minutes', strtotime($now . ' UTC')))
 			: null;
-		$payload_for_storage = $this->sanitize_payload_for_storage($payload);
+		$payload_for_storage = $this->prepare_payload_for_storage($payload, $action_type);
+
+		if (is_wp_error($payload_for_storage)) {
+			return $payload_for_storage;
+		}
+
 		$target = $this->derive_target_fields($action_type, $payload_for_storage);
 
 		global $wpdb;
@@ -396,7 +407,7 @@ class Freesiem_Pending_Tasks
 		}
 
 		$this->insert_event($task_id, 'task_approved', __('Task approved by a local WordPress user.', 'freesiem-sentinel'), [], $wp_user_id);
-		$this->mark_heartbeat_dirty();
+		$this->mark_heartbeat_dirty(true);
 
 		return $this->execute_task($task_id);
 	}
@@ -424,7 +435,7 @@ class Freesiem_Pending_Tasks
 		}
 
 		$this->insert_event($task_id, 'task_denied', __('Task denied by a local WordPress user.', 'freesiem-sentinel'), ['deny_reason' => sanitize_textarea_field($reason)], $wp_user_id);
-		$this->mark_heartbeat_dirty();
+		$this->mark_heartbeat_dirty(true);
 
 		return true;
 	}
@@ -446,7 +457,7 @@ class Freesiem_Pending_Tasks
 		}
 
 		$this->insert_event($task_id, 'task_auto_approved', __('Task was auto-approved after the configured timeout.', 'freesiem-sentinel'));
-		$this->mark_heartbeat_dirty();
+		$this->mark_heartbeat_dirty(true);
 		$this->execute_task($task_id);
 
 		return true;
@@ -469,7 +480,7 @@ class Freesiem_Pending_Tasks
 		}
 
 		$this->insert_event($task_id, 'execution_started', __('Task execution started locally in WordPress.', 'freesiem-sentinel'));
-		$this->mark_heartbeat_dirty();
+		$this->mark_heartbeat_dirty(true);
 
 		$payload = json_decode((string) ($task['payload_json'] ?? ''), true);
 		$result = $this->run_local_action((string) $task['action_type'], is_array($payload) ? $payload : []);
@@ -483,7 +494,7 @@ class Freesiem_Pending_Tasks
 				'execution_result_json' => wp_json_encode([]),
 			]);
 			$this->insert_event($task_id, 'execution_failed', __('Task execution failed locally.', 'freesiem-sentinel'), ['error' => sanitize_text_field($result->get_error_message())]);
-			$this->mark_heartbeat_dirty();
+			$this->mark_heartbeat_dirty(true);
 
 			return $result;
 		}
@@ -495,7 +506,7 @@ class Freesiem_Pending_Tasks
 			'error_message' => null,
 		]);
 		$this->insert_event($task_id, 'execution_completed', __('Task execution completed successfully.', 'freesiem-sentinel'));
-		$this->mark_heartbeat_dirty();
+		$this->mark_heartbeat_dirty(true);
 
 		return true;
 	}
@@ -564,12 +575,16 @@ class Freesiem_Pending_Tasks
 		]);
 	}
 
-	public function mark_heartbeat_dirty(): void
+	public function mark_heartbeat_dirty(bool $send_immediately = false): void
 	{
 		freesiem_sentinel_update_settings([
 			'pending_tasks_heartbeat_dirty' => 1,
 			'last_task_activity_at' => freesiem_sentinel_get_iso8601_time(),
 		]);
+
+		if ($send_immediately) {
+			$this->plugin->send_priority_heartbeat();
+		}
 
 		$this->schedule_priority_heartbeat();
 	}
@@ -745,6 +760,102 @@ class Freesiem_Pending_Tasks
 		return false;
 	}
 
+	private function validate_incoming_task_payload(string $action_type, array $payload): array|WP_Error
+	{
+		if ($action_type === 'create_user') {
+			return $this->validate_create_user_payload($payload);
+		}
+
+		if ($this->payload_contains_restricted_secret($payload)) {
+			return new WP_Error('freesiem_password_payload_rejected', __('Task payloads must not include raw passwords or password hashes.', 'freesiem-sentinel'), ['status' => 400]);
+		}
+
+		return $payload;
+	}
+
+	private function validate_create_user_payload(array $payload): array|WP_Error
+	{
+		if ($this->payload_contains_restricted_secret_except_create_user_password($payload)) {
+			return new WP_Error('freesiem_password_payload_rejected', __('Create user tasks may only include a password when using explicit password provisioning.', 'freesiem-sentinel'), ['status' => 400]);
+		}
+
+		$mode = $this->resolve_create_user_mode($payload);
+
+		if (!in_array($mode, [self::CREATE_USER_MODE_RESET, self::CREATE_USER_MODE_PASSWORD], true)) {
+			return new WP_Error('freesiem_create_user_mode_invalid', __('Create user tasks must use a supported provisioning mode.', 'freesiem-sentinel'), ['status' => 400]);
+		}
+
+		$password = $this->extract_create_user_password($payload);
+
+		if ($mode === self::CREATE_USER_MODE_PASSWORD && $password === '') {
+			return new WP_Error('freesiem_create_user_password_required', __('Explicit password provisioning requires a non-empty password.', 'freesiem-sentinel'), ['status' => 400]);
+		}
+
+		if ($mode === self::CREATE_USER_MODE_RESET && $password !== '') {
+			return new WP_Error('freesiem_create_user_password_unexpected', __('Reset-email provisioning must not include a raw password.', 'freesiem-sentinel'), ['status' => 400]);
+		}
+
+		return $payload;
+	}
+
+	private function payload_contains_restricted_secret_except_create_user_password(array $payload): bool
+	{
+		foreach ($payload as $key => $value) {
+			$key = sanitize_key((string) $key);
+
+			if (in_array($key, self::PASSWORD_KEYS, true)) {
+				return !in_array($key, ['password', 'user_pass', 'pass'], true);
+			}
+
+			if (is_array($value) && $this->payload_contains_restricted_secret_except_create_user_password($value)) {
+				return true;
+			}
+		}
+
+		return false;
+	}
+
+	private function prepare_payload_for_storage(array $payload, string $action_type): array|WP_Error
+	{
+		$sanitized = $this->sanitize_payload_for_storage($payload);
+
+		if ($action_type !== 'create_user') {
+			return $sanitized;
+		}
+
+		$mode = $this->resolve_create_user_mode($payload);
+		$password = $this->extract_create_user_password($payload);
+		$target_key = is_array($payload['target'] ?? null) ? 'target' : '';
+
+		if ($target_key !== '' && (!isset($sanitized[$target_key]) || !is_array($sanitized[$target_key]))) {
+			$sanitized[$target_key] = [];
+		}
+
+		if ($target_key !== '') {
+			$sanitized[$target_key]['provisioning_mode'] = $mode;
+		} else {
+			$sanitized['provisioning_mode'] = $mode;
+		}
+
+		if ($mode === self::CREATE_USER_MODE_PASSWORD) {
+			$protected_password = $this->protect_secret($password);
+
+			if (is_wp_error($protected_password)) {
+				return $protected_password;
+			}
+
+			if ($target_key !== '') {
+				$sanitized[$target_key]['password'] = self::REDACTED_SECRET;
+				$sanitized[$target_key][self::PROTECTED_PASSWORD_KEY] = $protected_password;
+			} else {
+				$sanitized['password'] = self::REDACTED_SECRET;
+				$sanitized[self::PROTECTED_PASSWORD_KEY] = $protected_password;
+			}
+		}
+
+		return $sanitized;
+	}
+
 	private function sanitize_payload_for_storage(array $payload): array
 	{
 		$sanitized = [];
@@ -756,12 +867,49 @@ class Freesiem_Pending_Tasks
 				continue;
 			}
 
-			if (in_array($key, self::PASSWORD_KEYS, true)) {
+			if (in_array($key, self::PASSWORD_KEYS, true) || $key === self::PROTECTED_PASSWORD_KEY) {
 				continue;
 			}
 
 			if (is_array($value)) {
 				$sanitized[$key] = $this->sanitize_payload_for_storage($value);
+				continue;
+			}
+
+			if (is_bool($value)) {
+				$sanitized[$key] = $value;
+				continue;
+			}
+
+			if (is_numeric($value)) {
+				$sanitized[$key] = 0 + $value;
+				continue;
+			}
+
+			$sanitized[$key] = sanitize_text_field((string) $value);
+		}
+
+		return $sanitized;
+	}
+
+	private function sanitize_payload_for_output(array $payload): array
+	{
+		$sanitized = [];
+
+		foreach ($payload as $key => $value) {
+			$key = sanitize_key((string) $key);
+
+			if ($key === '' || $key === self::PROTECTED_PASSWORD_KEY) {
+				continue;
+			}
+
+			if (in_array($key, self::PASSWORD_KEYS, true)) {
+				$sanitized[$key] = self::REDACTED_SECRET;
+				continue;
+			}
+
+			if (is_array($value)) {
+				$sanitized[$key] = $this->sanitize_payload_for_output($value);
 				continue;
 			}
 
@@ -935,9 +1083,18 @@ class Freesiem_Pending_Tasks
 		$user_login = sanitize_user((string) ($target['username'] ?? $target['user_login'] ?? ''), true);
 		$user_email = sanitize_email((string) ($target['email'] ?? $target['user_email'] ?? ''));
 		$role = sanitize_key((string) ($target['role'] ?? get_option('default_role', 'subscriber')));
+		$mode = $this->resolve_create_user_mode($payload);
 
 		if ($user_login === '' || $user_email === '') {
 			return new WP_Error('freesiem_create_user_invalid', __('Create user tasks require both a username and email address.', 'freesiem-sentinel'));
+		}
+
+		$password = $mode === self::CREATE_USER_MODE_PASSWORD
+			? $this->extract_password_for_execution($payload)
+			: wp_generate_password(24, true, true);
+
+		if (is_wp_error($password)) {
+			return $password;
 		}
 
 		$user_id = wp_insert_user([
@@ -947,21 +1104,27 @@ class Freesiem_Pending_Tasks
 			'last_name' => sanitize_text_field((string) ($target['last_name'] ?? '')),
 			'display_name' => sanitize_text_field((string) ($target['display_name'] ?? $user_login)),
 			'role' => $role !== '' ? $role : get_option('default_role', 'subscriber'),
-			'user_pass' => wp_generate_password(24, true, true),
+			'user_pass' => $password,
 		]);
 
 		if (is_wp_error($user_id)) {
 			return $user_id;
 		}
 
-		retrieve_password($user_login);
+		$password_reset_sent = false;
+
+		if ($mode === self::CREATE_USER_MODE_RESET) {
+			$password_reset_sent = (bool) retrieve_password($user_login);
+		}
 
 		return [
 			'user_id' => (int) $user_id,
 			'username' => $user_login,
 			'email' => $user_email,
 			'role' => $role,
-			'password_reset_sent' => true,
+			'provisioning_mode' => $mode,
+			'password_reset_sent' => $password_reset_sent,
+			'local_password_set' => $mode === self::CREATE_USER_MODE_PASSWORD,
 		];
 	}
 
@@ -1288,7 +1451,7 @@ class Freesiem_Pending_Tasks
 		$task['decided_by_wp_user_id'] = !empty($task['decided_by_wp_user_id']) ? (int) $task['decided_by_wp_user_id'] : 0;
 		$task['auto_approve_enabled'] = !empty($task['auto_approve_enabled']) ? 1 : 0;
 		$task['signature_verified'] = !empty($task['signature_verified']) ? 1 : 0;
-		$task['payload'] = json_decode((string) ($task['payload_json'] ?? ''), true);
+		$task['payload'] = $this->sanitize_payload_for_output((array) json_decode((string) ($task['payload_json'] ?? ''), true));
 		$task['execution_result'] = json_decode((string) ($task['execution_result_json'] ?? ''), true);
 		$task['requested_at'] = $this->format_mysql_datetime((string) ($task['requested_at'] ?? ''));
 		$task['approved_at'] = $this->format_mysql_datetime((string) ($task['approved_at'] ?? ''));
@@ -1301,6 +1464,117 @@ class Freesiem_Pending_Tasks
 		$task['updated_at'] = $this->format_mysql_datetime((string) ($task['updated_at'] ?? ''));
 
 		return $task;
+	}
+
+	private function resolve_create_user_mode(array $payload): string
+	{
+		$target = is_array($payload['target'] ?? null) ? $payload['target'] : [];
+		$mode = sanitize_key((string) ($target['provisioning_mode'] ?? $target['mode'] ?? $payload['provisioning_mode'] ?? $payload['mode'] ?? ''));
+		$password = $this->extract_create_user_password($payload);
+
+		if ($mode === self::CREATE_USER_MODE_PASSWORD || ($mode === '' && $password !== '')) {
+			return self::CREATE_USER_MODE_PASSWORD;
+		}
+
+		return self::CREATE_USER_MODE_RESET;
+	}
+
+	private function extract_create_user_password(array $payload): string
+	{
+		$target = is_array($payload['target'] ?? null) ? $payload['target'] : [];
+
+		foreach (['password', 'user_pass', 'pass'] as $key) {
+			if (!empty($target[$key]) && is_string($target[$key])) {
+				return (string) $target[$key];
+			}
+
+			if (!empty($payload[$key]) && is_string($payload[$key])) {
+				return (string) $payload[$key];
+			}
+		}
+
+		return '';
+	}
+
+	private function extract_password_for_execution(array $payload): string|WP_Error
+	{
+		$target = is_array($payload['target'] ?? null) ? $payload['target'] : [];
+
+		if (!empty($target[self::PROTECTED_PASSWORD_KEY]) && is_string($target[self::PROTECTED_PASSWORD_KEY])) {
+			return $this->reveal_protected_secret((string) $target[self::PROTECTED_PASSWORD_KEY]);
+		}
+
+		$password = $this->extract_create_user_password($payload);
+
+		if ($password === '') {
+			return new WP_Error('freesiem_create_user_password_required', __('Explicit password provisioning requires a protected password payload.', 'freesiem-sentinel'));
+		}
+
+		return $password;
+	}
+
+	private function protect_secret(string $secret): string|WP_Error
+	{
+		if ($secret === '') {
+			return new WP_Error('freesiem_secret_empty', __('freeSIEM Sentinel requires a non-empty secret value.', 'freesiem-sentinel'));
+		}
+
+		if (!function_exists('openssl_encrypt') || !function_exists('openssl_decrypt')) {
+			return new WP_Error('freesiem_secret_protection_unavailable', __('OpenSSL is required for protected password storage.', 'freesiem-sentinel'));
+		}
+
+		$key = $this->get_secret_protection_key();
+		$iv = random_bytes(16);
+		$ciphertext = openssl_encrypt($secret, 'aes-256-cbc', $key, OPENSSL_RAW_DATA, $iv);
+
+		if (!is_string($ciphertext) || $ciphertext === '') {
+			return new WP_Error('freesiem_secret_protection_failed', __('freeSIEM Sentinel could not protect the supplied password.', 'freesiem-sentinel'));
+		}
+
+		$mac = hash_hmac('sha256', $iv . $ciphertext, $key);
+
+		return 'v1:' . base64_encode($iv) . ':' . base64_encode($ciphertext) . ':' . $mac;
+	}
+
+	private function reveal_protected_secret(string $protected): string|WP_Error
+	{
+		if (!function_exists('openssl_decrypt')) {
+			return new WP_Error('freesiem_secret_protection_unavailable', __('OpenSSL is required for protected password storage.', 'freesiem-sentinel'));
+		}
+
+		$parts = explode(':', $protected, 4);
+
+		if (count($parts) !== 4 || $parts[0] !== 'v1') {
+			return new WP_Error('freesiem_secret_payload_invalid', __('freeSIEM Sentinel could not read the protected password payload.', 'freesiem-sentinel'));
+		}
+
+		$iv = base64_decode($parts[1], true);
+		$ciphertext = base64_decode($parts[2], true);
+		$mac = sanitize_text_field((string) $parts[3]);
+		$key = $this->get_secret_protection_key();
+
+		if (!is_string($iv) || !is_string($ciphertext) || $iv === '' || $ciphertext === '') {
+			return new WP_Error('freesiem_secret_payload_invalid', __('freeSIEM Sentinel could not read the protected password payload.', 'freesiem-sentinel'));
+		}
+
+		$expected_mac = hash_hmac('sha256', $iv . $ciphertext, $key);
+
+		if (!hash_equals($expected_mac, $mac)) {
+			return new WP_Error('freesiem_secret_payload_invalid', __('freeSIEM Sentinel could not verify the protected password payload.', 'freesiem-sentinel'));
+		}
+
+		$secret = openssl_decrypt($ciphertext, 'aes-256-cbc', $key, OPENSSL_RAW_DATA, $iv);
+
+		if (!is_string($secret) || $secret === '') {
+			return new WP_Error('freesiem_secret_payload_invalid', __('freeSIEM Sentinel could not decrypt the protected password payload.', 'freesiem-sentinel'));
+		}
+
+		return $secret;
+	}
+
+	private function get_secret_protection_key(): string
+	{
+		return hash('sha256', wp_salt('auth') . '|' . site_url('/') . '|' . FREESIEM_SENTINEL_SLUG, true);
 	}
 
 	private function format_mysql_datetime(string $value): string
