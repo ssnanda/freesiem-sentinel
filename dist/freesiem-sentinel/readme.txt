@@ -3,7 +3,7 @@ Contributors: freesiem
 Requires at least: 6.4
 Tested up to: 6.8
 Requires PHP: 8.1
-Stable tag: 0.1.15
+Stable tag: 0.2.0
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -18,6 +18,7 @@ Features:
 * Site registration with freeSIEM Core
 * Secure heartbeat every 15 minutes
 * Strictly whitelisted remote command handling
+* Signed remote Pending Tasks queue for sensitive user-management actions
 * Read-only local security scanning
 * Secure HMAC-signed local scan uploads
 * Remote scan trigger requests
@@ -69,6 +70,13 @@ Version bumps should always have matching git tags.
 GitHub Actions publishes the ZIP automatically when a `v*` tag is pushed.
 
 == Changelog ==
+
+= 0.2.0 =
+
+* Add a signed Pending Tasks approval queue for remote user-management actions from freeSIEM Core
+* Add local approve, deny, auto-approve, execution, audit trail, and heartbeat task reporting flows
+* Add Pending Tasks wp-admin review UI and configurable approval policy settings
+* Add a repo-native smoke test script for queue submission, idempotency, approvals, and heartbeat redaction
 
 = 0.1.15 =
 

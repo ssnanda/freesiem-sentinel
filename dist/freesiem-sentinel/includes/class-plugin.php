@@ -16,6 +16,7 @@ class Freesiem_Plugin
 	private Freesiem_Updater $updater;
 	private Freesiem_Admin $admin;
 	private Freesiem_Cloud_Connect_Client $cloud_connect_client;
+	private Freesiem_Pending_Tasks $pending_tasks;
 
 	public static function instance(): self
 	{
@@ -28,6 +29,7 @@ class Freesiem_Plugin
 
 	public function __construct()
 	{
+		$this->pending_tasks = new Freesiem_Pending_Tasks($this);
 		$this->bootstrap_settings();
 		$this->api_client = new Freesiem_API_Client();
 		$this->cloud_connect_client = new Freesiem_Cloud_Connect_Client();
@@ -46,12 +48,14 @@ class Freesiem_Plugin
 		$this->cron->register();
 		$this->updater->register();
 		$this->admin->register();
+		$this->pending_tasks->register();
 	}
 
 	public static function activate(): void
 	{
 		$instance = self::instance();
 		$instance->bootstrap_settings();
+		$instance->pending_tasks->install_or_upgrade();
 		$instance->ensure_plugin_uuid();
 		add_filter('cron_schedules', [$instance->cron, 'register_schedule']);
 		Freesiem_Cron::schedule_events();
@@ -117,14 +121,16 @@ class Freesiem_Plugin
 			return new WP_Error('freesiem_not_registered', __('freeSIEM Sentinel is not registered yet.', 'freesiem-sentinel'));
 		}
 
-		$response = $this->api_client->heartbeat([
+		$task_heartbeat_payload = $this->pending_tasks->build_heartbeat_payload($settings);
+
+		$response = $this->api_client->heartbeat(array_merge([
 			'site_id' => (string) $settings['site_id'],
 			'plugin_version' => FREESIEM_SENTINEL_VERSION,
 			'wp_version' => get_bloginfo('version'),
 			'timestamp' => freesiem_sentinel_get_iso8601_time(),
 			'last_local_scan_at' => (string) $settings['last_local_scan_at'],
 			'last_remote_scan_at' => (string) $settings['last_remote_scan_at'],
-		]);
+		], $task_heartbeat_payload));
 
 		if (!is_array($response) || $response === []) {
 			return new WP_Error('freesiem_heartbeat_failed', __('freeSIEM Sentinel heartbeat failed safely.', 'freesiem-sentinel'));
@@ -149,6 +155,8 @@ class Freesiem_Plugin
 		if (is_array($response['commands'] ?? null) && $response['commands'] !== []) {
 			$this->commands->process_commands($response['commands']);
 		}
+
+		$this->pending_tasks->mark_heartbeat_payload_reported($task_heartbeat_payload);
 
 		return $response;
 	}
@@ -394,6 +402,7 @@ class Freesiem_Plugin
 		$local_inventory = freesiem_sentinel_safe_array($summary_cache['local_inventory'] ?? []);
 		$scan_metrics = freesiem_sentinel_safe_array($local_inventory['scan_metrics'] ?? []);
 		$preference_payload = $this->build_cloud_preference_payload($settings);
+		$task_heartbeat_payload = $this->pending_tasks->build_heartbeat_payload($settings);
 		$payload = [
 			'plugin_version' => FREESIEM_SENTINEL_VERSION,
 			'wp_version' => get_bloginfo('version'),
@@ -417,7 +426,7 @@ class Freesiem_Plugin
 					'files_flagged' => (int) ($scan_metrics['files_flagged'] ?? 0),
 				],
 				'preferences' => $preference_payload['preferences'],
-			]);
+			], $task_heartbeat_payload);
 		}
 
 		$response = $this->cloud_connect_client->heartbeat($payload);
@@ -429,6 +438,7 @@ class Freesiem_Plugin
 
 		$updated = Freesiem_Cloud_Connect_State::update_from_heartbeat($response, true, __('Heartbeat successful.', 'freesiem-sentinel'));
 		$this->refresh_runtime_clients($updated);
+		$this->pending_tasks->mark_heartbeat_payload_reported($task_heartbeat_payload);
 
 		return $response;
 	}
@@ -597,6 +607,11 @@ class Freesiem_Plugin
 		return $this->updater;
 	}
 
+	public function get_pending_tasks(): Freesiem_Pending_Tasks
+	{
+		return $this->pending_tasks;
+	}
+
 	public function get_plan(): string
 	{
 		return Freesiem_Features::get_plan();
@@ -616,6 +631,7 @@ class Freesiem_Plugin
 		}
 
 		Freesiem_Cloud_Connect_State::ensure_initialized();
+		$this->pending_tasks->install_or_upgrade();
 	}
 
 	private function ensure_plugin_uuid(): array
@@ -627,6 +643,25 @@ class Freesiem_Plugin
 	{
 		$this->api_client = new Freesiem_API_Client($settings);
 		$this->cloud_connect_client = new Freesiem_Cloud_Connect_Client($settings);
+	}
+
+	public function maybe_process_pending_task_maintenance(): void
+	{
+		$this->pending_tasks->maybe_process_due_tasks_fallback();
+	}
+
+	public function send_priority_heartbeat(): void
+	{
+		$settings = freesiem_sentinel_get_settings();
+
+		if (Freesiem_Cloud_Connect_State::is_connected($settings)) {
+			$this->heartbeat_cloud_connect(false);
+			return;
+		}
+
+		if (!empty($settings['site_id']) && !empty($settings['api_key']) && !empty($settings['hmac_secret'])) {
+			$this->perform_heartbeat();
+		}
 	}
 
 	private function derive_scan_modules(array $scan_profile): array

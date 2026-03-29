@@ -16,6 +16,7 @@ class Freesiem_Admin
 	public function register(): void
 	{
 		add_action('admin_menu', [$this, 'register_menu']);
+		add_action('admin_init', [$this->plugin, 'maybe_process_pending_task_maintenance']);
 		add_action('admin_notices', 'freesiem_sentinel_render_notices');
 		add_action('admin_post_freesiem_sentinel_save_cloud_connect_contact', [$this, 'handle_save_cloud_connect_contact']);
 		add_action('admin_post_freesiem_sentinel_cloud_connect_start', [$this, 'handle_cloud_connect_start']);
@@ -34,6 +35,8 @@ class Freesiem_Admin
 		add_action('admin_post_freesiem_sentinel_reconnect', [$this, 'handle_reconnect']);
 		add_action('admin_post_freesiem_sentinel_disconnect_cloud', [$this, 'handle_disconnect_cloud']);
 		add_action('admin_post_freesiem_sentinel_test_connection', [$this, 'handle_test_connection']);
+		add_action('admin_post_freesiem_sentinel_approve_task', [$this, 'handle_approve_task']);
+		add_action('admin_post_freesiem_sentinel_deny_task', [$this, 'handle_deny_task']);
 	}
 
 	public function register_menu(): void
@@ -49,6 +52,7 @@ class Freesiem_Admin
 
 		add_submenu_page('freesiem-portal', __('Scan', 'freesiem-sentinel'), __('Scan', 'freesiem-sentinel'), 'manage_options', 'freesiem-scan', [$this, 'render_scan_page']);
 		add_submenu_page('freesiem-portal', __('Cloud', 'freesiem-sentinel'), __('Cloud', 'freesiem-sentinel'), 'manage_options', 'freesiem-remote', [$this, 'render_remote_page']);
+		add_submenu_page('freesiem-portal', __('Pending Tasks', 'freesiem-sentinel'), __('Pending Tasks', 'freesiem-sentinel'), 'read', 'freesiem-pending-tasks', [$this, 'render_pending_tasks_page']);
 		add_submenu_page('freesiem-portal', __('About', 'freesiem-sentinel'), __('About', 'freesiem-sentinel'), 'manage_options', 'freesiem-about', [$this, 'render_about_page']);
 	}
 
@@ -252,6 +256,25 @@ class Freesiem_Admin
 			'allow_remote_scan' => empty($_POST['allow_remote_scan']) ? 0 : 1,
 			'scan_frequency' => isset($_POST['scan_frequency']) ? sanitize_key(wp_unslash((string) $_POST['scan_frequency'])) : 'daily',
 			'user_sync_enabled' => empty($_POST['user_sync_enabled']) ? 0 : 1,
+			'enable_pending_task_queue' => empty($_POST['enable_pending_task_queue']) ? 0 : 1,
+			'auto_approve_enabled_default' => empty($_POST['auto_approve_enabled_default']) ? 0 : 1,
+			'auto_approve_after_minutes_default' => max(1, min(1440, (int) ($_POST['auto_approve_after_minutes_default'] ?? 30))),
+			'require_manual_approval_for_list_users' => empty($_POST['require_manual_approval_for_list_users']) ? 0 : 1,
+			'require_manual_approval_for_create_user' => empty($_POST['require_manual_approval_for_create_user']) ? 0 : 1,
+			'require_manual_approval_for_update_user' => empty($_POST['require_manual_approval_for_update_user']) ? 0 : 1,
+			'require_manual_approval_for_password_reset' => empty($_POST['require_manual_approval_for_password_reset']) ? 0 : 1,
+			'require_manual_approval_for_delete_user' => empty($_POST['require_manual_approval_for_delete_user']) ? 0 : 1,
+			'allow_auto_approve_list_users' => empty($_POST['allow_auto_approve_list_users']) ? 0 : 1,
+			'allow_auto_approve_create_user' => empty($_POST['allow_auto_approve_create_user']) ? 0 : 1,
+			'allow_auto_approve_update_user' => empty($_POST['allow_auto_approve_update_user']) ? 0 : 1,
+			'allow_auto_approve_password_reset' => empty($_POST['allow_auto_approve_password_reset']) ? 0 : 1,
+			'allow_auto_approve_delete_user' => empty($_POST['allow_auto_approve_delete_user']) ? 0 : 1,
+			'notify_admins_on_pending_task' => empty($_POST['notify_admins_on_pending_task']) ? 0 : 1,
+			'include_pending_tasks_in_heartbeat' => empty($_POST['include_pending_tasks_in_heartbeat']) ? 0 : 1,
+			'heartbeat_include_recent_completed_tasks' => empty($_POST['heartbeat_include_recent_completed_tasks']) ? 0 : 1,
+			'roles_allowed_to_approve_tasks' => isset($_POST['roles_allowed_to_approve_tasks']) && is_array($_POST['roles_allowed_to_approve_tasks'])
+				? array_map(static fn($role): string => sanitize_key(wp_unslash((string) $role)), $_POST['roles_allowed_to_approve_tasks'])
+				: ['administrator'],
 		];
 		$result = $this->plugin->save_cloud_preferences($preferences);
 
@@ -293,6 +316,31 @@ class Freesiem_Admin
 	public function handle_test_connection(): void
 	{
 		$this->handle_cloud_connect_test();
+	}
+
+	public function handle_approve_task(): void
+	{
+		$this->assert_task_permissions();
+		freesiem_sentinel_require_admin_post_nonce();
+
+		$task_id = isset($_REQUEST['task_id']) ? (int) $_REQUEST['task_id'] : 0;
+		$result = $this->plugin->get_pending_tasks()->approve_task($task_id, get_current_user_id());
+
+		freesiem_sentinel_set_notice(is_wp_error($result) ? 'error' : 'success', is_wp_error($result) ? $result->get_error_message() : __('Pending task approved and executed locally.', 'freesiem-sentinel'));
+		$this->redirect_to_page('freesiem-pending-tasks', ['task_id' => (string) $task_id]);
+	}
+
+	public function handle_deny_task(): void
+	{
+		$this->assert_task_permissions();
+		freesiem_sentinel_require_admin_post_nonce();
+
+		$task_id = isset($_REQUEST['task_id']) ? (int) $_REQUEST['task_id'] : 0;
+		$reason = isset($_POST['deny_reason']) ? sanitize_textarea_field(wp_unslash((string) $_POST['deny_reason'])) : '';
+		$result = $this->plugin->get_pending_tasks()->deny_task($task_id, get_current_user_id(), $reason);
+
+		freesiem_sentinel_set_notice(is_wp_error($result) ? 'error' : 'success', is_wp_error($result) ? $result->get_error_message() : __('Pending task denied locally.', 'freesiem-sentinel'));
+		$this->redirect_to_page('freesiem-pending-tasks', ['task_id' => (string) $task_id]);
 	}
 
 	public function render_dashboard_page(): void
@@ -583,6 +631,39 @@ class Freesiem_Admin
 		echo '<p><label><input type="radio" name="scan_frequency" value="6hours"' . checked(($settings['scan_frequency'] ?? 'daily') === '6hours', true, false) . ' /> ' . esc_html__('Every 6 hours', 'freesiem-sentinel') . '</label></p>';
 		echo '<p><label><input type="radio" name="scan_frequency" value="hourly"' . checked(($settings['scan_frequency'] ?? 'daily') === 'hourly', true, false) . ' /> ' . esc_html__('Every hour', 'freesiem-sentinel') . '</label></p>';
 		echo '<p><label><input type="checkbox" name="user_sync_enabled" value="1"' . checked(!empty($settings['user_sync_enabled']), true, false) . ' /> ' . esc_html__('Enable Centralized User Sync', 'freesiem-sentinel') . '</label><br /><span style="color:#50575e;">' . esc_html__('Enable centralized user sync so this site can share managed users with the freeSIEM client portal. This allows authorized users to be synced across multiple WordPress sites and managed centrally, including password updates and future security controls like TFA.', 'freesiem-sentinel') . '</span></p>';
+		echo '<hr style="margin:20px 0;" />';
+		echo '<h3 style="margin-top:0;">' . esc_html__('Pending Task Approvals', 'freesiem-sentinel') . '</h3>';
+		echo '<p><label><input type="checkbox" name="enable_pending_task_queue" value="1"' . checked(!empty($settings['enable_pending_task_queue']), true, false) . ' /> ' . esc_html__('Enable the Pending Tasks approval queue', 'freesiem-sentinel') . '</label></p>';
+		echo '<p><label><input type="checkbox" name="auto_approve_enabled_default" value="1"' . checked(!empty($settings['auto_approve_enabled_default']), true, false) . ' /> ' . esc_html__('Allow eligible tasks to auto-approve after a timeout', 'freesiem-sentinel') . '</label></p>';
+		echo '<p><label>' . esc_html__('Default auto-approve timeout (minutes)', 'freesiem-sentinel') . '<br /><input type="number" min="1" max="1440" name="auto_approve_after_minutes_default" value="' . esc_attr((string) ($settings['auto_approve_after_minutes_default'] ?? 30)) . '" /></label></p>';
+		echo '<p style="margin-bottom:8px;"><strong>' . esc_html__('Require Manual Approval', 'freesiem-sentinel') . '</strong></p>';
+		foreach ([
+			'require_manual_approval_for_list_users' => __('List users', 'freesiem-sentinel'),
+			'require_manual_approval_for_create_user' => __('Create user', 'freesiem-sentinel'),
+			'require_manual_approval_for_update_user' => __('Update user', 'freesiem-sentinel'),
+			'require_manual_approval_for_password_reset' => __('Send password reset', 'freesiem-sentinel'),
+			'require_manual_approval_for_delete_user' => __('Delete user', 'freesiem-sentinel'),
+		] as $key => $label) {
+			echo '<p style="margin:0 0 6px;"><label><input type="checkbox" name="' . esc_attr($key) . '" value="1"' . checked(!empty($settings[$key]), true, false) . ' /> ' . esc_html($label) . '</label></p>';
+		}
+		echo '<p style="margin:16px 0 8px;"><strong>' . esc_html__('Allow Auto-Approve', 'freesiem-sentinel') . '</strong></p>';
+		foreach ([
+			'allow_auto_approve_list_users' => __('List users', 'freesiem-sentinel'),
+			'allow_auto_approve_create_user' => __('Create user', 'freesiem-sentinel'),
+			'allow_auto_approve_update_user' => __('Update user', 'freesiem-sentinel'),
+			'allow_auto_approve_password_reset' => __('Send password reset', 'freesiem-sentinel'),
+			'allow_auto_approve_delete_user' => __('Delete user', 'freesiem-sentinel'),
+		] as $key => $label) {
+			echo '<p style="margin:0 0 6px;"><label><input type="checkbox" name="' . esc_attr($key) . '" value="1"' . checked(!empty($settings[$key]), true, false) . ' /> ' . esc_html($label) . '</label></p>';
+		}
+		$roles = function_exists('wp_roles') && wp_roles() ? wp_roles()->roles : [];
+		echo '<p style="margin:16px 0 8px;"><strong>' . esc_html__('Roles Allowed To Approve Tasks', 'freesiem-sentinel') . '</strong></p>';
+		foreach ($roles as $role_key => $role) {
+			echo '<p style="margin:0 0 6px;"><label><input type="checkbox" name="roles_allowed_to_approve_tasks[]" value="' . esc_attr((string) $role_key) . '"' . checked(in_array((string) $role_key, (array) ($settings['roles_allowed_to_approve_tasks'] ?? []), true), true, false) . ' /> ' . esc_html(translate_user_role((string) ($role['name'] ?? $role_key))) . '</label></p>';
+		}
+		echo '<p><label><input type="checkbox" name="notify_admins_on_pending_task" value="1"' . checked(!empty($settings['notify_admins_on_pending_task']), true, false) . ' /> ' . esc_html__('Notify the site admin email when a task enters the queue', 'freesiem-sentinel') . '</label></p>';
+		echo '<p><label><input type="checkbox" name="include_pending_tasks_in_heartbeat" value="1"' . checked(!empty($settings['include_pending_tasks_in_heartbeat']), true, false) . ' /> ' . esc_html__('Include pending task data in heartbeats', 'freesiem-sentinel') . '</label></p>';
+		echo '<p><label><input type="checkbox" name="heartbeat_include_recent_completed_tasks" value="1"' . checked(!empty($settings['heartbeat_include_recent_completed_tasks']), true, false) . ' /> ' . esc_html__('Include recent completed and denied task updates in heartbeats', 'freesiem-sentinel') . '</label></p>';
 		submit_button(__('Save Cloud Preferences', 'freesiem-sentinel'));
 		echo '</form>';
 		echo '</div>';
@@ -618,6 +699,87 @@ class Freesiem_Admin
 	public function render_cloud_connect_page(): void
 	{
 		$this->render_remote_page();
+	}
+
+	public function render_pending_tasks_page(): void
+	{
+		$this->assert_task_permissions();
+
+		$service = $this->plugin->get_pending_tasks();
+		$task_id = isset($_GET['task_id']) ? (int) $_GET['task_id'] : 0;
+		$status_filter = isset($_GET['status']) ? sanitize_key(wp_unslash((string) $_GET['status'])) : '';
+		$search = isset($_GET['s']) ? sanitize_text_field(wp_unslash((string) $_GET['s'])) : '';
+		$task = $task_id > 0 ? $service->get_task($task_id) : null;
+
+		echo '<div class="wrap">';
+		echo '<h1>' . esc_html__('Pending Tasks', 'freesiem-sentinel') . '</h1>';
+		echo '<p>' . esc_html__('Review signed remote user-management requests from freeSIEM Core before they execute locally in WordPress.', 'freesiem-sentinel') . '</p>';
+
+		if (is_array($task)) {
+			$this->render_pending_task_detail($task);
+			echo '</div>';
+			return;
+		}
+
+		$tasks = $service->list_tasks([
+			'status' => $status_filter,
+			'search' => $search,
+			'limit' => 100,
+		]);
+		$summary = $service->build_heartbeat_payload(freesiem_sentinel_get_settings());
+
+		echo '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin:20px 0;">';
+		$this->render_summary_stat(__('Pending', 'freesiem-sentinel'), (string) (($summary['task_status_summary']['pending'] ?? 0)));
+		$this->render_summary_stat(__('Approved', 'freesiem-sentinel'), (string) (($summary['task_status_summary']['approved'] ?? 0)));
+		$this->render_summary_stat(__('Auto Approved', 'freesiem-sentinel'), (string) (($summary['task_status_summary']['auto_approved'] ?? 0)));
+		$this->render_summary_stat(__('Completed', 'freesiem-sentinel'), (string) (($summary['task_status_summary']['completed'] ?? 0)));
+		$this->render_summary_stat(__('Failed', 'freesiem-sentinel'), (string) (($summary['task_status_summary']['failed'] ?? 0)));
+		echo '</div>';
+
+		echo '<div style="background:#fff;padding:16px 18px;border:1px solid #dcdcde;border-radius:12px;margin-bottom:20px;">';
+		echo '<form method="get" action="' . esc_url(admin_url('admin.php')) . '" style="display:flex;gap:12px;flex-wrap:wrap;align-items:flex-end;">';
+		echo '<input type="hidden" name="page" value="freesiem-pending-tasks" />';
+		echo '<p style="margin:0;"><label>' . esc_html__('Status', 'freesiem-sentinel') . '<br /><select name="status"><option value="">' . esc_html__('All statuses', 'freesiem-sentinel') . '</option>';
+		foreach ($service->get_status_options() as $status) {
+			echo '<option value="' . esc_attr($status) . '"' . selected($status_filter === $status, true, false) . '>' . esc_html(ucwords(str_replace('_', ' ', $status))) . '</option>';
+		}
+		echo '</select></label></p>';
+		echo '<p style="margin:0;"><label>' . esc_html__('Search', 'freesiem-sentinel') . '<br /><input class="regular-text" type="search" name="s" value="' . esc_attr($search) . '" /></label></p>';
+		echo '<p style="margin:0;"><button type="submit" class="button button-secondary">' . esc_html__('Filter Tasks', 'freesiem-sentinel') . '</button></p>';
+		echo '</form>';
+		echo '</div>';
+
+		echo '<div style="background:#fff;padding:20px;border:1px solid #dcdcde;border-radius:12px;">';
+		echo '<h2 style="margin-top:0;">' . esc_html__('Task Queue', 'freesiem-sentinel') . '</h2>';
+
+		if ($tasks === []) {
+			$this->render_empty_state(__('No tasks yet.', 'freesiem-sentinel'), __('Pending task requests from freeSIEM Core will appear here as they are submitted.', 'freesiem-sentinel'));
+		} else {
+			echo '<table class="widefat striped"><thead><tr><th>' . esc_html__('Task ID', 'freesiem-sentinel') . '</th><th>' . esc_html__('Core Task ID', 'freesiem-sentinel') . '</th><th>' . esc_html__('Action', 'freesiem-sentinel') . '</th><th>' . esc_html__('Target', 'freesiem-sentinel') . '</th><th>' . esc_html__('Requested At', 'freesiem-sentinel') . '</th><th>' . esc_html__('Auto Approve At', 'freesiem-sentinel') . '</th><th>' . esc_html__('Status', 'freesiem-sentinel') . '</th><th>' . esc_html__('Source', 'freesiem-sentinel') . '</th><th>' . esc_html__('Actions', 'freesiem-sentinel') . '</th></tr></thead><tbody>';
+			foreach ($tasks as $row) {
+				$view_url = freesiem_sentinel_admin_page_url('freesiem-pending-tasks', ['task_id' => (string) ($row['id'] ?? 0)]);
+				$approve_url = freesiem_sentinel_admin_post_url('freesiem_sentinel_approve_task', ['task_id' => (string) ($row['id'] ?? 0)]);
+				echo '<tr>';
+				echo '<td><a href="' . esc_url($view_url) . '">#' . esc_html((string) ($row['id'] ?? 0)) . '</a></td>';
+				echo '<td><code>' . esc_html((string) ($row['core_task_id'] ?? '')) . '</code></td>';
+				echo '<td>' . esc_html(ucwords(str_replace('_', ' ', (string) ($row['action_type'] ?? '')))) . '</td>';
+				echo '<td>' . esc_html($this->task_target_summary($row)) . '</td>';
+				echo '<td>' . esc_html(freesiem_sentinel_format_datetime((string) ($row['requested_at'] ?? ''))) . '</td>';
+				echo '<td>' . esc_html(!empty($row['auto_approve_at']) ? freesiem_sentinel_format_datetime((string) $row['auto_approve_at']) : __('Manual only', 'freesiem-sentinel')) . '</td>';
+				echo '<td><span style="' . esc_attr($this->task_status_badge_style((string) ($row['status'] ?? 'pending'))) . '">' . esc_html(ucwords(str_replace('_', ' ', (string) ($row['status'] ?? 'pending')))) . '</span></td>';
+				echo '<td>' . esc_html((string) ($row['source_core_identifier'] ?? 'freeSIEM Core')) . '</td>';
+				echo '<td><a class="button button-secondary" href="' . esc_url($view_url) . '">' . esc_html__('View', 'freesiem-sentinel') . '</a> ';
+				if (($row['status'] ?? '') === 'pending') {
+					echo '<a class="button button-primary" href="' . esc_url($approve_url) . '">' . esc_html__('Approve', 'freesiem-sentinel') . '</a>';
+				}
+				echo '</td>';
+				echo '</tr>';
+			}
+			echo '</tbody></table>';
+		}
+
+		echo '</div>';
+		echo '</div>';
 	}
 
 	public function render_about_page(): void
@@ -1180,6 +1342,142 @@ class Freesiem_Admin
 		return ucwords(str_replace('_', ' ', $state === '' ? 'disconnected' : $state));
 	}
 
+	private function render_pending_task_detail(array $task): void
+	{
+		$service = $this->plugin->get_pending_tasks();
+		$events = $service->get_task_events((int) ($task['id'] ?? 0));
+		$back_url = freesiem_sentinel_admin_page_url('freesiem-pending-tasks');
+		$approve_url = freesiem_sentinel_admin_post_url('freesiem_sentinel_approve_task', ['task_id' => (string) ($task['id'] ?? 0)]);
+		$deny_url = admin_url('admin-post.php');
+		$payload = is_array($task['payload'] ?? null) ? $task['payload'] : [];
+		$execution_result = is_array($task['execution_result'] ?? null) ? $task['execution_result'] : [];
+
+		echo '<div style="display:flex;gap:10px;flex-wrap:wrap;margin:18px 0;">';
+		echo '<a class="button button-secondary" href="' . esc_url($back_url) . '">' . esc_html__('Back to Task Queue', 'freesiem-sentinel') . '</a>';
+		if (($task['status'] ?? '') === 'pending') {
+			echo '<a class="button button-primary" href="' . esc_url($approve_url) . '">' . esc_html__('Approve Task', 'freesiem-sentinel') . '</a>';
+		}
+		echo '</div>';
+
+		echo '<div style="display:grid;grid-template-columns:minmax(0,1.4fr) minmax(280px,.8fr);gap:20px;">';
+		echo '<div>';
+		echo '<div style="background:#fff;padding:20px;border:1px solid #dcdcde;border-radius:12px;margin-bottom:20px;">';
+		echo '<h2 style="margin-top:0;">' . esc_html__('Task Summary', 'freesiem-sentinel') . '</h2>';
+		echo '<p><strong>' . esc_html__('Local Task ID', 'freesiem-sentinel') . ':</strong> #' . esc_html((string) ($task['id'] ?? 0)) . '</p>';
+		echo '<p><strong>' . esc_html__('Core Task ID', 'freesiem-sentinel') . ':</strong> <code>' . esc_html((string) ($task['core_task_id'] ?? '')) . '</code></p>';
+		echo '<p><strong>' . esc_html__('Action', 'freesiem-sentinel') . ':</strong> ' . esc_html(ucwords(str_replace('_', ' ', (string) ($task['action_type'] ?? '')))) . '</p>';
+		echo '<p><strong>' . esc_html__('Target', 'freesiem-sentinel') . ':</strong> ' . esc_html($this->task_target_summary($task)) . '</p>';
+		echo '<p><strong>' . esc_html__('Source Core', 'freesiem-sentinel') . ':</strong> ' . esc_html((string) ($task['source_core_identifier'] ?? 'freeSIEM Core')) . '</p>';
+		echo '<p><strong>' . esc_html__('Source URL', 'freesiem-sentinel') . ':</strong> ' . esc_html((string) ($task['source_core_url'] ?? '')) . '</p>';
+		echo '<p><strong>' . esc_html__('Signature Verified', 'freesiem-sentinel') . ':</strong> ' . esc_html(!empty($task['signature_verified']) ? __('Yes', 'freesiem-sentinel') : __('No', 'freesiem-sentinel')) . '</p>';
+		echo '<p><strong>' . esc_html__('Status', 'freesiem-sentinel') . ':</strong> <span style="' . esc_attr($this->task_status_badge_style((string) ($task['status'] ?? 'pending'))) . '">' . esc_html(ucwords(str_replace('_', ' ', (string) ($task['status'] ?? 'pending')))) . '</span></p>';
+		echo '<p><strong>' . esc_html__('Requested At', 'freesiem-sentinel') . ':</strong> ' . esc_html(freesiem_sentinel_format_datetime((string) ($task['requested_at'] ?? ''))) . '</p>';
+		echo '<p><strong>' . esc_html__('Auto Approve At', 'freesiem-sentinel') . ':</strong> ' . esc_html(!empty($task['auto_approve_at']) ? freesiem_sentinel_format_datetime((string) $task['auto_approve_at']) : __('Manual only', 'freesiem-sentinel')) . '</p>';
+		echo '<p><strong>' . esc_html__('Approval Mode', 'freesiem-sentinel') . ':</strong> ' . esc_html((string) ($task['approval_mode'] ?? 'manual')) . '</p>';
+		echo '</div>';
+
+		echo '<div style="background:#fff;padding:20px;border:1px solid #dcdcde;border-radius:12px;margin-bottom:20px;">';
+		echo '<h2 style="margin-top:0;">' . esc_html__('Payload Snapshot', 'freesiem-sentinel') . '</h2>';
+		echo '<pre style="white-space:pre-wrap;overflow:auto;">' . esc_html(freesiem_sentinel_safe_json_pretty($payload)) . '</pre>';
+		if (($task['action_type'] ?? '') === 'update_user') {
+			echo '<h3>' . esc_html__('Requested Field Changes', 'freesiem-sentinel') . '</h3>';
+			echo '<table class="widefat striped"><thead><tr><th>' . esc_html__('Field', 'freesiem-sentinel') . '</th><th>' . esc_html__('Requested Value', 'freesiem-sentinel') . '</th></tr></thead><tbody>';
+			foreach ((array) ($payload['target'] ?? $payload) as $field => $value) {
+				if (in_array((string) $field, ['user_id', 'username', 'user_login', 'email', 'user_email'], true)) {
+					continue;
+				}
+				echo '<tr><td>' . esc_html((string) $field) . '</td><td>' . esc_html(is_scalar($value) ? (string) $value : wp_json_encode($value)) . '</td></tr>';
+			}
+			echo '</tbody></table>';
+		}
+		echo '</div>';
+
+		if ($execution_result !== []) {
+			echo '<div style="background:#fff;padding:20px;border:1px solid #dcdcde;border-radius:12px;margin-bottom:20px;">';
+			echo '<h2 style="margin-top:0;">' . esc_html__('Execution Result', 'freesiem-sentinel') . '</h2>';
+			echo '<pre style="white-space:pre-wrap;overflow:auto;">' . esc_html(freesiem_sentinel_safe_json_pretty($execution_result)) . '</pre>';
+			echo '</div>';
+		}
+
+		echo '<div style="background:#fff;padding:20px;border:1px solid #dcdcde;border-radius:12px;">';
+		echo '<h2 style="margin-top:0;">' . esc_html__('Audit Trail', 'freesiem-sentinel') . '</h2>';
+		if ($events === []) {
+			$this->render_empty_state(__('No audit events yet.', 'freesiem-sentinel'), __('Task lifecycle events will appear here as the request moves through review and execution.', 'freesiem-sentinel'));
+		} else {
+			echo '<table class="widefat striped"><thead><tr><th>' . esc_html__('When', 'freesiem-sentinel') . '</th><th>' . esc_html__('Event', 'freesiem-sentinel') . '</th><th>' . esc_html__('Message', 'freesiem-sentinel') . '</th></tr></thead><tbody>';
+			foreach ($events as $event) {
+				echo '<tr><td>' . esc_html(freesiem_sentinel_format_datetime((string) ($event['created_at'] ?? ''))) . '</td><td>' . esc_html(ucwords(str_replace('_', ' ', (string) ($event['event_type'] ?? '')))) . '</td><td>' . esc_html((string) ($event['message'] ?? '')) . '</td></tr>';
+			}
+			echo '</tbody></table>';
+		}
+		echo '</div>';
+		echo '</div>';
+
+		echo '<div>';
+		echo '<div style="background:#fff;padding:20px;border:1px solid #dcdcde;border-radius:12px;margin-bottom:20px;">';
+		echo '<h2 style="margin-top:0;">' . esc_html__('Decision Controls', 'freesiem-sentinel') . '</h2>';
+		if (($task['status'] ?? '') === 'pending') {
+			echo '<p>' . esc_html__('This task is waiting for a local approval decision before WordPress executes it.', 'freesiem-sentinel') . '</p>';
+			echo '<p><a class="button button-primary" href="' . esc_url($approve_url) . '">' . esc_html__('Approve Task', 'freesiem-sentinel') . '</a></p>';
+			echo '<form method="post" action="' . esc_url($deny_url) . '">';
+			wp_nonce_field(FREESIEM_SENTINEL_NONCE_ACTION);
+			echo '<input type="hidden" name="action" value="freesiem_sentinel_deny_task" />';
+			echo '<input type="hidden" name="task_id" value="' . esc_attr((string) ($task['id'] ?? 0)) . '" />';
+			echo '<p><label for="freesiem-deny-reason">' . esc_html__('Deny Reason', 'freesiem-sentinel') . '</label><br /><textarea id="freesiem-deny-reason" name="deny_reason" rows="4" class="large-text"></textarea></p>';
+			submit_button(__('Deny Task', 'freesiem-sentinel'), 'secondary', '', false);
+			echo '</form>';
+		} else {
+			$this->render_empty_state(__('Task decision already recorded.', 'freesiem-sentinel'), __('This task is no longer pending, so review controls are disabled.', 'freesiem-sentinel'));
+		}
+		echo '</div>';
+
+		echo '<div style="background:#fff;padding:20px;border:1px solid #dcdcde;border-radius:12px;">';
+		echo '<h2 style="margin-top:0;">' . esc_html__('Task Timing', 'freesiem-sentinel') . '</h2>';
+		echo '<p><strong>' . esc_html__('Approved At', 'freesiem-sentinel') . ':</strong> ' . esc_html(!empty($task['approved_at']) ? freesiem_sentinel_format_datetime((string) $task['approved_at']) : __('Not approved yet', 'freesiem-sentinel')) . '</p>';
+		echo '<p><strong>' . esc_html__('Denied At', 'freesiem-sentinel') . ':</strong> ' . esc_html(!empty($task['denied_at']) ? freesiem_sentinel_format_datetime((string) $task['denied_at']) : __('Not denied', 'freesiem-sentinel')) . '</p>';
+		echo '<p><strong>' . esc_html__('Executed At', 'freesiem-sentinel') . ':</strong> ' . esc_html(!empty($task['executed_at']) ? freesiem_sentinel_format_datetime((string) $task['executed_at']) : __('Not executed yet', 'freesiem-sentinel')) . '</p>';
+		echo '<p><strong>' . esc_html__('Completed At', 'freesiem-sentinel') . ':</strong> ' . esc_html(!empty($task['completed_at']) ? freesiem_sentinel_format_datetime((string) $task['completed_at']) : __('Not completed', 'freesiem-sentinel')) . '</p>';
+		echo '<p><strong>' . esc_html__('Failed At', 'freesiem-sentinel') . ':</strong> ' . esc_html(!empty($task['failed_at']) ? freesiem_sentinel_format_datetime((string) $task['failed_at']) : __('Not failed', 'freesiem-sentinel')) . '</p>';
+		if (!empty($task['deny_reason'])) {
+			echo '<p><strong>' . esc_html__('Deny Reason', 'freesiem-sentinel') . ':</strong> ' . esc_html((string) $task['deny_reason']) . '</p>';
+		}
+		if (!empty($task['error_message'])) {
+			echo '<p><strong>' . esc_html__('Error', 'freesiem-sentinel') . ':</strong> ' . esc_html((string) $task['error_message']) . '</p>';
+		}
+		echo '</div>';
+		echo '</div>';
+		echo '</div>';
+	}
+
+	private function task_status_badge_style(string $status): string
+	{
+		$palette = match ($status) {
+			'completed' => 'background:#ecfdf5;color:#166534;border:1px solid #86efac;',
+			'failed', 'denied' => 'background:#fef2f2;color:#991b1b;border:1px solid #fca5a5;',
+			'approved', 'auto_approved', 'executing' => 'background:#eff6ff;color:#1d4ed8;border:1px solid #93c5fd;',
+			default => 'background:#fffbeb;color:#92400e;border:1px solid #fcd34d;',
+		};
+
+		return 'display:inline-flex;align-items:center;padding:4px 8px;border-radius:999px;font-weight:700;text-decoration:none;' . $palette;
+	}
+
+	private function task_target_summary(array $task): string
+	{
+		$parts = [];
+
+		if (!empty($task['target_username'])) {
+			$parts[] = '@' . (string) $task['target_username'];
+		}
+		if (!empty($task['target_email'])) {
+			$parts[] = (string) $task['target_email'];
+		}
+		if (!empty($task['target_user_id'])) {
+			$parts[] = '#' . (int) $task['target_user_id'];
+		}
+
+		return $parts !== [] ? implode(' ', $parts) : __('Site users', 'freesiem-sentinel');
+	}
+
 	private function is_cloud_connected(array $settings): bool
 	{
 		return Freesiem_Cloud_Connect_State::is_connected($settings);
@@ -1189,6 +1487,13 @@ class Freesiem_Admin
 	{
 		if (!freesiem_sentinel_current_user_can_manage()) {
 			wp_die(esc_html__('You are not allowed to manage freeSIEM Sentinel.', 'freesiem-sentinel'));
+		}
+	}
+
+	private function assert_task_permissions(): void
+	{
+		if (!$this->plugin->get_pending_tasks()->current_user_can_approve_tasks()) {
+			wp_die(esc_html__('You are not allowed to review freeSIEM Pending Tasks.', 'freesiem-sentinel'));
 		}
 	}
 
