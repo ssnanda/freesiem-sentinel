@@ -511,14 +511,26 @@ class Freesiem_Plugin
 		return [
 			'allow_remote_scan' => $allow_remote_scan,
 			'allow_remote_scans' => $allow_remote_scan,
+			'allow_remote_scan_enabled' => $allow_remote_scan,
 			'scan_frequency' => $scan_frequency,
+			'centralized_scan_frequency' => $scan_frequency,
 			'user_sync_enabled' => $user_sync_enabled,
+			'centralized_user_sync' => $user_sync_enabled,
 			'centralized_user_sync_enabled' => $user_sync_enabled,
+			'settings' => [
+				'allow_remote_scan' => $allow_remote_scan,
+				'allow_remote_scans' => $allow_remote_scan,
+				'scan_frequency' => $scan_frequency,
+				'user_sync_enabled' => $user_sync_enabled,
+				'centralized_user_sync' => $user_sync_enabled,
+				'centralized_user_sync_enabled' => $user_sync_enabled,
+			],
 			'preferences' => [
 				'allow_remote_scan' => $allow_remote_scan,
 				'allow_remote_scans' => $allow_remote_scan,
 				'scan_frequency' => $scan_frequency,
 				'user_sync_enabled' => $user_sync_enabled,
+				'centralized_user_sync' => $user_sync_enabled,
 				'centralized_user_sync_enabled' => $user_sync_enabled,
 			],
 		];
@@ -534,9 +546,13 @@ class Freesiem_Plugin
 			'wp_version' => get_bloginfo('version'),
 			'allow_remote_scan' => $preference_payload['allow_remote_scan'],
 			'allow_remote_scans' => $preference_payload['allow_remote_scans'],
+			'allow_remote_scan_enabled' => $preference_payload['allow_remote_scan_enabled'],
 			'scan_frequency' => $preference_payload['scan_frequency'],
+			'centralized_scan_frequency' => $preference_payload['centralized_scan_frequency'],
 			'user_sync_enabled' => $preference_payload['user_sync_enabled'],
+			'centralized_user_sync' => $preference_payload['centralized_user_sync'],
 			'centralized_user_sync_enabled' => $preference_payload['centralized_user_sync_enabled'],
+			'settings' => $preference_payload['settings'],
 			'preferences' => $preference_payload['preferences'],
 		]);
 	}

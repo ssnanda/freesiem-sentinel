@@ -123,6 +123,8 @@ class Freesiem_Cloud_Connect_State
 
 	public static function clear_remote_credentials(): array
 	{
+		$current_settings = freesiem_sentinel_get_settings();
+
 		return freesiem_sentinel_update_settings([
 			'connection_state' => 'disconnected',
 			'connection_id' => '',
@@ -134,9 +136,9 @@ class Freesiem_Cloud_Connect_State
 			'last_heartbeat_at' => '',
 			'last_heartbeat_result' => '',
 			'connect_expires_at' => '',
-			'allow_remote_scan' => 0,
-			'scan_frequency' => 'daily',
-			'user_sync_enabled' => 0,
+			'allow_remote_scan' => !empty($current_settings['allow_remote_scan']) ? 1 : 0,
+			'scan_frequency' => sanitize_key((string) ($current_settings['scan_frequency'] ?? 'daily')),
+			'user_sync_enabled' => !empty($current_settings['user_sync_enabled']) ? 1 : 0,
 			'cloud_verification_code' => '',
 			'cloud_connected_at' => '',
 		]);
