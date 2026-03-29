@@ -3,7 +3,7 @@ Contributors: freesiem
 Requires at least: 6.4
 Tested up to: 6.8
 Requires PHP: 8.1
-Stable tag: 0.2.0
+Stable tag: 0.2.1
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -70,6 +70,13 @@ Version bumps should always have matching git tags.
 GitHub Actions publishes the ZIP automatically when a `v*` tag is pushed.
 
 == Changelog ==
+
+= 0.2.1 =
+
+* Add a signed `GET /wp-json/freesiem-sentinel/v1/cloud-connect/users` endpoint for safe remote user listing
+* Reuse the existing freeSIEM signed request verification flow for remote user-list reads
+* Return only safe user metadata and advertise `supports_remote_user_listing` in heartbeat payloads
+* Add smoke coverage for route registration, valid signed reads, invalid signatures, and empty user-list responses
 
 = 0.2.0 =
 

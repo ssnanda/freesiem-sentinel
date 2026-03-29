@@ -123,6 +123,7 @@ try {
 	$heartbeat_json = wp_json_encode($heartbeat);
 	$assert(is_string($heartbeat_json) && !str_contains($heartbeat_json, 'password'), 'Heartbeat payload must not expose raw passwords.');
 	$assert(!empty($heartbeat['supports_pending_tasks']), 'Heartbeat must advertise pending task support.');
+	$assert(!empty($heartbeat['supports_remote_user_listing']), 'Heartbeat must advertise remote user listing support.');
 	$assert(array_key_exists('pending_task_summary', $heartbeat), 'Heartbeat must include pending task summary.');
 
 	echo "pending-tasks-smoke: ok\n";

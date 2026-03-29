@@ -10,6 +10,7 @@ class Freesiem_Pending_Tasks
 	public const EVENT_TABLE_SUFFIX = 'freesiem_sentinel_task_events';
 	public const REST_NAMESPACE = 'freesiem-sentinel/v1';
 	public const REST_ROUTE = '/cloud/task';
+	public const REST_USERS_ROUTE = '/cloud-connect/users';
 	public const NONCE_TRANSIENT_PREFIX = 'freesiem_sentinel_task_nonce_';
 	public const HEARTBEAT_THROTTLE_TRANSIENT = 'freesiem_sentinel_task_heartbeat_throttle';
 	private const REPORTABLE_STATUSES = ['pending', 'approved', 'denied', 'auto_approved', 'executing', 'completed', 'failed', 'canceled', 'expired'];
@@ -102,6 +103,16 @@ class Freesiem_Pending_Tasks
 			[
 				'methods' => WP_REST_Server::CREATABLE,
 				'callback' => [$this, 'handle_submit_task'],
+				'permission_callback' => '__return_true',
+			]
+		);
+
+		register_rest_route(
+			self::REST_NAMESPACE,
+			self::REST_USERS_ROUTE,
+			[
+				'methods' => WP_REST_Server::READABLE,
+				'callback' => [$this, 'handle_list_users_request'],
 				'permission_callback' => '__return_true',
 			]
 		);
@@ -227,6 +238,28 @@ class Freesiem_Pending_Tasks
 			'auto_approve_at' => $this->format_mysql_datetime($auto_approve_at),
 			'message' => __('Task received and queued for local approval.', 'freesiem-sentinel'),
 		], 202);
+	}
+
+	public function handle_list_users_request(WP_REST_Request $request): WP_REST_Response|WP_Error
+	{
+		$settings = freesiem_sentinel_get_settings();
+
+		if (!Freesiem_Cloud_Connect_State::is_connected($settings)) {
+			return new WP_Error('freesiem_cloud_not_connected', __('This site is not connected to freeSIEM Core.', 'freesiem-sentinel'), ['status' => 403]);
+		}
+
+		$verification = $this->verify_signed_request($request, $settings);
+
+		if (is_wp_error($verification)) {
+			return $verification;
+		}
+
+		$role = sanitize_key((string) $request->get_param('role'));
+		$users = $this->get_safe_user_list($role);
+
+		return new WP_REST_Response([
+			'users' => $users,
+		], 200);
 	}
 
 	public function verify_signed_request(WP_REST_Request $request, array $settings): bool|WP_Error
@@ -479,6 +512,7 @@ class Freesiem_Pending_Tasks
 
 		return [
 			'supports_remote_user_admin' => true,
+			'supports_remote_user_listing' => true,
 			'supports_pending_tasks' => true,
 			'supports_task_status_heartbeat' => true,
 			'supports_auto_approve' => true,
@@ -859,10 +893,20 @@ class Freesiem_Pending_Tasks
 
 	private function execute_list_users(array $payload): array
 	{
+		$items = $this->get_safe_user_list(!empty($payload['role']) ? (string) $payload['role'] : '');
+
+		return [
+			'user_count' => count($items),
+			'users' => $items,
+		];
+	}
+
+	private function get_safe_user_list(string $role = ''): array
+	{
 		$args = [];
 
-		if (!empty($payload['role'])) {
-			$args['role'] = sanitize_key((string) $payload['role']);
+		if ($role !== '') {
+			$args['role'] = sanitize_key($role);
 		}
 
 		$users = get_users($args);
@@ -874,19 +918,15 @@ class Freesiem_Pending_Tasks
 			}
 
 			$items[] = [
-				'user_id' => (int) $user->ID,
+				'id' => (int) $user->ID,
 				'username' => (string) $user->user_login,
-				'email' => (string) $user->user_email,
-				'display_name' => (string) $user->display_name,
-				'roles' => array_values($user->roles),
-				'registered_at' => (string) $user->user_registered,
+				'email' => $user->user_email !== '' ? (string) $user->user_email : null,
+				'display_name' => $user->display_name !== '' ? (string) $user->display_name : null,
+				'roles' => array_values(array_map('sanitize_key', is_array($user->roles) ? $user->roles : [])),
 			];
 		}
 
-		return [
-			'user_count' => count($items),
-			'users' => $items,
-		];
+		return $items;
 	}
 
 	private function execute_create_user(array $payload): array|WP_Error
