@@ -484,7 +484,19 @@ class Freesiem_Plugin
 			return new WP_Error('freesiem_cloud_preferences_sync_failed', __('Cloud preferences were saved locally, but freeSIEM Core could not be updated right now.', 'freesiem-sentinel'));
 		}
 
-		$updated = Freesiem_Cloud_Connect_State::update_from_heartbeat($response, false, (string) ($settings['last_heartbeat_result'] ?? ''));
+		$updates = [
+			'last_heartbeat_result' => sanitize_text_field((string) ($settings['last_heartbeat_result'] ?? '')),
+		];
+
+		if (!empty($response['connection_state']) || !empty($response['state'])) {
+			$updates['connection_state'] = sanitize_key((string) ($response['connection_state'] ?? $response['state']));
+		}
+
+		if (!empty($response['registration_status'])) {
+			$updates['registration_status'] = sanitize_key((string) $response['registration_status']);
+		}
+
+		$updated = freesiem_sentinel_update_settings($updates);
 		$this->refresh_runtime_clients($updated);
 
 		return ['saved' => true, 'synced' => true];
