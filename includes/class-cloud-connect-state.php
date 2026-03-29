@@ -90,25 +90,12 @@ class Freesiem_Cloud_Connect_State
 
 	public static function update_from_heartbeat(array $response, bool $success, string $message): array
 	{
-		$permissions = is_array($response['permissions'] ?? null) ? $response['permissions'] : [];
 		$updates = [
 			'last_heartbeat_result' => sanitize_text_field($message),
 		];
 
 		if ($success) {
 			$updates['last_heartbeat_at'] = freesiem_sentinel_get_iso8601_time();
-		}
-
-		if (array_key_exists('allow_remote_scan', $response) || array_key_exists('allow_remote_scan', $permissions)) {
-			$updates['allow_remote_scan'] = empty($response['allow_remote_scan']) && empty($permissions['allow_remote_scan']) ? 0 : 1;
-		}
-
-		if (!empty($response['scan_frequency']) || !empty($permissions['scan_frequency'])) {
-			$updates['scan_frequency'] = sanitize_key((string) ($response['scan_frequency'] ?? $permissions['scan_frequency']));
-		}
-
-		if (array_key_exists('user_sync_enabled', $response) || array_key_exists('user_sync_enabled', $permissions)) {
-			$updates['user_sync_enabled'] = empty($response['user_sync_enabled']) && empty($permissions['user_sync_enabled']) ? 0 : 1;
 		}
 
 		if (!empty($response['registration_status'])) {
