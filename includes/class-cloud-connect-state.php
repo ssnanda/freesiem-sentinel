@@ -48,7 +48,26 @@ class Freesiem_Cloud_Connect_State
 
 	public static function set_connected(array $response): array
 	{
+		$current_settings = freesiem_sentinel_get_settings();
 		$permissions = is_array($response['permissions'] ?? null) ? $response['permissions'] : [];
+		$allow_remote_scan = self::resolve_boolean_value(
+			$response,
+			$permissions,
+			['allow_remote_scan', 'allow_remote_scans'],
+			!empty($current_settings['allow_remote_scan'])
+		);
+		$user_sync_enabled = self::resolve_boolean_value(
+			$response,
+			$permissions,
+			['user_sync_enabled', 'centralized_user_sync_enabled', 'centralized_user_sync'],
+			!empty($current_settings['user_sync_enabled'])
+		);
+		$scan_frequency = self::resolve_string_value(
+			$response,
+			$permissions,
+			['scan_frequency'],
+			(string) ($current_settings['scan_frequency'] ?? 'daily')
+		);
 
 		$updates = [
 			'connection_state' => self::sanitize_state((string) ($response['connection_state'] ?? 'connected'), 'connected'),
@@ -57,9 +76,9 @@ class Freesiem_Cloud_Connect_State
 			'hmac_secret' => sanitize_text_field((string) ($response['hmac_secret'] ?? '')),
 			'connected_backend_base_url' => freesiem_sentinel_get_effective_cloud_backend_base_url(),
 			'registration_status' => sanitize_key((string) ($response['registration_status'] ?? 'connected')),
-			'allow_remote_scan' => empty($response['allow_remote_scan']) && empty($permissions['allow_remote_scan']) ? 0 : 1,
-			'scan_frequency' => sanitize_key((string) ($response['scan_frequency'] ?? ($permissions['scan_frequency'] ?? 'daily'))),
-			'user_sync_enabled' => empty($response['user_sync_enabled']) && empty($permissions['user_sync_enabled']) ? 0 : 1,
+			'allow_remote_scan' => $allow_remote_scan ? 1 : 0,
+			'scan_frequency' => sanitize_key($scan_frequency),
+			'user_sync_enabled' => $user_sync_enabled ? 1 : 0,
 			'connect_expires_at' => '',
 			'connection_id' => '',
 			'cloud_connected_at' => freesiem_sentinel_get_iso8601_time(),
@@ -147,5 +166,31 @@ class Freesiem_Cloud_Connect_State
 	private static function sanitize_state(string $state, string $fallback): string
 	{
 		return in_array($state, self::STATES, true) ? $state : $fallback;
+	}
+
+	private static function resolve_boolean_value(array $response, array $permissions, array $keys, bool $fallback): bool
+	{
+		foreach ([$response, $permissions] as $source) {
+			foreach ($keys as $key) {
+				if (array_key_exists($key, $source)) {
+					return !empty($source[$key]);
+				}
+			}
+		}
+
+		return $fallback;
+	}
+
+	private static function resolve_string_value(array $response, array $permissions, array $keys, string $fallback): string
+	{
+		foreach ([$response, $permissions] as $source) {
+			foreach ($keys as $key) {
+				if (!empty($source[$key]) && is_string($source[$key])) {
+					return $source[$key];
+				}
+			}
+		}
+
+		return $fallback;
 	}
 }

@@ -368,6 +368,16 @@ class Freesiem_Plugin
 
 		$updated = Freesiem_Cloud_Connect_State::set_connected($response);
 		$this->refresh_runtime_clients($updated);
+		$preference_sync = $this->sync_connected_cloud_preferences($updated);
+
+		if (is_array($preference_sync) && $preference_sync !== []) {
+			$response = array_merge($response, [
+				'preferences_synced' => true,
+				'permissions' => $preference_sync['permissions'] ?? ($response['permissions'] ?? []),
+				'state' => $preference_sync['state'] ?? ($response['state'] ?? ''),
+				'connection_state' => $preference_sync['state'] ?? ($response['connection_state'] ?? ''),
+			]);
+		}
 
 		return $response;
 	}
@@ -447,18 +457,7 @@ class Freesiem_Plugin
 			return ['saved' => true, 'synced' => false];
 		}
 
-		$preference_payload = $this->build_cloud_preference_payload($settings);
-		error_log('[freeSIEM] syncing cloud preferences: ' . wp_json_encode($preference_payload));
-		$response = $this->cloud_connect_client->sync_preferences([
-			'plugin_version' => FREESIEM_SENTINEL_VERSION,
-			'wp_version' => get_bloginfo('version'),
-			'allow_remote_scan' => $preference_payload['allow_remote_scan'],
-			'allow_remote_scans' => $preference_payload['allow_remote_scans'],
-			'scan_frequency' => $preference_payload['scan_frequency'],
-			'user_sync_enabled' => $preference_payload['user_sync_enabled'],
-			'centralized_user_sync_enabled' => $preference_payload['centralized_user_sync_enabled'],
-			'preferences' => $preference_payload['preferences'],
-		]);
+		$response = $this->sync_connected_cloud_preferences($settings);
 
 		if (is_wp_error($response)) {
 			return new WP_Error('freesiem_cloud_preferences_sync_failed', __('Cloud preferences were saved locally, but freeSIEM Core could not be updated right now.', 'freesiem-sentinel'));
@@ -490,6 +489,23 @@ class Freesiem_Plugin
 				'centralized_user_sync_enabled' => $user_sync_enabled,
 			],
 		];
+	}
+
+	private function sync_connected_cloud_preferences(array $settings)
+	{
+		$preference_payload = $this->build_cloud_preference_payload($settings);
+		error_log('[freeSIEM] syncing cloud preferences: ' . wp_json_encode($preference_payload));
+
+		return $this->cloud_connect_client->sync_preferences([
+			'plugin_version' => FREESIEM_SENTINEL_VERSION,
+			'wp_version' => get_bloginfo('version'),
+			'allow_remote_scan' => $preference_payload['allow_remote_scan'],
+			'allow_remote_scans' => $preference_payload['allow_remote_scans'],
+			'scan_frequency' => $preference_payload['scan_frequency'],
+			'user_sync_enabled' => $preference_payload['user_sync_enabled'],
+			'centralized_user_sync_enabled' => $preference_payload['centralized_user_sync_enabled'],
+			'preferences' => $preference_payload['preferences'],
+		]);
 	}
 
 	public function apply_remote_settings(array $payload)
