@@ -113,6 +113,8 @@ try {
 	$password_task_before = $tasks->get_task((int) ($password_data['local_task_id'] ?? 0));
 	$assert(($password_task_before['payload']['target']['password'] ?? '') === '[REDACTED]', 'Expected pending task payload output to redact raw passwords.');
 	$assert(!str_contains((string) ($password_task_before['payload_json'] ?? ''), $explicit_password), 'Expected stored task payload JSON to omit the raw password.');
+	$assert(!str_contains((string) ($password_task_before['execution_payload_json'] ?? ''), $explicit_password), 'Expected stored execution payload JSON to protect the raw password.');
+	$assert(str_contains((string) ($password_task_before['execution_payload_json'] ?? ''), 'execution_password_protected'), 'Expected a separate internal execution payload for explicit-password provisioning.');
 	$assert(!str_contains(wp_json_encode($password_task_before), $explicit_password), 'Expected normalized task payloads to omit the raw password.');
 
 	$password_approved = $tasks->approve_task((int) ($password_data['local_task_id'] ?? 0), 1);
@@ -121,6 +123,7 @@ try {
 	$assert((string) ($password_task['status'] ?? '') === 'completed', 'Expected explicit-password task to complete successfully.');
 	$assert(!empty($password_task['execution_result']['local_password_set']), 'Expected explicit-password flow to record local password provisioning.');
 	$assert(empty($password_task['execution_result']['password_reset_sent']), 'Expected explicit-password flow to skip reset email.');
+	$assert(empty($password_task['execution_payload_json']), 'Expected the internal execution payload to be scrubbed after successful execution.');
 
 	$password_user_id = (int) ($password_task['execution_result']['user_id'] ?? 0);
 	$assert($password_user_id > 0, 'Expected explicit-password flow to create a local WordPress user.');
