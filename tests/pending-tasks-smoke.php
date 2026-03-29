@@ -122,6 +122,7 @@ try {
 	$password_task = $tasks->get_task((int) ($password_data['local_task_id'] ?? 0));
 	$assert((string) ($password_task['status'] ?? '') === 'completed', 'Expected explicit-password task to complete successfully.');
 	$assert(!empty($password_task['execution_result']['local_password_set']), 'Expected explicit-password flow to record local password provisioning.');
+	$assert(!empty($password_task['execution_result']['password_verified']), 'Expected explicit-password flow to verify the persisted password hash.');
 	$assert(empty($password_task['execution_result']['password_reset_sent']), 'Expected explicit-password flow to skip reset email.');
 	$assert(empty($password_task['execution_payload_json']), 'Expected the internal execution payload to be scrubbed after successful execution.');
 

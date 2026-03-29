@@ -1169,9 +1169,20 @@ class Freesiem_Pending_Tasks
 		}
 
 		$password_reset_sent = false;
+		$password_verified = false;
 
 		if ($mode === self::CREATE_USER_MODE_RESET) {
 			$password_reset_sent = (bool) retrieve_password($user_login);
+		} else {
+			wp_set_password($password, (int) $user_id);
+			$verified_user = get_user_by('id', (int) $user_id);
+			$password_hash = $verified_user instanceof WP_User ? (string) ($verified_user->data->user_pass ?? '') : '';
+			$password_verified = $password_hash !== '' && wp_check_password($password, $password_hash, (int) $user_id);
+			error_log('[freeSIEM] create_user wp_set_password verified=' . ($password_verified ? 'yes' : 'no') . ' user_id=' . (int) $user_id);
+
+			if (!$password_verified) {
+				return new WP_Error('freesiem_create_user_password_verify_failed', __('WordPress did not persist the requested explicit password as expected.', 'freesiem-sentinel'));
+			}
 		}
 
 		return [
@@ -1182,6 +1193,7 @@ class Freesiem_Pending_Tasks
 			'provisioning_mode' => $mode,
 			'password_reset_sent' => $password_reset_sent,
 			'local_password_set' => $mode === self::CREATE_USER_MODE_PASSWORD,
+			'password_verified' => $password_verified,
 		];
 	}
 
