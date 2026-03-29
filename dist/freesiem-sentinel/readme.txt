@@ -3,7 +3,7 @@ Contributors: freesiem
 Requires at least: 6.4
 Tested up to: 6.8
 Requires PHP: 8.1
-Stable tag: 0.1.7
+Stable tag: 0.1.9
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -69,6 +69,14 @@ Version bumps should always have matching git tags.
 GitHub Actions publishes the ZIP automatically when a `v*` tag is pushed.
 
 == Changelog ==
+
+= 0.1.9 =
+
+* Fix Cloud preference sync so remote scan and centralized user sync persist in wp-admin and update freeSIEM Core heartbeat metadata and site permissions correctly
+
+= 0.1.8 =
+
+* Refine the Cloud page UX, restore production-only backend behavior, and sync Cloud preferences to Core while simplifying local user-sync controls
 
 = 0.1.7 =
 

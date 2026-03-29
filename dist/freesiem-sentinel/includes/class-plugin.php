@@ -383,9 +383,15 @@ class Freesiem_Plugin
 		$summary_cache = freesiem_sentinel_safe_array($settings['summary_cache'] ?? []);
 		$local_inventory = freesiem_sentinel_safe_array($summary_cache['local_inventory'] ?? []);
 		$scan_metrics = freesiem_sentinel_safe_array($local_inventory['scan_metrics'] ?? []);
+		$preference_payload = $this->build_cloud_preference_payload($settings);
 		$response = $this->cloud_connect_client->heartbeat([
 			'plugin_version' => FREESIEM_SENTINEL_VERSION,
 			'wp_version' => get_bloginfo('version'),
+			'allow_remote_scan' => $preference_payload['allow_remote_scan'],
+			'allow_remote_scans' => $preference_payload['allow_remote_scans'],
+			'scan_frequency' => $preference_payload['scan_frequency'],
+			'user_sync_enabled' => $preference_payload['user_sync_enabled'],
+			'centralized_user_sync_enabled' => $preference_payload['centralized_user_sync_enabled'],
 			'site_health_summary' => [
 				'wordpress_version' => get_bloginfo('version'),
 				'php_version' => PHP_VERSION,
@@ -396,6 +402,7 @@ class Freesiem_Plugin
 				'files_discovered' => (int) ($scan_metrics['files_discovered'] ?? 0),
 				'files_flagged' => (int) ($scan_metrics['files_flagged'] ?? 0),
 			],
+			'preferences' => $preference_payload['preferences'],
 		]);
 
 		if (is_wp_error($response)) {
@@ -429,6 +436,60 @@ class Freesiem_Plugin
 		$this->refresh_runtime_clients($updated);
 
 		return is_array($response) ? $response : ['disconnected' => true];
+	}
+
+	public function save_cloud_preferences(array $preferences)
+	{
+		$settings = freesiem_sentinel_update_settings($preferences);
+		$this->refresh_runtime_clients($settings);
+
+		if (!Freesiem_Cloud_Connect_State::is_connected($settings)) {
+			return ['saved' => true, 'synced' => false];
+		}
+
+		$preference_payload = $this->build_cloud_preference_payload($settings);
+		error_log('[freeSIEM] syncing cloud preferences: ' . wp_json_encode($preference_payload));
+		$response = $this->cloud_connect_client->sync_preferences([
+			'plugin_version' => FREESIEM_SENTINEL_VERSION,
+			'wp_version' => get_bloginfo('version'),
+			'allow_remote_scan' => $preference_payload['allow_remote_scan'],
+			'allow_remote_scans' => $preference_payload['allow_remote_scans'],
+			'scan_frequency' => $preference_payload['scan_frequency'],
+			'user_sync_enabled' => $preference_payload['user_sync_enabled'],
+			'centralized_user_sync_enabled' => $preference_payload['centralized_user_sync_enabled'],
+			'preferences' => $preference_payload['preferences'],
+		]);
+
+		if (is_wp_error($response)) {
+			return new WP_Error('freesiem_cloud_preferences_sync_failed', __('Cloud preferences were saved locally, but freeSIEM Core could not be updated right now.', 'freesiem-sentinel'));
+		}
+
+		$updated = Freesiem_Cloud_Connect_State::update_from_heartbeat($response, false, (string) ($settings['last_heartbeat_result'] ?? ''));
+		$this->refresh_runtime_clients($updated);
+
+		return ['saved' => true, 'synced' => true];
+	}
+
+	private function build_cloud_preference_payload(array $settings): array
+	{
+		$allow_remote_scan = !empty($settings['allow_remote_scan']);
+		$user_sync_enabled = !empty($settings['user_sync_enabled']);
+		$scan_frequency = (string) ($settings['scan_frequency'] ?? 'daily');
+
+		return [
+			'allow_remote_scan' => $allow_remote_scan,
+			'allow_remote_scans' => $allow_remote_scan,
+			'scan_frequency' => $scan_frequency,
+			'user_sync_enabled' => $user_sync_enabled,
+			'centralized_user_sync_enabled' => $user_sync_enabled,
+			'preferences' => [
+				'allow_remote_scan' => $allow_remote_scan,
+				'allow_remote_scans' => $allow_remote_scan,
+				'scan_frequency' => $scan_frequency,
+				'user_sync_enabled' => $user_sync_enabled,
+				'centralized_user_sync_enabled' => $user_sync_enabled,
+			],
+		];
 	}
 
 	public function apply_remote_settings(array $payload)

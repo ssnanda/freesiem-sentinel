@@ -12,8 +12,6 @@ function freesiem_sentinel_get_default_settings(): array
 		'local_seed' => '',
 		'connection_state' => 'disconnected',
 		'connection_id' => '',
-		'cloud_backend_base_url' => '',
-		'connected_backend_base_url' => '',
 		'email' => '',
 		'phone' => '',
 		'phone_number' => '',
@@ -140,8 +138,6 @@ function freesiem_sentinel_sanitize_settings(array $settings): array
 	$settings['plugin_uuid'] = sanitize_text_field((string) $settings['plugin_uuid']);
 	$settings['local_seed'] = sanitize_text_field((string) ($settings['local_seed'] ?? ''));
 	$settings['connection_id'] = sanitize_text_field((string) ($settings['connection_id'] ?? ''));
-	$settings['cloud_backend_base_url'] = freesiem_sentinel_sanitize_cloud_backend_base_url((string) ($settings['cloud_backend_base_url'] ?? ''));
-	$settings['connected_backend_base_url'] = freesiem_sentinel_sanitize_cloud_backend_base_url((string) ($settings['connected_backend_base_url'] ?? ''));
 	$settings['email'] = sanitize_email((string) $settings['email']);
 	$settings['phone'] = freesiem_sentinel_sanitize_phone_number((string) ($settings['phone'] ?? ($settings['phone_number'] ?? '')));
 	$settings['phone_number'] = $settings['phone'];
@@ -200,31 +196,6 @@ function freesiem_sentinel_sanitize_backend_url(string $url): string
 
 	if ($scheme !== 'https' && !in_array($host, ['localhost', '127.0.0.1'], true)) {
 		return FREESIEM_SENTINEL_BACKEND_URL;
-	}
-
-	return $url;
-}
-
-function freesiem_sentinel_sanitize_cloud_backend_base_url(string $url): string
-{
-	$url = trim(freesiem_sentinel_safe_string($url));
-
-	if ($url === '') {
-		return '';
-	}
-
-	$url = esc_url_raw(untrailingslashit($url));
-
-	if ($url === '') {
-		return '';
-	}
-
-	$parts = wp_parse_url($url);
-	$scheme = strtolower((string) ($parts['scheme'] ?? ''));
-	$host = strtolower((string) ($parts['host'] ?? ''));
-
-	if ($scheme !== 'https' || $host === '') {
-		return '';
 	}
 
 	return $url;
@@ -341,17 +312,12 @@ function freesiem_sentinel_get_timezone_string(): string
 
 function freesiem_sentinel_get_effective_cloud_backend_base_url(?array $settings = null): string
 {
-	$settings = $settings ?: freesiem_sentinel_get_settings();
-	$custom = freesiem_sentinel_sanitize_cloud_backend_base_url((string) ($settings['cloud_backend_base_url'] ?? ''));
-
-	return $custom !== '' ? $custom : FREESIEM_SENTINEL_BACKEND_URL;
+	return FREESIEM_SENTINEL_BACKEND_URL;
 }
 
 function freesiem_sentinel_is_custom_cloud_backend(?array $settings = null): bool
 {
-	$settings = $settings ?: freesiem_sentinel_get_settings();
-
-	return freesiem_sentinel_sanitize_cloud_backend_base_url((string) ($settings['cloud_backend_base_url'] ?? '')) !== '';
+	return false;
 }
 
 function freesiem_sentinel_mask_secret(string $value, int $visible = 4): string

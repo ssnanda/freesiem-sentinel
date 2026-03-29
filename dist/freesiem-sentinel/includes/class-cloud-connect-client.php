@@ -37,6 +37,11 @@ class Freesiem_Cloud_Connect_Client
 		return $this->post('/api/v1/wordpress/disconnect', $payload, true);
 	}
 
+	public function sync_preferences(array $payload)
+	{
+		return $this->post('/api/v1/wordpress/heartbeat', $payload, true);
+	}
+
 	private function post(string $path, array $payload, bool $signed)
 	{
 		if (!$this->is_secure_backend_url()) {
