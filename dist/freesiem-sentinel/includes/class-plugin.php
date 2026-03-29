@@ -431,38 +431,6 @@ class Freesiem_Plugin
 		return is_array($response) ? $response : ['disconnected' => true];
 	}
 
-	public function save_cloud_preferences(array $preferences)
-	{
-		$settings = freesiem_sentinel_update_settings($preferences);
-		$this->refresh_runtime_clients($settings);
-
-		if (!Freesiem_Cloud_Connect_State::is_connected($settings)) {
-			return ['saved' => true, 'synced' => false];
-		}
-
-		$response = $this->cloud_connect_client->sync_preferences([
-			'plugin_version' => FREESIEM_SENTINEL_VERSION,
-			'wp_version' => get_bloginfo('version'),
-			'allow_remote_scan' => (int) ($settings['allow_remote_scan'] ?? 0),
-			'scan_frequency' => (string) ($settings['scan_frequency'] ?? 'daily'),
-			'user_sync_enabled' => (int) ($settings['user_sync_enabled'] ?? 0),
-			'preferences' => [
-				'allow_remote_scan' => (int) ($settings['allow_remote_scan'] ?? 0),
-				'scan_frequency' => (string) ($settings['scan_frequency'] ?? 'daily'),
-				'user_sync_enabled' => (int) ($settings['user_sync_enabled'] ?? 0),
-			],
-		]);
-
-		if (is_wp_error($response)) {
-			return new WP_Error('freesiem_cloud_preferences_sync_failed', __('Cloud preferences were saved locally, but freeSIEM Core could not be updated right now.', 'freesiem-sentinel'));
-		}
-
-		$updated = Freesiem_Cloud_Connect_State::update_from_heartbeat($response, false, (string) ($settings['last_heartbeat_result'] ?? ''));
-		$this->refresh_runtime_clients($updated);
-
-		return ['saved' => true, 'synced' => true];
-	}
-
 	public function apply_remote_settings(array $payload)
 	{
 		$allowed_keys = freesiem_sentinel_get_allowed_remote_setting_keys();
