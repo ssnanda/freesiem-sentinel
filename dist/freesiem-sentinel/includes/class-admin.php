@@ -144,7 +144,7 @@ class Freesiem_Admin
 		$this->assert_manage_permissions();
 		freesiem_sentinel_require_admin_post_nonce();
 
-		$result = $this->plugin->heartbeat_cloud_connect();
+		$result = $this->plugin->test_connection();
 		freesiem_sentinel_set_notice(is_wp_error($result) ? 'error' : 'success', is_wp_error($result) ? $result->get_error_message() : __('Connection test completed successfully.', 'freesiem-sentinel'));
 		$this->redirect_to_page('freesiem-remote');
 	}
@@ -155,7 +155,13 @@ class Freesiem_Admin
 		freesiem_sentinel_require_admin_post_nonce();
 
 		$result = $this->plugin->disconnect_cloud_connect();
-		freesiem_sentinel_set_notice(is_wp_error($result) ? 'error' : 'success', is_wp_error($result) ? $result->get_error_message() : __('Disconnected from freeSIEM Cloud Connect.', 'freesiem-sentinel'));
+		if (is_wp_error($result)) {
+			freesiem_sentinel_set_notice('error', $result->get_error_message());
+		} elseif (!empty($result['local_only'])) {
+			freesiem_sentinel_set_notice('warning', sprintf(__('Local Cloud credentials were cleared, but freeSIEM Core responded with: %s', 'freesiem-sentinel'), $result['message'] ?? __('request rejected', 'freesiem-sentinel')));
+		} else {
+			freesiem_sentinel_set_notice('success', __('Disconnected from freeSIEM Cloud Connect.', 'freesiem-sentinel'));
+		}
 		$this->redirect_to_page('freesiem-remote');
 	}
 

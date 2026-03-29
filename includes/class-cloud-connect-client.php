@@ -94,14 +94,24 @@ class Freesiem_Cloud_Connect_Client
 		$data = json_decode($body, true);
 		$message = '';
 
-		if (is_array($data) && is_string($data['message'] ?? null)) {
-			$message = sanitize_text_field((string) $data['message']);
+		if (is_array($data)) {
+			if (is_string($data['message'] ?? null)) {
+				$message = sanitize_text_field((string) $data['message']);
+			} elseif (is_string($data['detail'] ?? null)) {
+				$message = sanitize_text_field((string) $data['detail']);
+			}
 		}
 
 		if ($status_code < 200 || $status_code >= 300) {
+			error_log('[freeSIEM] cloud request failed status=' . $status_code . ' body=' . $body);
+
 			return new WP_Error(
 				'freesiem_cloud_remote_error',
-				$message !== '' ? $message : __('freeSIEM Core rejected the request.', 'freesiem-sentinel')
+				$message !== '' ? $message : __('freeSIEM Core rejected the request.', 'freesiem-sentinel'),
+				[
+					'status_code' => $status_code,
+					'response_body' => $body,
+				]
 			);
 		}
 
