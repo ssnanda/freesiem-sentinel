@@ -548,6 +548,8 @@ class Freesiem_Pending_Tasks
 		return [
 			'supports_remote_user_admin' => true,
 			'supports_remote_user_listing' => true,
+			'supports_remote_tfa_management' => true,
+			'supports_local_tfa_enforcement' => true,
 			'supports_pending_tasks' => true,
 			'supports_task_status_heartbeat' => true,
 			'supports_auto_approve' => true,

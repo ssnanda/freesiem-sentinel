@@ -17,6 +17,9 @@ class Freesiem_Plugin
 	private Freesiem_Admin $admin;
 	private Freesiem_Cloud_Connect_Client $cloud_connect_client;
 	private Freesiem_Pending_Tasks $pending_tasks;
+	private Freesiem_TFA_Service $tfa_service;
+	private Freesiem_TFA_Auth $tfa_auth;
+	private Freesiem_TFA_Remote $tfa_remote;
 
 	public static function instance(): self
 	{
@@ -30,6 +33,7 @@ class Freesiem_Plugin
 	public function __construct()
 	{
 		$this->pending_tasks = new Freesiem_Pending_Tasks($this);
+		$this->tfa_service = new Freesiem_TFA_Service();
 		$this->bootstrap_settings();
 		$this->api_client = new Freesiem_API_Client();
 		$this->cloud_connect_client = new Freesiem_Cloud_Connect_Client();
@@ -38,6 +42,8 @@ class Freesiem_Plugin
 		$this->updater = new Freesiem_Updater();
 		$this->commands = new Freesiem_Commands($this);
 		$this->cron = new Freesiem_Cron($this);
+		$this->tfa_auth = new Freesiem_TFA_Auth($this, $this->tfa_service);
+		$this->tfa_remote = new Freesiem_TFA_Remote($this, $this->tfa_service, $this->pending_tasks);
 		$this->admin = new Freesiem_Admin($this);
 
 		add_action('plugins_loaded', [$this, 'register']);
@@ -49,6 +55,8 @@ class Freesiem_Plugin
 		$this->updater->register();
 		$this->admin->register();
 		$this->pending_tasks->register();
+		$this->tfa_auth->register();
+		$this->tfa_remote->register();
 	}
 
 	public static function activate(): void
@@ -610,6 +618,16 @@ class Freesiem_Plugin
 	public function get_pending_tasks(): Freesiem_Pending_Tasks
 	{
 		return $this->pending_tasks;
+	}
+
+	public function get_tfa_service(): Freesiem_TFA_Service
+	{
+		return $this->tfa_service;
+	}
+
+	public function get_tfa_auth(): Freesiem_TFA_Auth
+	{
+		return $this->tfa_auth;
 	}
 
 	public function get_plan(): string

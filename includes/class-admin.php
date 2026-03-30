@@ -37,6 +37,10 @@ class Freesiem_Admin
 		add_action('admin_post_freesiem_sentinel_test_connection', [$this, 'handle_test_connection']);
 		add_action('admin_post_freesiem_sentinel_approve_task', [$this, 'handle_approve_task']);
 		add_action('admin_post_freesiem_sentinel_deny_task', [$this, 'handle_deny_task']);
+		add_action('admin_post_freesiem_sentinel_tfa_enroll', [$this, 'handle_tfa_enroll']);
+		add_action('admin_post_freesiem_sentinel_tfa_reset', [$this, 'handle_tfa_reset']);
+		add_action('admin_post_freesiem_sentinel_tfa_complete_setup', [$this, 'handle_tfa_complete_setup']);
+		add_action('admin_post_freesiem_sentinel_tfa_change_password', [$this, 'handle_tfa_change_password']);
 	}
 
 	public function register_menu(): void
@@ -52,6 +56,7 @@ class Freesiem_Admin
 
 		add_submenu_page('freesiem-portal', __('Scan', 'freesiem-sentinel'), __('Scan', 'freesiem-sentinel'), 'manage_options', 'freesiem-scan', [$this, 'render_scan_page']);
 		add_submenu_page('freesiem-portal', __('Cloud', 'freesiem-sentinel'), __('Cloud', 'freesiem-sentinel'), 'manage_options', 'freesiem-remote', [$this, 'render_remote_page']);
+		add_submenu_page('freesiem-portal', __('Two-Factor Authentication', 'freesiem-sentinel'), __('TFA', 'freesiem-sentinel'), 'manage_options', 'freesiem-tfa', [$this, 'render_tfa_page']);
 		add_submenu_page('freesiem-portal', __('Pending Tasks', 'freesiem-sentinel'), __('Pending Tasks', 'freesiem-sentinel'), 'read', 'freesiem-pending-tasks', [$this, 'render_pending_tasks_page']);
 		add_submenu_page('freesiem-portal', __('About', 'freesiem-sentinel'), __('About', 'freesiem-sentinel'), 'manage_options', 'freesiem-about', [$this, 'render_about_page']);
 	}
@@ -341,6 +346,52 @@ class Freesiem_Admin
 
 		freesiem_sentinel_set_notice(is_wp_error($result) ? 'error' : 'success', is_wp_error($result) ? $result->get_error_message() : __('Pending task denied locally.', 'freesiem-sentinel'));
 		$this->redirect_to_page('freesiem-pending-tasks', ['task_id' => (string) $task_id]);
+	}
+
+	public function handle_tfa_enroll(): void
+	{
+		$this->assert_manage_permissions();
+		freesiem_sentinel_require_admin_post_nonce();
+
+		$user_id = isset($_REQUEST['user_id']) ? (int) $_REQUEST['user_id'] : 0;
+		$result = $this->plugin->get_tfa_service()->start_local_enrollment($user_id);
+		freesiem_sentinel_set_notice(is_wp_error($result) ? 'error' : 'success', is_wp_error($result) ? $result->get_error_message() : __('TFA enrollment is ready. Complete setup with the verification code below.', 'freesiem-sentinel'));
+		$this->redirect_to_page('freesiem-tfa', ['user_id' => (string) $user_id]);
+	}
+
+	public function handle_tfa_reset(): void
+	{
+		$this->assert_manage_permissions();
+		freesiem_sentinel_require_admin_post_nonce();
+
+		$user_id = isset($_REQUEST['user_id']) ? (int) $_REQUEST['user_id'] : 0;
+		$result = $this->plugin->get_tfa_service()->reset_local_tfa($user_id);
+		freesiem_sentinel_set_notice(is_wp_error($result) ? 'error' : 'success', is_wp_error($result) ? $result->get_error_message() : __('Local TFA was reset for the selected user.', 'freesiem-sentinel'));
+		$this->redirect_to_page('freesiem-tfa', ['user_id' => (string) $user_id]);
+	}
+
+	public function handle_tfa_complete_setup(): void
+	{
+		$this->assert_manage_permissions();
+		freesiem_sentinel_require_admin_post_nonce();
+
+		$user_id = isset($_POST['user_id']) ? (int) $_POST['user_id'] : 0;
+		$code = isset($_POST['tfa_code']) ? wp_unslash((string) $_POST['tfa_code']) : '';
+		$result = $this->plugin->get_tfa_service()->complete_pending_setup($user_id, $code);
+		freesiem_sentinel_set_notice(is_wp_error($result) ? 'error' : 'success', is_wp_error($result) ? $result->get_error_message() : __('TFA is now enabled for the selected user.', 'freesiem-sentinel'));
+		$this->redirect_to_page('freesiem-tfa', ['user_id' => (string) $user_id]);
+	}
+
+	public function handle_tfa_change_password(): void
+	{
+		$this->assert_manage_permissions();
+		freesiem_sentinel_require_admin_post_nonce();
+
+		$user_id = isset($_POST['user_id']) ? (int) $_POST['user_id'] : 0;
+		$password = isset($_POST['password']) ? wp_unslash((string) $_POST['password']) : '';
+		$result = $this->plugin->get_tfa_service()->change_local_password($user_id, $password);
+		freesiem_sentinel_set_notice(is_wp_error($result) ? 'error' : 'success', is_wp_error($result) ? $result->get_error_message() : __('The local WordPress password was updated.', 'freesiem-sentinel'));
+		$this->redirect_to_page('freesiem-tfa', ['user_id' => (string) $user_id]);
 	}
 
 	public function render_dashboard_page(): void
@@ -779,6 +830,115 @@ class Freesiem_Admin
 		}
 
 		echo '</div>';
+		echo '</div>';
+	}
+
+	public function render_tfa_page(): void
+	{
+		$this->assert_manage_permissions();
+
+		$service = $this->plugin->get_tfa_service();
+		$selected_user_id = isset($_GET['user_id']) ? (int) $_GET['user_id'] : 0;
+		$selected_user = $selected_user_id > 0 ? get_user_by('id', $selected_user_id) : null;
+		$selected_state = $selected_user instanceof WP_User ? $service->get_user_tfa_state((int) $selected_user->ID) : null;
+		$selected_secret = $selected_user instanceof WP_User && is_array($selected_state) && $selected_state['tfa_status'] === Freesiem_TFA_Service::STATUS_PENDING_SETUP
+			? $service->get_secret((int) $selected_user->ID)
+			: '';
+		$selected_otpauth = $selected_user instanceof WP_User && is_string($selected_secret) && $selected_secret !== ''
+			? $service->build_otpauth_uri($selected_user, $selected_secret)
+			: '';
+		$users = get_users(['orderby' => 'login', 'order' => 'ASC']);
+
+		echo '<div class="wrap">';
+		echo '<h1>' . esc_html__('Two-Factor Authentication', 'freesiem-sentinel') . '</h1>';
+		echo '<p>' . esc_html__('Manage local and Core-managed TFA state for WordPress users without exposing secrets in APIs, logs, or status payloads.', 'freesiem-sentinel') . '</p>';
+
+		echo '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin:20px 0;">';
+		$this->render_summary_stat(__('Enabled', 'freesiem-sentinel'), (string) count(array_filter($users, fn($user): bool => $user instanceof WP_User && $service->get_user_tfa_state((int) $user->ID)['tfa_status'] === Freesiem_TFA_Service::STATUS_ENABLED)));
+		$this->render_summary_stat(__('Pending Setup', 'freesiem-sentinel'), (string) count(array_filter($users, fn($user): bool => $user instanceof WP_User && $service->get_user_tfa_state((int) $user->ID)['tfa_status'] === Freesiem_TFA_Service::STATUS_PENDING_SETUP)));
+		$this->render_summary_stat(__('Core Managed', 'freesiem-sentinel'), (string) count(array_filter($users, fn($user): bool => $user instanceof WP_User && $service->is_core_managed((int) $user->ID))));
+		$this->render_summary_stat(__('Local Managed', 'freesiem-sentinel'), (string) count(array_filter($users, fn($user): bool => $user instanceof WP_User && !$service->is_core_managed((int) $user->ID))));
+		echo '</div>';
+
+		echo '<div style="background:#fff;padding:20px;border:1px solid #dcdcde;border-radius:12px;">';
+		echo '<h2 style="margin-top:0;">' . esc_html__('User TFA Status', 'freesiem-sentinel') . '</h2>';
+		echo '<table class="widefat striped"><thead><tr><th>' . esc_html__('Username', 'freesiem-sentinel') . '</th><th>' . esc_html__('Email', 'freesiem-sentinel') . '</th><th>' . esc_html__('Status', 'freesiem-sentinel') . '</th><th>' . esc_html__('Source', 'freesiem-sentinel') . '</th><th>' . esc_html__('Managed By', 'freesiem-sentinel') . '</th><th>' . esc_html__('Last Verified', 'freesiem-sentinel') . '</th><th>' . esc_html__('Actions', 'freesiem-sentinel') . '</th></tr></thead><tbody>';
+
+		foreach ($users as $user) {
+			if (!$user instanceof WP_User) {
+				continue;
+			}
+
+			$state = $service->get_user_tfa_state((int) $user->ID);
+			$view_url = freesiem_sentinel_admin_page_url('freesiem-tfa', ['user_id' => (string) $user->ID]);
+			$enroll_url = freesiem_sentinel_admin_post_url('freesiem_sentinel_tfa_enroll', ['user_id' => (string) $user->ID]);
+			$reset_url = freesiem_sentinel_admin_post_url('freesiem_sentinel_tfa_reset', ['user_id' => (string) $user->ID]);
+			echo '<tr>';
+			echo '<td><a href="' . esc_url($view_url) . '"><strong>' . esc_html((string) $user->user_login) . '</strong></a></td>';
+			echo '<td>' . esc_html((string) $user->user_email) . '</td>';
+			echo '<td><span style="' . esc_attr($this->tfa_status_badge_style($state['tfa_status'])) . '">' . esc_html($this->format_tfa_label($state['tfa_status'])) . '</span></td>';
+			echo '<td><span style="' . esc_attr($this->tfa_meta_badge_style($state['tfa_source'])) . '">' . esc_html(ucfirst($state['tfa_source'])) . '</span></td>';
+			echo '<td><span style="' . esc_attr($this->tfa_meta_badge_style($state['tfa_managed'])) . '">' . esc_html(ucfirst($state['tfa_managed'])) . '</span></td>';
+			echo '<td>' . esc_html($state['last_verified_at'] !== '' ? freesiem_sentinel_format_datetime($state['last_verified_at']) : __('Never', 'freesiem-sentinel')) . '</td>';
+			echo '<td><a class="button button-secondary" href="' . esc_url($view_url) . '">' . esc_html__('View', 'freesiem-sentinel') . '</a> ';
+			if ($service->local_actions_allowed((int) $user->ID)) {
+				echo '<a class="button button-secondary" href="' . esc_url($enroll_url) . '">' . esc_html__('Enroll TFA', 'freesiem-sentinel') . '</a> ';
+				echo '<a class="button button-secondary" href="' . esc_url($reset_url) . '">' . esc_html__('Reset TFA', 'freesiem-sentinel') . '</a>';
+			} else {
+				echo '<span style="color:#50575e;">' . esc_html__('Core-managed', 'freesiem-sentinel') . '</span>';
+			}
+			echo '</td>';
+			echo '</tr>';
+		}
+
+		echo '</tbody></table>';
+		echo '</div>';
+
+		if ($selected_user instanceof WP_User && is_array($selected_state)) {
+			echo '<div style="background:#fff;padding:20px;border:1px solid #dcdcde;border-radius:12px;margin-top:20px;">';
+			echo '<h2 style="margin-top:0;">' . esc_html(sprintf(__('TFA Details: %s', 'freesiem-sentinel'), $selected_user->user_login)) . '</h2>';
+			echo '<p><strong>' . esc_html__('Status', 'freesiem-sentinel') . ':</strong> ' . esc_html($this->format_tfa_label($selected_state['tfa_status'])) . '</p>';
+			echo '<p><strong>' . esc_html__('Managed By', 'freesiem-sentinel') . ':</strong> ' . esc_html(ucfirst($selected_state['tfa_managed'])) . '</p>';
+
+			if ($selected_state['tfa_managed'] === Freesiem_TFA_Service::MANAGED_CORE) {
+				echo '<p style="color:#50575e;">' . esc_html__('This account is Core-managed. Local enroll, reset, and password changes are disabled, but local WordPress login enforcement still applies.', 'freesiem-sentinel') . '</p>';
+			} else {
+				echo '<div style="display:grid;grid-template-columns:1fr 1fr;gap:20px;">';
+				echo '<div>';
+				echo '<h3 style="margin-top:0;">' . esc_html__('Change Password', 'freesiem-sentinel') . '</h3>';
+				echo '<form method="post" action="' . esc_url(admin_url('admin-post.php')) . '">';
+				wp_nonce_field(FREESIEM_SENTINEL_NONCE_ACTION);
+				echo '<input type="hidden" name="action" value="freesiem_sentinel_tfa_change_password" />';
+				echo '<input type="hidden" name="user_id" value="' . esc_attr((string) $selected_user->ID) . '" />';
+				echo '<p><label>' . esc_html__('New Password', 'freesiem-sentinel') . '<br /><input type="text" name="password" class="regular-text" value="" autocomplete="new-password" /></label></p>';
+				echo '<p><button type="submit" class="button button-primary">' . esc_html__('Change Password', 'freesiem-sentinel') . '</button></p>';
+				echo '</form>';
+				echo '</div>';
+
+				echo '<div>';
+				echo '<h3 style="margin-top:0;">' . esc_html__('Enrollment', 'freesiem-sentinel') . '</h3>';
+				if ($selected_state['tfa_status'] === Freesiem_TFA_Service::STATUS_PENDING_SETUP && is_string($selected_secret) && $selected_secret !== '') {
+					echo '<p>' . esc_html__('Scan the setup data with an authenticator app, then submit the first verification code.', 'freesiem-sentinel') . '</p>';
+					echo '<p><strong>' . esc_html__('Manual Setup Key', 'freesiem-sentinel') . ':</strong><br /><code>' . esc_html($selected_secret) . '</code></p>';
+					echo '<p><strong>' . esc_html__('Authenticator URI', 'freesiem-sentinel') . ':</strong><br /><code style="word-break:break-all;">' . esc_html($selected_otpauth) . '</code></p>';
+					echo '<form method="post" action="' . esc_url(admin_url('admin-post.php')) . '">';
+					wp_nonce_field(FREESIEM_SENTINEL_NONCE_ACTION);
+					echo '<input type="hidden" name="action" value="freesiem_sentinel_tfa_complete_setup" />';
+					echo '<input type="hidden" name="user_id" value="' . esc_attr((string) $selected_user->ID) . '" />';
+					echo '<p><label>' . esc_html__('Verification Code', 'freesiem-sentinel') . '<br /><input type="text" name="tfa_code" class="regular-text" inputmode="numeric" autocomplete="one-time-code" value="" /></label></p>';
+					echo '<p><button type="submit" class="button button-primary">' . esc_html__('Complete Pending Setup', 'freesiem-sentinel') . '</button></p>';
+					echo '</form>';
+				} else {
+					echo '<p>' . esc_html__('Start a fresh local enrollment if this user needs a new authenticator binding.', 'freesiem-sentinel') . '</p>';
+					echo '<p><a class="button button-secondary" href="' . esc_url(freesiem_sentinel_admin_post_url('freesiem_sentinel_tfa_enroll', ['user_id' => (string) $selected_user->ID])) . '">' . esc_html__('Enroll TFA', 'freesiem-sentinel') . '</a></p>';
+				}
+				echo '</div>';
+				echo '</div>';
+			}
+
+			echo '</div>';
+		}
+
 		echo '</div>';
 	}
 
@@ -1481,6 +1641,27 @@ class Freesiem_Admin
 	private function is_cloud_connected(array $settings): bool
 	{
 		return Freesiem_Cloud_Connect_State::is_connected($settings);
+	}
+
+	private function format_tfa_label(string $value): string
+	{
+		return ucwords(str_replace('_', ' ', sanitize_key($value)));
+	}
+
+	private function tfa_status_badge_style(string $status): string
+	{
+		return match (sanitize_key($status)) {
+			Freesiem_TFA_Service::STATUS_ENABLED => 'display:inline-block;padding:4px 10px;border-radius:999px;background:#dcfce7;color:#166534;font-weight:600;',
+			Freesiem_TFA_Service::STATUS_PENDING_SETUP => 'display:inline-block;padding:4px 10px;border-radius:999px;background:#fef3c7;color:#92400e;font-weight:600;',
+			default => 'display:inline-block;padding:4px 10px;border-radius:999px;background:#e5e7eb;color:#374151;font-weight:600;',
+		};
+	}
+
+	private function tfa_meta_badge_style(string $value): string
+	{
+		return sanitize_key($value) === 'core'
+			? 'display:inline-block;padding:4px 10px;border-radius:999px;background:#dbeafe;color:#1d4ed8;font-weight:600;'
+			: 'display:inline-block;padding:4px 10px;border-radius:999px;background:#ecfccb;color:#3f6212;font-weight:600;';
 	}
 
 	private function assert_manage_permissions(): void
