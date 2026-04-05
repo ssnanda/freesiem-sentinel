@@ -3,7 +3,7 @@ Contributors: freesiem
 Requires at least: 6.4
 Tested up to: 6.8
 Requires PHP: 8.1
-Stable tag: 0.3.17
+Stable tag: 0.3.18
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -70,6 +70,11 @@ Version bumps should always have matching git tags.
 GitHub Actions publishes the ZIP automatically when a `v*` tag is pushed.
 
 == Changelog ==
+
+= 0.3.18 =
+
+* Preserve the stealth login token on wp-login form submits so protected logins redirect to the requested admin page instead of home
+* Avoid PHP 8.1+ admin-menu deprecation notices by registering hidden Sentinel pages without passing null parent slugs
 
 = 0.3.17 =
 

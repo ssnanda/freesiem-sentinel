@@ -55,6 +55,7 @@ class Freesiem_Admin
 		add_action('wp_login_failed', [$this, 'handle_login_failed_event']);
 		add_action('wp_login', [$this, 'handle_login_success_event'], 10, 2);
 		add_action('init', [$this, 'maybe_handle_stealth_mode'], 1);
+		add_action('login_form', [$this, 'render_stealth_login_token_field']);
 		add_filter('authenticate', [$this, 'maybe_enforce_login_lockout'], 30, 3);
 		add_filter('login_url', [$this, 'filter_login_url'], 10, 3);
 		add_filter('login_redirect', [$this, 'filter_stealth_login_redirect'], 10, 3);
@@ -82,7 +83,7 @@ class Freesiem_Admin
 		add_submenu_page('freesiem-portal', __('Logs', 'freesiem-sentinel'), __('Logs', 'freesiem-sentinel'), 'manage_options', 'freesiem-logs', [$this, 'render_logs_page']);
 		add_submenu_page('freesiem-portal', __('Pending Tasks', 'freesiem-sentinel'), __('Pending Tasks', 'freesiem-sentinel'), 'read', 'freesiem-pending-tasks', [$this, 'render_pending_tasks_page']);
 		add_submenu_page('freesiem-portal', __('About', 'freesiem-sentinel'), __('About', 'freesiem-sentinel'), 'manage_options', 'freesiem-about', [$this, 'render_about_page']);
-		add_submenu_page(null, __('Scan', 'freesiem-sentinel'), __('Scan', 'freesiem-sentinel'), 'manage_options', 'freesiem-scan', [$this, 'render_scan_page']);
+		add_submenu_page('', __('Scan', 'freesiem-sentinel'), __('Scan', 'freesiem-sentinel'), 'manage_options', 'freesiem-scan', [$this, 'render_scan_page']);
 	}
 
 	public function handle_save_cloud_connect_contact(): void
@@ -2805,7 +2806,7 @@ class Freesiem_Admin
 		$script_name = isset($_SERVER['SCRIPT_NAME']) ? (string) $_SERVER['SCRIPT_NAME'] : '';
 		$is_login_request = str_ends_with($script_name, 'wp-login.php');
 		$is_admin_request = is_admin() && !wp_doing_ajax();
-		$token = isset($_GET['freesiem_login']) ? sanitize_title((string) wp_unslash($_GET['freesiem_login'])) : '';
+		$token = isset($_REQUEST['freesiem_login']) ? sanitize_title((string) wp_unslash($_REQUEST['freesiem_login'])) : '';
 		$expected = (string) ($settings['custom_login_slug'] ?? 'sentinel-login');
 		$login_action = isset($_REQUEST['action']) ? sanitize_key((string) wp_unslash($_REQUEST['action'])) : '';
 		$allowed_login_actions = ['logout', 'lostpassword', 'retrievepassword', 'rp', 'resetpass', 'postpass'];
@@ -2823,6 +2824,22 @@ class Freesiem_Admin
 			wp_safe_redirect(wp_login_url($target));
 			exit;
 		}
+	}
+
+	public function render_stealth_login_token_field(): void
+	{
+		$settings = freesiem_sentinel_get_stealth_mode_settings();
+		if (empty($settings['enabled'])) {
+			return;
+		}
+
+		$token = isset($_REQUEST['freesiem_login']) ? sanitize_title((string) wp_unslash($_REQUEST['freesiem_login'])) : '';
+		$expected = (string) ($settings['custom_login_slug'] ?? 'sentinel-login');
+		if ($token === '' || $token !== $expected) {
+			return;
+		}
+
+		echo '<input type="hidden" name="freesiem_login" value="' . esc_attr($token) . '" />';
 	}
 
 	public function filter_login_url(string $login_url, string $redirect, bool $force_reauth): string
