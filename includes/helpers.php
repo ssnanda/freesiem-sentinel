@@ -145,6 +145,18 @@ function freesiem_sentinel_get_stealth_mode_settings(): array
 	return freesiem_sentinel_sanitize_stealth_mode_settings(is_array($saved) ? $saved : []);
 }
 
+function freesiem_sentinel_is_stealth_mode_config_override_enabled(): bool
+{
+	return defined('FREESIEM_SENTINEL_DISABLE_STEALTH_MODE') && FREESIEM_SENTINEL_DISABLE_STEALTH_MODE;
+}
+
+function freesiem_sentinel_is_stealth_mode_effectively_active(?array $settings = null): bool
+{
+	$settings = is_array($settings) ? $settings : freesiem_sentinel_get_stealth_mode_settings();
+
+	return !empty($settings['enabled']) && !freesiem_sentinel_is_stealth_mode_config_override_enabled();
+}
+
 function freesiem_sentinel_update_stealth_mode_settings(array $updates): array
 {
 	$current = freesiem_sentinel_get_stealth_mode_settings();

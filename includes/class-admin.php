@@ -863,12 +863,21 @@ class Freesiem_Admin
 	{
 		$this->assert_manage_permissions();
 		$settings = freesiem_sentinel_get_stealth_mode_settings();
-		$current_login_url = freesiem_sentinel_get_stealth_login_url($settings);
+		$override_active = freesiem_sentinel_is_stealth_mode_config_override_enabled();
+		$stealth_active = freesiem_sentinel_is_stealth_mode_effectively_active($settings);
+		$current_login_url = $stealth_active ? freesiem_sentinel_get_stealth_login_url($settings) : wp_login_url();
+		$effective_status = !empty($settings['enabled'])
+			? ($override_active ? __('Enabled in settings but disabled by wp-config.php override', 'freesiem-sentinel') : __('Enabled and active', 'freesiem-sentinel'))
+			: __('Disabled', 'freesiem-sentinel');
 
 		echo '<div class="wrap">';
 		echo '<h1>' . esc_html__('Stealth Mode', 'freesiem-sentinel') . '</h1>';
 		echo '<p>' . esc_html__('Configure a safer login entry URL without introducing fragile rewrite-rule changes.', 'freesiem-sentinel') . '</p>';
 		echo '<div class="notice notice-warning inline"><p>' . esc_html__('Changing login access can lock you out. Keep another administrator session open before enabling Stealth Mode changes.', 'freesiem-sentinel') . '</p></div>';
+		if ($override_active) {
+			echo '<div class="notice notice-error inline"><p><strong>' . esc_html__('Stealth Mode override active.', 'freesiem-sentinel') . '</strong> ' . esc_html__('Stealth Mode is currently disabled by the wp-config.php recovery override, so normal WordPress login behavior is being used.', 'freesiem-sentinel') . '</p></div>';
+		}
+		echo '<p><strong>' . esc_html__('Effective status', 'freesiem-sentinel') . ':</strong> ' . esc_html($effective_status) . '</p>';
 		echo '<form method="post" action="' . esc_url(admin_url('admin-post.php')) . '">';
 		wp_nonce_field(FREESIEM_SENTINEL_NONCE_ACTION);
 		echo '<input type="hidden" name="action" value="freesiem_sentinel_save_stealth_mode" />';
@@ -881,7 +890,12 @@ class Freesiem_Admin
 		submit_button(__('Save Stealth Mode Settings', 'freesiem-sentinel'));
 		echo '</form>';
 		echo '<p><strong>' . esc_html__('Current login URL', 'freesiem-sentinel') . ':</strong> <code>' . esc_html($current_login_url) . '</code></p>';
+		echo '<p><strong>' . esc_html__('Recovery override', 'freesiem-sentinel') . ':</strong> ' . esc_html__('Add this to wp-config.php to disable Stealth Mode enforcement without changing the saved settings:', 'freesiem-sentinel') . '</p>';
+		echo '<pre style="padding:12px 14px;background:#f6f7f7;border:1px solid #dcdcde;border-radius:6px;overflow:auto;"><code>define(\'FREESIEM_SENTINEL_DISABLE_STEALTH_MODE\', true);</code></pre>';
 		echo '<p style="color:#646970;">' . esc_html__('Stealth Mode currently uses a query-based login URL for safety. This avoids rewrite-rule complexity while still allowing direct wp-login.php blocking and guest wp-admin redirects.', 'freesiem-sentinel') . '</p>';
+		if ($stealth_active) {
+			echo '<p style="color:#646970;">' . esc_html__('Stealth Mode enforcement is currently active for the settings shown above.', 'freesiem-sentinel') . '</p>';
+		}
 		echo '</div>';
 	}
 
@@ -2799,7 +2813,7 @@ class Freesiem_Admin
 	public function maybe_handle_stealth_mode(): void
 	{
 		$settings = freesiem_sentinel_get_stealth_mode_settings();
-		if (empty($settings['enabled'])) {
+		if (!freesiem_sentinel_is_stealth_mode_effectively_active($settings)) {
 			return;
 		}
 
@@ -2829,7 +2843,7 @@ class Freesiem_Admin
 	public function render_stealth_login_token_field(): void
 	{
 		$settings = freesiem_sentinel_get_stealth_mode_settings();
-		if (empty($settings['enabled'])) {
+		if (!freesiem_sentinel_is_stealth_mode_effectively_active($settings)) {
 			return;
 		}
 
@@ -2845,7 +2859,7 @@ class Freesiem_Admin
 	public function filter_login_url(string $login_url, string $redirect, bool $force_reauth): string
 	{
 		$settings = freesiem_sentinel_get_stealth_mode_settings();
-		if (empty($settings['enabled'])) {
+		if (!freesiem_sentinel_is_stealth_mode_effectively_active($settings)) {
 			return $login_url;
 		}
 
@@ -2863,7 +2877,7 @@ class Freesiem_Admin
 	public function filter_stealth_login_redirect(string $redirect_to, string $requested_redirect_to, WP_User|WP_Error $user): string
 	{
 		$settings = freesiem_sentinel_get_stealth_mode_settings();
-		if (empty($settings['enabled']) || is_wp_error($user)) {
+		if (!freesiem_sentinel_is_stealth_mode_effectively_active($settings) || is_wp_error($user)) {
 			return $redirect_to;
 		}
 

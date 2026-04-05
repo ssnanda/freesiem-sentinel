@@ -3,7 +3,7 @@ Contributors: freesiem
 Requires at least: 6.4
 Tested up to: 6.8
 Requires PHP: 8.1
-Stable tag: 0.3.18
+Stable tag: 0.3.19
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -70,6 +70,11 @@ Version bumps should always have matching git tags.
 GitHub Actions publishes the ZIP automatically when a `v*` tag is pushed.
 
 == Changelog ==
+
+= 0.3.19 =
+
+* Add a wp-config.php stealth-mode recovery override so normal WordPress login behavior can be restored without changing saved settings
+* Show the effective stealth status and recovery snippet on the Stealth Mode admin page
 
 = 0.3.18 =
 
