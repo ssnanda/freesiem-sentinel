@@ -57,6 +57,7 @@ class Freesiem_Admin
 		add_action('init', [$this, 'maybe_handle_stealth_mode'], 1);
 		add_filter('authenticate', [$this, 'maybe_enforce_login_lockout'], 30, 3);
 		add_filter('login_url', [$this, 'filter_login_url'], 10, 3);
+		add_filter('login_redirect', [$this, 'filter_stealth_login_redirect'], 10, 3);
 		add_action('freesiem_sentinel_tfa_success', [$this, 'handle_tfa_success_event'], 10, 2);
 		add_action('freesiem_sentinel_tfa_failure', [$this, 'handle_tfa_failure_event'], 10, 2);
 	}
@@ -2817,7 +2818,9 @@ class Freesiem_Admin
 
 		if ($is_admin_request && !is_user_logged_in() && !empty($settings['redirect_wp_admin_guests'])) {
 			freesiem_sentinel_log_event('stealth_redirect', __('Unauthenticated wp-admin access was redirected to the Sentinel login URL.', 'freesiem-sentinel'));
-			wp_safe_redirect(freesiem_sentinel_get_stealth_login_url($settings));
+			$request_uri = isset($_SERVER['REQUEST_URI']) ? wp_unslash((string) $_SERVER['REQUEST_URI']) : '/wp-admin/';
+			$target = wp_validate_redirect(home_url($request_uri), admin_url());
+			wp_safe_redirect(wp_login_url($target));
 			exit;
 		}
 	}
@@ -2838,6 +2841,27 @@ class Freesiem_Admin
 		}
 
 		return $url;
+	}
+
+	public function filter_stealth_login_redirect(string $redirect_to, string $requested_redirect_to, WP_User|WP_Error $user): string
+	{
+		$settings = freesiem_sentinel_get_stealth_mode_settings();
+		if (empty($settings['enabled']) || is_wp_error($user)) {
+			return $redirect_to;
+		}
+
+		$requested_redirect_to = wp_validate_redirect($requested_redirect_to, '');
+		if ($requested_redirect_to !== '') {
+			return $requested_redirect_to;
+		}
+
+		$stealth_token = isset($_REQUEST['freesiem_login']) ? sanitize_title((string) wp_unslash($_REQUEST['freesiem_login'])) : '';
+		$expected_token = (string) ($settings['custom_login_slug'] ?? 'sentinel-login');
+		if ($stealth_token === '' || $stealth_token !== $expected_token) {
+			return $redirect_to;
+		}
+
+		return admin_url();
 	}
 
 	private function assert_manage_permissions(): void
