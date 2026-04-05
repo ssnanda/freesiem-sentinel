@@ -19,7 +19,6 @@ class Freesiem_Admin
 		add_action('admin_menu', [$this, 'remove_synchy_top_level_menu'], 999);
 		add_action('admin_init', [$this->plugin, 'maybe_process_pending_task_maintenance']);
 		add_action('admin_init', [$this, 'maybe_redirect_legacy_synchy_pages']);
-		add_action('admin_init', [$this, 'maybe_redirect_removed_about_pages']);
 		add_action('admin_enqueue_scripts', [$this, 'maybe_enqueue_synchy_assets']);
 		add_action('admin_notices', 'freesiem_sentinel_render_notices');
 		add_action('admin_post_freesiem_sentinel_save_cloud_connect_contact', [$this, 'handle_save_cloud_connect_contact']);
@@ -90,6 +89,7 @@ class Freesiem_Admin
 		add_submenu_page('freesiem-portal', __('Synchy', 'freesiem-sentinel'), __('Synchy', 'freesiem-sentinel'), 'manage_options', FREESIEM_SENTINEL_SYNCHY_PAGE, [$this, 'render_synchy_page']);
 		add_submenu_page('freesiem-portal', __('Logs', 'freesiem-sentinel'), __('Logs', 'freesiem-sentinel'), 'manage_options', 'freesiem-logs', [$this, 'render_logs_page']);
 		add_submenu_page('freesiem-portal', __('Pending Tasks', 'freesiem-sentinel'), __('Pending Tasks', 'freesiem-sentinel'), 'read', 'freesiem-pending-tasks', [$this, 'render_pending_tasks_page']);
+		add_submenu_page('freesiem-portal', __('About', 'freesiem-sentinel'), __('About', 'freesiem-sentinel'), 'manage_options', 'freesiem-about', [$this, 'render_about_page']);
 		add_submenu_page('', __('Scan', 'freesiem-sentinel'), __('Scan', 'freesiem-sentinel'), 'manage_options', 'freesiem-scan', [$this, 'render_scan_page']);
 	}
 
@@ -136,20 +136,6 @@ class Freesiem_Admin
 			)
 		);
 		exit;
-	}
-
-	public function maybe_redirect_removed_about_pages(): void
-	{
-		if (!is_admin() || !current_user_can('manage_options')) {
-			return;
-		}
-
-		$page = isset($_GET['page']) ? sanitize_key((string) wp_unslash($_GET['page'])) : '';
-
-		if ($page === 'freesiem-about') {
-			wp_safe_redirect(freesiem_sentinel_admin_page_url('freesiem-portal'));
-			exit;
-		}
 	}
 
 	public function maybe_enqueue_synchy_assets(string $hook_suffix): void
