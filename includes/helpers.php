@@ -378,6 +378,87 @@ function freesiem_sentinel_update_ssl_dry_run(array $dry_run): array
 	return $sanitized;
 }
 
+function freesiem_sentinel_get_default_ssl_state(): array
+{
+	return [
+		'provider' => '',
+		'domain' => '',
+		'challenge_method' => '',
+		'cert_path' => '',
+		'fullchain_path' => '',
+		'privkey_path' => '',
+		'issued_at' => '',
+		'expires_at' => '',
+		'last_issue_status' => '',
+		'last_issue_result' => '',
+		'last_issue_at' => '',
+		'last_renew_status' => '',
+		'last_renew_result' => '',
+		'last_renew_at' => '',
+		'last_verification_status' => '',
+		'last_verification_result' => '',
+		'certbot_available' => 0,
+		'certbot_path' => '',
+		'certbot_version' => '',
+		'current_ssl_mode' => 'manual-live-actions',
+	];
+}
+
+function freesiem_sentinel_get_ssl_state(): array
+{
+	$saved = get_option(FREESIEM_SENTINEL_SSL_STATE_OPTION, []);
+
+	if (!is_array($saved)) {
+		$saved = [];
+	}
+
+	return wp_parse_args(freesiem_sentinel_sanitize_ssl_state($saved), freesiem_sentinel_get_default_ssl_state());
+}
+
+function freesiem_sentinel_update_ssl_state(array $updates): array
+{
+	$current = freesiem_sentinel_get_ssl_state();
+	$merged = array_replace_recursive($current, $updates);
+	$sanitized = freesiem_sentinel_sanitize_ssl_state($merged);
+
+	if (get_option(FREESIEM_SENTINEL_SSL_STATE_OPTION, null) === null) {
+		add_option(FREESIEM_SENTINEL_SSL_STATE_OPTION, $sanitized, '', false);
+	} else {
+		update_option(FREESIEM_SENTINEL_SSL_STATE_OPTION, $sanitized, false);
+	}
+
+	return $sanitized;
+}
+
+function freesiem_sentinel_sanitize_ssl_state(array $state): array
+{
+	$defaults = freesiem_sentinel_get_default_ssl_state();
+	$state = wp_parse_args($state, $defaults);
+
+	$state['provider'] = sanitize_key((string) ($state['provider'] ?? ''));
+	$state['domain'] = strtolower(trim(sanitize_text_field((string) ($state['domain'] ?? ''))));
+	$state['challenge_method'] = sanitize_key((string) ($state['challenge_method'] ?? ''));
+	$state['cert_path'] = trim((string) ($state['cert_path'] ?? ''));
+	$state['fullchain_path'] = trim((string) ($state['fullchain_path'] ?? ''));
+	$state['privkey_path'] = trim((string) ($state['privkey_path'] ?? ''));
+	$state['issued_at'] = freesiem_sentinel_sanitize_datetime((string) ($state['issued_at'] ?? ''));
+	$state['expires_at'] = freesiem_sentinel_sanitize_datetime((string) ($state['expires_at'] ?? ''));
+	$state['last_issue_status'] = sanitize_key((string) ($state['last_issue_status'] ?? ''));
+	$state['last_issue_result'] = sanitize_text_field((string) ($state['last_issue_result'] ?? ''));
+	$state['last_issue_at'] = freesiem_sentinel_sanitize_datetime((string) ($state['last_issue_at'] ?? ''));
+	$state['last_renew_status'] = sanitize_key((string) ($state['last_renew_status'] ?? ''));
+	$state['last_renew_result'] = sanitize_text_field((string) ($state['last_renew_result'] ?? ''));
+	$state['last_renew_at'] = freesiem_sentinel_sanitize_datetime((string) ($state['last_renew_at'] ?? ''));
+	$state['last_verification_status'] = sanitize_key((string) ($state['last_verification_status'] ?? ''));
+	$state['last_verification_result'] = sanitize_text_field((string) ($state['last_verification_result'] ?? ''));
+	$state['certbot_available'] = empty($state['certbot_available']) ? 0 : 1;
+	$state['certbot_path'] = trim((string) ($state['certbot_path'] ?? ''));
+	$state['certbot_version'] = sanitize_text_field((string) ($state['certbot_version'] ?? ''));
+	$state['current_ssl_mode'] = sanitize_key((string) ($state['current_ssl_mode'] ?? 'manual-live-actions'));
+
+	return $state;
+}
+
 function freesiem_sentinel_get_ssl_preflight(): array
 {
 	$saved = get_option(FREESIEM_SENTINEL_SSL_PREFLIGHT_OPTION, []);
@@ -630,6 +711,14 @@ function freesiem_sentinel_run_ssl_preflight(?array $ssl_settings = null): array
 			'WARN'
 		),
 		freesiem_sentinel_make_ssl_preflight_item(
+			'certbot_available',
+			__('Certbot binary available', 'freesiem-sentinel'),
+			!empty($environment['certbot']['available']),
+			sprintf(__('Certbot was detected at `%1$s` (%2$s).', 'freesiem-sentinel'), (string) ($environment['certbot']['path'] ?? ''), (string) ($environment['certbot']['version'] ?? __('version unavailable', 'freesiem-sentinel'))),
+			__('Certbot was not detected on this server.', 'freesiem-sentinel'),
+			'FAIL'
+		),
+		freesiem_sentinel_make_ssl_preflight_item(
 			'writable_paths',
 			__('ABSPATH and wp-content writability', 'freesiem-sentinel'),
 			$environment['abspath_writable'] && $environment['wp_content_writable'],
@@ -807,6 +896,8 @@ function freesiem_sentinel_make_ssl_preflight_item(
 function freesiem_sentinel_get_ssl_environment_snapshot(?array $ssl_settings = null): array
 {
 	$ssl_settings = is_array($ssl_settings) ? $ssl_settings : freesiem_sentinel_get_ssl_settings();
+	$ssl_state = freesiem_sentinel_get_ssl_state();
+	$certbot = freesiem_sentinel_detect_certbot();
 	$site_url = site_url('/');
 	$home_url = home_url('/');
 	$site_scheme = strtolower((string) wp_parse_url($site_url, PHP_URL_SCHEME));
@@ -845,6 +936,8 @@ function freesiem_sentinel_get_ssl_environment_snapshot(?array $ssl_settings = n
 		'is_https_configured' => $site_scheme === 'https' || $home_scheme === 'https',
 		'is_admin_request_https' => is_ssl(),
 		'host_alignment' => $configured_host !== '' && ($configured_host === $home_host || $configured_host === $site_host),
+		'certbot' => $certbot,
+		'ssl_state' => $ssl_state,
 	];
 }
 
@@ -864,6 +957,7 @@ function freesiem_sentinel_calculate_ssl_readiness(?array $ssl_settings = null, 
 			($environment['is_local_host'] || $environment['is_ip']) && empty($ssl_settings['allow_local_override'])
 			|| (!$environment['dns_result']['ok'] && !$environment['is_local_host'] && $environment['configured_host'] !== '')
 			|| !$environment['option_probe']
+			|| empty($environment['certbot']['available'])
 		);
 
 	if (!$has_email && !$has_host) {
@@ -891,7 +985,7 @@ function freesiem_sentinel_calculate_ssl_readiness(?array $ssl_settings = null, 
 			'partially_configured' => __('The SSL setup has some required values, but it still needs more challenge-specific configuration.', 'freesiem-sentinel'),
 			'ready_for_dry_run' => __('The SSL setup is complete enough for safe simulation, but environment warnings should still be reviewed.', 'freesiem-sentinel'),
 			'blocked' => __('A blocking condition exists, such as a local-only host, unresolved DNS, or missing storage capability.', 'freesiem-sentinel'),
-			default => __('The configuration is fully modeled for a future execution phase, but issuance remains disabled in this version.', 'freesiem-sentinel'),
+			default => __('The configuration is fully modeled and has certbot available for explicit admin-triggered actions.', 'freesiem-sentinel'),
 		},
 	];
 }
@@ -1022,6 +1116,446 @@ function freesiem_sentinel_get_ssl_method_validation_items(?array $ssl_settings 
 	}
 
 	return $items;
+}
+
+function freesiem_sentinel_detect_certbot(): array
+{
+	static $cached = null;
+
+	if (is_array($cached)) {
+		return $cached;
+	}
+
+	$path_result = freesiem_sentinel_run_ssl_shell_command('command -v certbot', 'detect_certbot_path', 15, 'command -v certbot');
+	$path = trim((string) ($path_result['stdout_summary'] ?? ''));
+	$path = $path !== '' && !str_contains($path, "\n") ? $path : strtok($path, "\n");
+	$path = is_string($path) ? trim($path) : '';
+	$available = $path !== '';
+	$version = '';
+
+	if ($available) {
+		$version_result = freesiem_sentinel_run_ssl_shell_command(escapeshellarg($path) . ' --version', 'detect_certbot_version', 20, 'certbot --version');
+		$version = trim((string) ($version_result['stdout_summary'] ?? ''));
+	}
+
+	$cached = [
+		'available' => $available,
+		'path' => $path,
+		'version' => $version,
+	];
+
+	return $cached;
+}
+
+function freesiem_sentinel_run_ssl_shell_command(string $command, string $action, int $timeout = 120, ?string $redacted_command = null): array
+{
+	$result = [
+		'success' => false,
+		'exit_code' => null,
+		'stdout_summary' => '',
+		'stderr_summary' => '',
+		'command_preview' => $redacted_command ?? $command,
+		'executed_at' => freesiem_sentinel_get_iso8601_time(),
+		'action_type' => sanitize_key($action),
+		'runner' => 'none',
+		'timed_out' => false,
+	];
+
+	if (function_exists('proc_open')) {
+		$descriptor_spec = [
+			0 => ['pipe', 'r'],
+			1 => ['pipe', 'w'],
+			2 => ['pipe', 'w'],
+		];
+		$process = @proc_open(['/bin/sh', '-lc', $command], $descriptor_spec, $pipes);
+
+		if (is_resource($process)) {
+			fclose($pipes[0]);
+			stream_set_blocking($pipes[1], false);
+			stream_set_blocking($pipes[2], false);
+			$stdout = '';
+			$stderr = '';
+			$start = time();
+
+			do {
+				$stdout .= (string) stream_get_contents($pipes[1]);
+				$stderr .= (string) stream_get_contents($pipes[2]);
+				$status = proc_get_status($process);
+
+				if (!$status['running']) {
+					break;
+				}
+
+				if ((time() - $start) >= $timeout) {
+					$result['timed_out'] = true;
+					@proc_terminate($process, 15);
+					usleep(200000);
+					$status = proc_get_status($process);
+					if (!empty($status['running'])) {
+						@proc_terminate($process, 9);
+					}
+					break;
+				}
+
+				usleep(100000);
+			} while (true);
+
+			$stdout .= (string) stream_get_contents($pipes[1]);
+			$stderr .= (string) stream_get_contents($pipes[2]);
+			fclose($pipes[1]);
+			fclose($pipes[2]);
+			$exit_code = proc_close($process);
+
+			$result['runner'] = 'proc_open';
+			$result['exit_code'] = $exit_code;
+			$result['stdout_summary'] = freesiem_sentinel_summarize_ssl_command_output($stdout);
+			$result['stderr_summary'] = freesiem_sentinel_summarize_ssl_command_output($stderr);
+			$result['success'] = !$result['timed_out'] && (int) $exit_code === 0;
+
+			return $result;
+		}
+	}
+
+	if (function_exists('exec')) {
+		$output = [];
+		$exit_code = 1;
+		@exec($command . ' 2>&1', $output, $exit_code);
+		$result['runner'] = 'exec';
+		$result['exit_code'] = $exit_code;
+		$result['stdout_summary'] = freesiem_sentinel_summarize_ssl_command_output(implode("\n", $output));
+		$result['success'] = (int) $exit_code === 0;
+
+		return $result;
+	}
+
+	if (function_exists('shell_exec')) {
+		$output = @shell_exec($command . ' 2>&1');
+		$result['runner'] = 'shell_exec';
+		$result['exit_code'] = is_string($output) ? 0 : 1;
+		$result['stdout_summary'] = freesiem_sentinel_summarize_ssl_command_output((string) $output);
+		$result['success'] = is_string($output);
+
+		return $result;
+	}
+
+	if (function_exists('system')) {
+		ob_start();
+		$exit_code = 1;
+		@system($command . ' 2>&1', $exit_code);
+		$output = (string) ob_get_clean();
+		$result['runner'] = 'system';
+		$result['exit_code'] = $exit_code;
+		$result['stdout_summary'] = freesiem_sentinel_summarize_ssl_command_output($output);
+		$result['success'] = (int) $exit_code === 0;
+
+		return $result;
+	}
+
+	if (function_exists('passthru')) {
+		ob_start();
+		$exit_code = 1;
+		@passthru($command . ' 2>&1', $exit_code);
+		$output = (string) ob_get_clean();
+		$result['runner'] = 'passthru';
+		$result['exit_code'] = $exit_code;
+		$result['stdout_summary'] = freesiem_sentinel_summarize_ssl_command_output($output);
+		$result['success'] = (int) $exit_code === 0;
+	}
+
+	return $result;
+}
+
+function freesiem_sentinel_summarize_ssl_command_output(string $output, int $max_length = 4000): string
+{
+	$output = trim(preg_replace('/\s+/', ' ', $output) ?? '');
+
+	if ($output === '') {
+		return '';
+	}
+
+	return strlen($output) > $max_length ? substr($output, 0, $max_length - 3) . '...' : $output;
+}
+
+function freesiem_sentinel_can_run_live_ssl_action(string $action, ?array $ssl_settings = null, ?array $environment = null, ?array $readiness = null): array
+{
+	$ssl_settings = is_array($ssl_settings) ? $ssl_settings : freesiem_sentinel_get_ssl_settings();
+	$environment = is_array($environment) ? $environment : freesiem_sentinel_get_ssl_environment_snapshot($ssl_settings);
+	$readiness = is_array($readiness) ? $readiness : freesiem_sentinel_calculate_ssl_readiness($ssl_settings, $environment);
+	$method = (string) ($ssl_settings['challenge_method'] ?? 'webroot-http-01');
+	$state = freesiem_sentinel_get_ssl_state();
+
+	if (empty($environment['certbot']['available'])) {
+		return ['allowed' => false, 'reason' => __('Certbot is not available on this server.', 'freesiem-sentinel')];
+	}
+
+	if (in_array($method, ['manual-dns-01'], true)) {
+		return ['allowed' => false, 'reason' => __('Manual DNS-01 is not fully automated for live execution in this version.', 'freesiem-sentinel')];
+	}
+
+	if (!in_array((string) ($readiness['state'] ?? 'not_configured'), ['ready_for_dry_run', 'future_ready'], true)) {
+		return ['allowed' => false, 'reason' => __('SSL readiness requirements are not met yet.', 'freesiem-sentinel')];
+	}
+
+	if ($action === 'renew' && empty($state['domain']) && ($environment['configured_host'] === '')) {
+		return ['allowed' => false, 'reason' => __('No certificate domain is available for renewal.', 'freesiem-sentinel')];
+	}
+
+	return ['allowed' => true, 'reason' => ''];
+}
+
+function freesiem_sentinel_execute_ssl_issue(?array $ssl_settings = null): array
+{
+	return freesiem_sentinel_execute_ssl_certbot_action('issue', $ssl_settings);
+}
+
+function freesiem_sentinel_execute_ssl_renew(?array $ssl_settings = null): array
+{
+	return freesiem_sentinel_execute_ssl_certbot_action('renew', $ssl_settings);
+}
+
+function freesiem_sentinel_execute_ssl_certbot_action(string $action, ?array $ssl_settings = null): array
+{
+	$ssl_settings = is_array($ssl_settings) ? $ssl_settings : freesiem_sentinel_get_ssl_settings();
+	$environment = freesiem_sentinel_get_ssl_environment_snapshot($ssl_settings);
+	$preflight = freesiem_sentinel_run_ssl_preflight($ssl_settings);
+	$readiness = freesiem_sentinel_calculate_ssl_readiness($ssl_settings, $environment, $preflight);
+	$gate = freesiem_sentinel_can_run_live_ssl_action($action, $ssl_settings, $environment, $readiness);
+	$executed_at = freesiem_sentinel_get_iso8601_time();
+	$state = freesiem_sentinel_get_ssl_state();
+
+	if (empty($gate['allowed'])) {
+		$status_key = $action === 'issue' ? 'last_issue_status' : 'last_renew_status';
+		$result_key = $action === 'issue' ? 'last_issue_result' : 'last_renew_result';
+		$at_key = $action === 'issue' ? 'last_issue_at' : 'last_renew_at';
+		freesiem_sentinel_update_ssl_state([
+			$status_key => 'blocked',
+			$result_key => $gate['reason'],
+			$at_key => $executed_at,
+			'certbot_available' => !empty($environment['certbot']['available']) ? 1 : 0,
+			'certbot_path' => (string) ($environment['certbot']['path'] ?? ''),
+			'certbot_version' => (string) ($environment['certbot']['version'] ?? ''),
+		]);
+
+		return [
+			'success' => false,
+			'status' => 'blocked',
+			'summary' => $gate['reason'],
+			'command_preview' => '',
+			'execution' => null,
+			'verification' => null,
+			'executed_at' => $executed_at,
+			'action_type' => $action,
+		];
+	}
+
+	if ($action === 'issue' && (string) ($ssl_settings['challenge_method'] ?? '') === 'standalone-http-01') {
+		$port_check = freesiem_sentinel_detect_local_port_listener(80);
+		if ($port_check['listening']) {
+			$message = __('Port 80 appears to already be in use locally, so standalone HTTP-01 was not attempted.', 'freesiem-sentinel');
+			freesiem_sentinel_update_ssl_state([
+				'last_issue_status' => 'failed',
+				'last_issue_result' => $message,
+				'last_issue_at' => $executed_at,
+			]);
+
+			return [
+				'success' => false,
+				'status' => 'failed',
+				'summary' => $message,
+				'command_preview' => '',
+				'execution' => null,
+				'verification' => null,
+				'executed_at' => $executed_at,
+				'action_type' => $action,
+			];
+		}
+	}
+
+	$command_data = freesiem_sentinel_build_live_ssl_command($action, $ssl_settings, $environment, $state);
+	if (!$command_data['executable']) {
+		return [
+			'success' => false,
+			'status' => 'warn',
+			'summary' => $command_data['summary'],
+			'command_preview' => (string) ($command_data['preview'] ?? ''),
+			'execution' => null,
+			'verification' => null,
+			'executed_at' => $executed_at,
+			'action_type' => $action,
+		];
+	}
+
+	$execution = freesiem_sentinel_run_ssl_shell_command((string) $command_data['command'], 'ssl_' . $action, 600, (string) $command_data['preview']);
+	$verification = $execution['success']
+		? freesiem_sentinel_verify_ssl_certificate((string) ($environment['configured_host'] ?: $state['domain']))
+		: ['success' => false, 'status' => 'failed', 'summary' => __('Certificate verification was skipped because certbot did not succeed.', 'freesiem-sentinel')];
+	$status = $execution['success']
+		? ($verification['success'] ? 'success' : 'warning')
+		: 'failed';
+	$summary = $execution['success']
+		? ($verification['summary'] ?? __('Certbot finished successfully.', 'freesiem-sentinel'))
+		: (!empty($execution['stderr_summary']) ? (string) $execution['stderr_summary'] : (string) ($execution['stdout_summary'] ?? __('Certbot failed.', 'freesiem-sentinel')));
+	$state_updates = [
+		'provider' => 'certbot',
+		'domain' => (string) ($environment['configured_host'] ?: $state['domain']),
+		'challenge_method' => (string) ($ssl_settings['challenge_method'] ?? ''),
+		'certbot_available' => !empty($environment['certbot']['available']) ? 1 : 0,
+		'certbot_path' => (string) ($environment['certbot']['path'] ?? ''),
+		'certbot_version' => (string) ($environment['certbot']['version'] ?? ''),
+		'current_ssl_mode' => 'manual-live-actions',
+		'last_verification_status' => sanitize_key((string) ($verification['status'] ?? '')),
+		'last_verification_result' => sanitize_text_field((string) ($verification['summary'] ?? '')),
+	];
+
+	if (!empty($verification['metadata']) && is_array($verification['metadata'])) {
+		$state_updates = array_merge($state_updates, $verification['metadata']);
+	}
+
+	if ($action === 'issue') {
+		$state_updates['last_issue_status'] = $status;
+		$state_updates['last_issue_result'] = $summary;
+		$state_updates['last_issue_at'] = $executed_at;
+		if ($execution['success'] && !empty($verification['metadata']['issued_at'])) {
+			$state_updates['issued_at'] = $verification['metadata']['issued_at'];
+		}
+	} else {
+		$state_updates['last_renew_status'] = $status;
+		$state_updates['last_renew_result'] = $summary;
+		$state_updates['last_renew_at'] = $executed_at;
+	}
+
+	freesiem_sentinel_update_ssl_state($state_updates);
+
+	return [
+		'success' => $execution['success'] && !in_array(($verification['status'] ?? ''), ['failed'], true),
+		'status' => $status,
+		'summary' => $summary,
+		'command_preview' => (string) ($command_data['preview'] ?? ''),
+		'execution' => $execution,
+		'verification' => $verification,
+		'executed_at' => $executed_at,
+		'action_type' => $action,
+	];
+}
+
+function freesiem_sentinel_build_live_ssl_command(string $action, array $ssl_settings, array $environment, array $state = []): array
+{
+	$method = (string) ($ssl_settings['challenge_method'] ?? 'webroot-http-01');
+	$host = (string) ($environment['configured_host'] ?? '');
+	$email = (string) ($ssl_settings['acme_contact_email'] ?? '');
+	$certbot_path = (string) ($environment['certbot']['path'] ?? 'certbot');
+	$staging_flag = !empty($ssl_settings['use_staging']) ? ' --staging' : '';
+	$renewal_flag = $action === 'renew' ? ' --force-renewal --cert-name ' . escapeshellarg($host) : '';
+	$base = escapeshellarg($certbot_path) . ' certonly --agree-tos --non-interactive --email ' . escapeshellarg($email) . ' -d ' . escapeshellarg($host) . $renewal_flag . $staging_flag;
+
+	return match ($method) {
+		'standalone-http-01' => [
+			'executable' => true,
+			'command' => $base . ' --standalone --preferred-challenges http',
+			'preview' => 'certbot certonly --agree-tos --non-interactive --email ' . escapeshellarg($email) . ' -d ' . escapeshellarg($host) . $renewal_flag . $staging_flag . ' --standalone --preferred-challenges http',
+			'summary' => '',
+		],
+		'manual-dns-01' => [
+			'executable' => false,
+			'command' => '',
+			'preview' => 'certbot certonly --agree-tos --non-interactive --email ' . escapeshellarg($email) . ' -d ' . escapeshellarg($host) . $renewal_flag . $staging_flag . ' --manual --preferred-challenges dns --manual-public-ip-logging-ok',
+			'summary' => __('Manual DNS-01 remains instruction-only in this version and was not executed.', 'freesiem-sentinel'),
+		],
+		default => [
+			'executable' => true,
+			'command' => $base . ' --webroot -w ' . escapeshellarg((string) ($ssl_settings['webroot_path'] ?? '')) . ' --preferred-challenges http',
+			'preview' => 'certbot certonly --agree-tos --non-interactive --email ' . escapeshellarg($email) . ' -d ' . escapeshellarg($host) . $renewal_flag . $staging_flag . ' --webroot -w ' . escapeshellarg((string) ($ssl_settings['webroot_path'] ?? '')) . ' --preferred-challenges http',
+			'summary' => '',
+		],
+	};
+}
+
+function freesiem_sentinel_detect_local_port_listener(int $port): array
+{
+	$error_no = 0;
+	$error_message = '';
+	$socket = @fsockopen('127.0.0.1', $port, $error_no, $error_message, 1.0);
+
+	if (is_resource($socket)) {
+		fclose($socket);
+
+		return [
+			'listening' => true,
+			'message' => sprintf(__('A local service appears to be listening on port %d.', 'freesiem-sentinel'), $port),
+		];
+	}
+
+	return [
+		'listening' => false,
+		'message' => $error_message !== '' ? sanitize_text_field($error_message) : __('No local listener was detected.', 'freesiem-sentinel'),
+	];
+}
+
+function freesiem_sentinel_verify_ssl_certificate(string $host): array
+{
+	$host = strtolower(trim($host));
+	$base_path = '/etc/letsencrypt/live/' . $host;
+	$metadata = [
+		'domain' => $host,
+		'cert_path' => $base_path . '/cert.pem',
+		'fullchain_path' => $base_path . '/fullchain.pem',
+		'privkey_path' => $base_path . '/privkey.pem',
+	];
+	$has_files = file_exists($metadata['cert_path']) && file_exists($metadata['fullchain_path']) && file_exists($metadata['privkey_path']);
+
+	if (!$has_files) {
+		return [
+			'success' => false,
+			'status' => 'failed',
+			'summary' => __('Certbot reported success, but expected certificate files were not found.', 'freesiem-sentinel'),
+			'metadata' => $metadata,
+		];
+	}
+
+	$cert_contents = @file_get_contents($metadata['cert_path']);
+	$cert_data = (is_string($cert_contents) && function_exists('openssl_x509_parse')) ? @openssl_x509_parse($cert_contents) : false;
+	$expires_at = '';
+	$issued_at = '';
+	$host_match = false;
+
+	if (is_array($cert_data)) {
+		$issued_at = !empty($cert_data['validFrom_time_t']) ? gmdate('c', (int) $cert_data['validFrom_time_t']) : '';
+		$expires_at = !empty($cert_data['validTo_time_t']) ? gmdate('c', (int) $cert_data['validTo_time_t']) : '';
+		$names = [];
+		if (!empty($cert_data['subject']['CN'])) {
+			$names[] = strtolower((string) $cert_data['subject']['CN']);
+		}
+		if (!empty($cert_data['extensions']['subjectAltName'])) {
+			foreach (explode(',', (string) $cert_data['extensions']['subjectAltName']) as $san_entry) {
+				$san_entry = trim($san_entry);
+				if (str_starts_with($san_entry, 'DNS:')) {
+					$names[] = strtolower(substr($san_entry, 4));
+				}
+			}
+		}
+		$host_match = in_array($host, array_unique($names), true);
+	}
+
+	$metadata['issued_at'] = $issued_at;
+	$metadata['expires_at'] = $expires_at;
+
+	if (!$host_match && $cert_data !== false) {
+		return [
+			'success' => false,
+			'status' => 'warning',
+			'summary' => __('Certificate files exist, but the parsed certificate host names did not clearly match the expected domain.', 'freesiem-sentinel'),
+			'metadata' => $metadata,
+		];
+	}
+
+	return [
+		'success' => true,
+		'status' => 'success',
+		'summary' => $expires_at !== ''
+			? sprintf(__('Certificate files verified successfully. Expires at %s.', 'freesiem-sentinel'), $expires_at)
+			: __('Certificate files verified successfully.', 'freesiem-sentinel'),
+		'metadata' => $metadata,
+	];
 }
 
 function freesiem_sentinel_count_ssl_status_items(array $items): array
