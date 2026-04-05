@@ -57,6 +57,7 @@ class Freesiem_Admin
 		add_action('init', [$this, 'maybe_handle_stealth_mode'], 1);
 		add_action('login_form', [$this, 'render_stealth_login_token_field']);
 		add_filter('authenticate', [$this, 'maybe_enforce_login_lockout'], 30, 3);
+		add_filter('login_errors', [$this, 'filter_stealth_login_error_message']);
 		add_filter('login_url', [$this, 'filter_login_url'], 10, 3);
 		add_filter('login_redirect', [$this, 'filter_stealth_login_redirect'], 10, 3);
 		add_action('freesiem_sentinel_tfa_success', [$this, 'handle_tfa_success_event'], 10, 2);
@@ -710,7 +711,8 @@ class Freesiem_Admin
 			'redirect_wp_admin_guests' => empty($_POST['redirect_wp_admin_guests']) ? 0 : 1,
 		]);
 
-		freesiem_sentinel_set_notice('success', sprintf(__('Stealth Mode settings saved. Current login URL: %s', 'freesiem-sentinel'), freesiem_sentinel_get_stealth_login_url($settings)));
+		$current_login_url = freesiem_sentinel_is_stealth_mode_effectively_active($settings) ? freesiem_sentinel_get_stealth_login_url($settings) : wp_login_url();
+		freesiem_sentinel_set_notice('success', sprintf(__('Stealth Mode settings saved. Current login URL: %s', 'freesiem-sentinel'), $current_login_url));
 		$this->redirect_to_page('freesiem-stealth-mode');
 	}
 
@@ -895,6 +897,24 @@ class Freesiem_Admin
 		echo '<p style="color:#646970;">' . esc_html__('Stealth Mode currently uses a query-based login URL for safety. This avoids rewrite-rule complexity while still allowing direct wp-login.php blocking and guest wp-admin redirects.', 'freesiem-sentinel') . '</p>';
 		if ($stealth_active) {
 			echo '<p style="color:#646970;">' . esc_html__('Stealth Mode enforcement is currently active for the settings shown above.', 'freesiem-sentinel') . '</p>';
+		}
+		$recent_events = freesiem_sentinel_get_recent_log_rows_by_prefix('stealth_', 5);
+		echo '<h2>' . esc_html__('Recent Stealth Events', 'freesiem-sentinel') . '</h2>';
+		if ($recent_events === []) {
+			echo '<p>' . esc_html__('No recent Stealth Mode events were recorded.', 'freesiem-sentinel') . '</p>';
+		} else {
+			echo '<table class="widefat striped" style="max-width:980px;">';
+			echo '<thead><tr><th>' . esc_html__('Time', 'freesiem-sentinel') . '</th><th>' . esc_html__('Event', 'freesiem-sentinel') . '</th><th>' . esc_html__('Username', 'freesiem-sentinel') . '</th><th>' . esc_html__('IP', 'freesiem-sentinel') . '</th><th>' . esc_html__('Message', 'freesiem-sentinel') . '</th></tr></thead><tbody>';
+			foreach ($recent_events as $event) {
+				echo '<tr>';
+				echo '<td>' . esc_html(freesiem_sentinel_format_datetime((string) ($event['created_at'] ?? ''))) . '</td>';
+				echo '<td>' . esc_html((string) ($event['event_type'] ?? '')) . '</td>';
+				echo '<td>' . esc_html((string) ($event['username'] ?? '')) . '</td>';
+				echo '<td>' . esc_html((string) ($event['ip_address'] ?? '')) . '</td>';
+				echo '<td>' . esc_html((string) ($event['message'] ?? '')) . '</td>';
+				echo '</tr>';
+			}
+			echo '</tbody></table>';
 		}
 		echo '</div>';
 	}
@@ -2820,19 +2840,43 @@ class Freesiem_Admin
 		$script_name = isset($_SERVER['SCRIPT_NAME']) ? (string) $_SERVER['SCRIPT_NAME'] : '';
 		$is_login_request = str_ends_with($script_name, 'wp-login.php');
 		$is_admin_request = is_admin() && !wp_doing_ajax();
-		$token = isset($_REQUEST['freesiem_login']) ? sanitize_title((string) wp_unslash($_REQUEST['freesiem_login'])) : '';
-		$expected = (string) ($settings['custom_login_slug'] ?? 'sentinel-login');
+		$token = freesiem_sentinel_get_sanitized_stealth_request_token();
+		$token_raw = freesiem_sentinel_get_raw_stealth_request_token();
+		$expected = freesiem_sentinel_get_stealth_expected_token($settings);
+		$has_valid_token = freesiem_sentinel_request_has_valid_stealth_token($settings);
 		$login_action = isset($_REQUEST['action']) ? sanitize_key((string) wp_unslash($_REQUEST['action'])) : '';
-		$allowed_login_actions = ['logout', 'lostpassword', 'retrievepassword', 'rp', 'resetpass', 'postpass'];
+		$allowed_login_actions = $this->get_allowed_stealth_login_actions();
+		$request_method = strtoupper((string) ($_SERVER['REQUEST_METHOD'] ?? 'GET'));
 
-		if ($is_login_request && !is_user_logged_in() && !empty($settings['block_direct_wp_login']) && $token !== $expected && !in_array($login_action, $allowed_login_actions, true)) {
-			freesiem_sentinel_log_event('stealth_block', __('Direct wp-login.php access was blocked by Stealth Mode.', 'freesiem-sentinel'));
+		if ($is_login_request && $token_raw !== '' && !$has_valid_token) {
+			freesiem_sentinel_log_event('stealth_invalid_token', __('An invalid Stealth Mode token was supplied to wp-login.php.', 'freesiem-sentinel'), '', '', [
+				'action' => $login_action,
+				'request_method' => $request_method,
+				'token_length' => strlen($token_raw),
+			]);
+		}
+
+		if ($is_login_request && $has_valid_token && $request_method !== 'POST') {
+			freesiem_sentinel_log_event('stealth_login_access', __('Stealth login URL accessed.', 'freesiem-sentinel'), '', '', [
+				'action' => $login_action === '' ? 'login' : $login_action,
+			]);
+		}
+
+		if ($is_login_request && !is_user_logged_in() && !empty($settings['block_direct_wp_login']) && !$has_valid_token && !in_array($login_action, $allowed_login_actions, true)) {
+			freesiem_sentinel_log_event('stealth_block', __('Direct wp-login.php access was blocked by Stealth Mode.', 'freesiem-sentinel'), '', '', [
+				'action' => $login_action === '' ? 'login' : $login_action,
+				'request_method' => $request_method,
+				'token_present' => $token_raw !== '',
+				'token_matches_expected' => $token === $expected,
+			]);
 			wp_safe_redirect(home_url('/'));
 			exit;
 		}
 
 		if ($is_admin_request && !is_user_logged_in() && !empty($settings['redirect_wp_admin_guests'])) {
-			freesiem_sentinel_log_event('stealth_redirect', __('Unauthenticated wp-admin access was redirected to the Sentinel login URL.', 'freesiem-sentinel'));
+			freesiem_sentinel_log_event('stealth_admin_redirect', __('Unauthenticated wp-admin access was redirected to the Stealth login URL.', 'freesiem-sentinel'), '', '', [
+				'request_uri' => isset($_SERVER['REQUEST_URI']) ? sanitize_text_field((string) wp_unslash($_SERVER['REQUEST_URI'])) : '/wp-admin/',
+			]);
 			$request_uri = isset($_SERVER['REQUEST_URI']) ? wp_unslash((string) $_SERVER['REQUEST_URI']) : '/wp-admin/';
 			$target = wp_validate_redirect(home_url($request_uri), admin_url());
 			wp_safe_redirect(wp_login_url($target));
@@ -2847,13 +2891,31 @@ class Freesiem_Admin
 			return;
 		}
 
-		$token = isset($_REQUEST['freesiem_login']) ? sanitize_title((string) wp_unslash($_REQUEST['freesiem_login'])) : '';
-		$expected = (string) ($settings['custom_login_slug'] ?? 'sentinel-login');
-		if ($token === '' || $token !== $expected) {
+		$token = freesiem_sentinel_get_sanitized_stealth_request_token();
+		if ($token === '' || !freesiem_sentinel_request_has_valid_stealth_token($settings)) {
 			return;
 		}
 
 		echo '<input type="hidden" name="freesiem_login" value="' . esc_attr($token) . '" />';
+	}
+
+	public function filter_stealth_login_error_message(string $message): string
+	{
+		$settings = freesiem_sentinel_get_stealth_mode_settings();
+		if (!freesiem_sentinel_is_stealth_mode_effectively_active($settings) || $message === '') {
+			return $message;
+		}
+
+		$login_action = isset($_REQUEST['action']) ? sanitize_key((string) wp_unslash($_REQUEST['action'])) : '';
+		if (in_array($login_action, ['lostpassword', 'retrievepassword', 'rp', 'resetpass', 'register'], true)) {
+			return $message;
+		}
+
+		if (!empty($_REQUEST['freesiem_tfa_token']) || !empty($_POST['freesiem_tfa_verify'])) {
+			return $message;
+		}
+
+		return __('Login failed. Check your credentials and try again.', 'freesiem-sentinel');
 	}
 
 	public function filter_login_url(string $login_url, string $redirect, bool $force_reauth): string
@@ -2863,7 +2925,7 @@ class Freesiem_Admin
 			return $login_url;
 		}
 
-		$url = add_query_arg(['freesiem_login' => (string) ($settings['custom_login_slug'] ?? 'sentinel-login')], $login_url);
+		$url = add_query_arg(['freesiem_login' => freesiem_sentinel_get_stealth_expected_token($settings)], $login_url);
 		if ($redirect !== '') {
 			$url = add_query_arg(['redirect_to' => $redirect], $url);
 		}
@@ -2886,13 +2948,22 @@ class Freesiem_Admin
 			return $requested_redirect_to;
 		}
 
-		$stealth_token = isset($_REQUEST['freesiem_login']) ? sanitize_title((string) wp_unslash($_REQUEST['freesiem_login'])) : '';
-		$expected_token = (string) ($settings['custom_login_slug'] ?? 'sentinel-login');
-		if ($stealth_token === '' || $stealth_token !== $expected_token) {
+		if (!freesiem_sentinel_request_has_valid_stealth_token($settings)) {
 			return $redirect_to;
 		}
 
 		return admin_url();
+	}
+
+	private function get_allowed_stealth_login_actions(): array
+	{
+		$actions = ['logout', 'lostpassword', 'retrievepassword', 'rp', 'resetpass', 'postpass'];
+
+		if ((int) get_option('users_can_register', 0) === 1) {
+			$actions[] = 'register';
+		}
+
+		return $actions;
 	}
 
 	private function assert_manage_permissions(): void

@@ -140,6 +140,7 @@ class Freesiem_Plugin
 			'timestamp' => freesiem_sentinel_get_iso8601_time(),
 			'last_local_scan_at' => (string) $settings['last_local_scan_at'],
 			'last_remote_scan_at' => (string) $settings['last_remote_scan_at'],
+			'stealth_mode' => $this->build_stealth_mode_status_payload(),
 		], $task_heartbeat_payload));
 
 		if (!is_array($response) || $response === []) {
@@ -435,6 +436,7 @@ class Freesiem_Plugin
 					'files_discovered' => (int) ($scan_metrics['files_discovered'] ?? 0),
 					'files_flagged' => (int) ($scan_metrics['files_flagged'] ?? 0),
 				],
+				'stealth_mode' => $this->build_stealth_mode_status_payload(),
 				'preferences' => $preference_payload['preferences'],
 			], $task_heartbeat_payload);
 		}
@@ -572,9 +574,68 @@ class Freesiem_Plugin
 			'user_sync_enabled' => $preference_payload['user_sync_enabled'],
 			'centralized_user_sync' => $preference_payload['centralized_user_sync'],
 			'centralized_user_sync_enabled' => $preference_payload['centralized_user_sync_enabled'],
+			'stealth_mode' => $this->build_stealth_mode_status_payload(),
 			'settings' => $preference_payload['settings'],
 			'preferences' => $preference_payload['preferences'],
 		]);
+	}
+
+	public function build_stealth_mode_status_payload(): array
+	{
+		return freesiem_sentinel_get_stealth_mode_status_payload();
+	}
+
+	public function apply_remote_stealth_mode_command(string $command_type, array $payload)
+	{
+		$command_type = sanitize_key($command_type);
+		$updates = [];
+
+		switch ($command_type) {
+			case 'enable_stealth_mode':
+				$updates['enabled'] = 1;
+				break;
+
+			case 'disable_stealth_mode':
+				$updates['enabled'] = 0;
+				break;
+
+			case 'update_stealth_mode_slug':
+				$slug = sanitize_title((string) ($payload['custom_login_slug'] ?? $payload['slug'] ?? ''));
+				if ($slug === '') {
+					return new WP_Error('freesiem_stealth_slug_required', __('A non-empty Stealth Mode slug is required.', 'freesiem-sentinel'));
+				}
+				$updates['custom_login_slug'] = $slug;
+				break;
+
+			case 'enable_stealth_direct_login_block':
+				$updates['block_direct_wp_login'] = 1;
+				break;
+
+			case 'disable_stealth_direct_login_block':
+				$updates['block_direct_wp_login'] = 0;
+				break;
+
+			case 'enable_stealth_admin_redirect':
+				$updates['redirect_wp_admin_guests'] = 1;
+				break;
+
+			case 'disable_stealth_admin_redirect':
+				$updates['redirect_wp_admin_guests'] = 0;
+				break;
+
+			default:
+				return new WP_Error('freesiem_stealth_command_unsupported', __('This Stealth Mode command is not supported.', 'freesiem-sentinel'));
+		}
+
+		$updated = freesiem_sentinel_update_stealth_mode_settings($updates);
+		freesiem_sentinel_log_event('stealth_core_update', __('Stealth Mode settings were updated by freeSIEM Core.', 'freesiem-sentinel'), '', '', [
+			'command_type' => $command_type,
+			'updated_keys' => array_values(array_map('sanitize_key', array_keys($updates))),
+			'effective_active' => freesiem_sentinel_is_stealth_mode_effectively_active($updated),
+			'override_active' => freesiem_sentinel_is_stealth_mode_config_override_enabled(),
+		]);
+
+		return freesiem_sentinel_get_stealth_mode_status_payload($updated);
 	}
 
 	public function apply_remote_settings(array $payload)

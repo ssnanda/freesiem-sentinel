@@ -145,6 +145,32 @@ function freesiem_sentinel_get_stealth_mode_settings(): array
 	return freesiem_sentinel_sanitize_stealth_mode_settings(is_array($saved) ? $saved : []);
 }
 
+function freesiem_sentinel_get_stealth_expected_token(?array $settings = null): string
+{
+	$settings = is_array($settings) ? $settings : freesiem_sentinel_get_stealth_mode_settings();
+	$slug = sanitize_title((string) ($settings['custom_login_slug'] ?? 'sentinel-login'));
+
+	return $slug !== '' ? $slug : 'sentinel-login';
+}
+
+function freesiem_sentinel_get_raw_stealth_request_token(): string
+{
+	return isset($_REQUEST['freesiem_login']) ? wp_unslash((string) $_REQUEST['freesiem_login']) : '';
+}
+
+function freesiem_sentinel_get_sanitized_stealth_request_token(): string
+{
+	return sanitize_title(freesiem_sentinel_get_raw_stealth_request_token());
+}
+
+function freesiem_sentinel_request_has_valid_stealth_token(?array $settings = null): bool
+{
+	$token = freesiem_sentinel_get_sanitized_stealth_request_token();
+	$expected = freesiem_sentinel_get_stealth_expected_token($settings);
+
+	return $token !== '' && $expected !== '' && hash_equals($expected, $token);
+}
+
 function freesiem_sentinel_is_stealth_mode_config_override_enabled(): bool
 {
 	return defined('FREESIEM_SENTINEL_DISABLE_STEALTH_MODE') && FREESIEM_SENTINEL_DISABLE_STEALTH_MODE;
@@ -456,6 +482,30 @@ function freesiem_sentinel_get_log_rows(string $event_type = '', int $limit = 10
 	return is_array($rows) ? $rows : [];
 }
 
+function freesiem_sentinel_get_recent_log_rows_by_prefix(string $prefix, int $limit = 5): array
+{
+	$prefix = sanitize_key($prefix);
+	$limit = max(1, min(50, $limit));
+	$rows = freesiem_sentinel_get_log_rows('', max(25, $limit * 10));
+	$matched = [];
+
+	foreach ($rows as $row) {
+		$type = sanitize_key((string) ($row['event_type'] ?? ''));
+
+		if ($prefix !== '' && !str_starts_with($type, $prefix)) {
+			continue;
+		}
+
+		$matched[] = $row;
+
+		if (count($matched) >= $limit) {
+			break;
+		}
+	}
+
+	return $matched;
+}
+
 function freesiem_sentinel_clear_log_rows(): void
 {
 	global $wpdb;
@@ -503,9 +553,25 @@ function freesiem_sentinel_clear_login_lockout_state(string $username = ''): voi
 function freesiem_sentinel_get_stealth_login_url(?array $settings = null): string
 {
 	$settings = is_array($settings) ? $settings : freesiem_sentinel_get_stealth_mode_settings();
-	$slug = (string) ($settings['custom_login_slug'] ?? 'sentinel-login');
+	$slug = freesiem_sentinel_get_stealth_expected_token($settings);
 
 	return add_query_arg(['freesiem_login' => $slug], wp_login_url());
+}
+
+function freesiem_sentinel_get_stealth_mode_status_payload(?array $settings = null): array
+{
+	$settings = is_array($settings) ? $settings : freesiem_sentinel_get_stealth_mode_settings();
+
+	return [
+		'enabled_in_settings' => !empty($settings['enabled']),
+		'effective_active' => freesiem_sentinel_is_stealth_mode_effectively_active($settings),
+		'disabled_by_config_override' => freesiem_sentinel_is_stealth_mode_config_override_enabled(),
+		'block_direct_wp_login' => !empty($settings['block_direct_wp_login']),
+		'redirect_wp_admin_guests' => !empty($settings['redirect_wp_admin_guests']),
+		'custom_login_slug_set' => freesiem_sentinel_get_stealth_expected_token($settings) !== '',
+		'custom_login_slug_length' => strlen(freesiem_sentinel_get_stealth_expected_token($settings)),
+		'supports_remote_stealth_management' => true,
+	];
 }
 
 function freesiem_sentinel_sanitize_phone_number(string $value): string
@@ -3812,6 +3878,13 @@ function freesiem_sentinel_get_allowed_command_types(): array
 		'reconnect',
 		'refresh_update_check',
 		'update_settings',
+		'enable_stealth_mode',
+		'disable_stealth_mode',
+		'update_stealth_mode_slug',
+		'enable_stealth_direct_login_block',
+		'disable_stealth_direct_login_block',
+		'enable_stealth_admin_redirect',
+		'disable_stealth_admin_redirect',
 	];
 }
 

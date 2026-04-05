@@ -79,7 +79,7 @@ class Freesiem_TFA_Auth
 			'created_at' => time(),
 		];
 		set_transient(self::CHALLENGE_TRANSIENT_PREFIX . $token, $challenge, 10 * MINUTE_IN_SECONDS);
-		wp_safe_redirect(wp_login_url() . '?freesiem_tfa_token=' . rawurlencode($token));
+		wp_safe_redirect(add_query_arg(['freesiem_tfa_token' => $token], wp_login_url()));
 		exit;
 	}
 
