@@ -81,6 +81,99 @@ function freesiem_sentinel_get_default_settings(): array
 	];
 }
 
+function freesiem_sentinel_get_default_login_protection_settings(): array
+{
+	return [
+		'enabled' => 0,
+		'max_failed_attempts' => 5,
+		'lockout_duration_minutes' => 15,
+		'track_failed_login_count' => 1,
+		'log_successful_logins' => 1,
+		'log_failed_logins' => 1,
+	];
+}
+
+function freesiem_sentinel_get_login_protection_settings(): array
+{
+	$saved = get_option(FREESIEM_SENTINEL_LOGIN_PROTECTION_OPTION, []);
+
+	return freesiem_sentinel_sanitize_login_protection_settings(is_array($saved) ? $saved : []);
+}
+
+function freesiem_sentinel_update_login_protection_settings(array $updates): array
+{
+	$current = freesiem_sentinel_get_login_protection_settings();
+	$merged = array_replace_recursive($current, $updates);
+	$sanitized = freesiem_sentinel_sanitize_login_protection_settings($merged);
+
+	if (get_option(FREESIEM_SENTINEL_LOGIN_PROTECTION_OPTION, null) === null) {
+		add_option(FREESIEM_SENTINEL_LOGIN_PROTECTION_OPTION, $sanitized, '', false);
+	} else {
+		update_option(FREESIEM_SENTINEL_LOGIN_PROTECTION_OPTION, $sanitized, false);
+	}
+
+	return $sanitized;
+}
+
+function freesiem_sentinel_sanitize_login_protection_settings(array $settings): array
+{
+	$settings = wp_parse_args($settings, freesiem_sentinel_get_default_login_protection_settings());
+	$settings['enabled'] = empty($settings['enabled']) ? 0 : 1;
+	$settings['max_failed_attempts'] = max(1, min(20, (int) ($settings['max_failed_attempts'] ?? 5)));
+	$settings['lockout_duration_minutes'] = max(1, min(1440, (int) ($settings['lockout_duration_minutes'] ?? 15)));
+	$settings['track_failed_login_count'] = empty($settings['track_failed_login_count']) ? 0 : 1;
+	$settings['log_successful_logins'] = empty($settings['log_successful_logins']) ? 0 : 1;
+	$settings['log_failed_logins'] = empty($settings['log_failed_logins']) ? 0 : 1;
+
+	return $settings;
+}
+
+function freesiem_sentinel_get_default_stealth_mode_settings(): array
+{
+	return [
+		'enabled' => 0,
+		'custom_login_slug' => 'sentinel-login',
+		'block_direct_wp_login' => 0,
+		'redirect_wp_admin_guests' => 0,
+	];
+}
+
+function freesiem_sentinel_get_stealth_mode_settings(): array
+{
+	$saved = get_option(FREESIEM_SENTINEL_STEALTH_MODE_OPTION, []);
+
+	return freesiem_sentinel_sanitize_stealth_mode_settings(is_array($saved) ? $saved : []);
+}
+
+function freesiem_sentinel_update_stealth_mode_settings(array $updates): array
+{
+	$current = freesiem_sentinel_get_stealth_mode_settings();
+	$merged = array_replace_recursive($current, $updates);
+	$sanitized = freesiem_sentinel_sanitize_stealth_mode_settings($merged);
+
+	if (get_option(FREESIEM_SENTINEL_STEALTH_MODE_OPTION, null) === null) {
+		add_option(FREESIEM_SENTINEL_STEALTH_MODE_OPTION, $sanitized, '', false);
+	} else {
+		update_option(FREESIEM_SENTINEL_STEALTH_MODE_OPTION, $sanitized, false);
+	}
+
+	return $sanitized;
+}
+
+function freesiem_sentinel_sanitize_stealth_mode_settings(array $settings): array
+{
+	$settings = wp_parse_args($settings, freesiem_sentinel_get_default_stealth_mode_settings());
+	$settings['enabled'] = empty($settings['enabled']) ? 0 : 1;
+	$settings['custom_login_slug'] = sanitize_title((string) ($settings['custom_login_slug'] ?? 'sentinel-login'));
+	if ($settings['custom_login_slug'] === '') {
+		$settings['custom_login_slug'] = 'sentinel-login';
+	}
+	$settings['block_direct_wp_login'] = empty($settings['block_direct_wp_login']) ? 0 : 1;
+	$settings['redirect_wp_admin_guests'] = empty($settings['redirect_wp_admin_guests']) ? 0 : 1;
+
+	return $settings;
+}
+
 function freesiem_sentinel_safe_string($value): string
 {
 	if (is_string($value)) {
@@ -242,6 +335,165 @@ function freesiem_sentinel_sanitize_backend_url(string $url): string
 	}
 
 	return $url;
+}
+
+function freesiem_sentinel_get_logs_table_name(): string
+{
+	global $wpdb;
+
+	return $wpdb->prefix . 'freesiem_sentinel_logs';
+}
+
+function freesiem_sentinel_get_logs_table_version(): string
+{
+	return '1';
+}
+
+function freesiem_sentinel_install_logs_table(): void
+{
+	global $wpdb;
+
+	$table = freesiem_sentinel_get_logs_table_name();
+	$charset_collate = $wpdb->get_charset_collate();
+
+	require_once ABSPATH . 'wp-admin/includes/upgrade.php';
+
+	$sql = "CREATE TABLE {$table} (
+		id bigint(20) unsigned NOT NULL AUTO_INCREMENT,
+		created_at datetime NOT NULL,
+		event_type varchar(100) NOT NULL,
+		username varchar(191) NOT NULL DEFAULT '',
+		ip_address varchar(100) NOT NULL DEFAULT '',
+		message text NOT NULL,
+		context longtext NULL,
+		PRIMARY KEY  (id),
+		KEY event_type (event_type),
+		KEY created_at (created_at),
+		KEY username (username)
+	) {$charset_collate};";
+
+	dbDelta($sql);
+	update_option(FREESIEM_SENTINEL_LOG_TABLE_VERSION_OPTION, freesiem_sentinel_get_logs_table_version(), false);
+}
+
+function freesiem_sentinel_maybe_upgrade_logs_table(): void
+{
+	$current = (string) get_option(FREESIEM_SENTINEL_LOG_TABLE_VERSION_OPTION, '');
+
+	if ($current !== freesiem_sentinel_get_logs_table_version()) {
+		freesiem_sentinel_install_logs_table();
+	}
+}
+
+function freesiem_sentinel_get_request_ip(): string
+{
+	foreach (['HTTP_X_FORWARDED_FOR', 'REMOTE_ADDR'] as $key) {
+		if (empty($_SERVER[$key])) {
+			continue;
+		}
+
+		$value = (string) wp_unslash((string) $_SERVER[$key]);
+		$value = $key === 'HTTP_X_FORWARDED_FOR' ? trim(explode(',', $value)[0] ?? '') : trim($value);
+		if ($value !== '') {
+			return sanitize_text_field($value);
+		}
+	}
+
+	return '';
+}
+
+function freesiem_sentinel_log_event(string $event_type, string $message, string $username = '', string $ip_address = '', array $context = []): bool
+{
+	global $wpdb;
+
+	freesiem_sentinel_maybe_upgrade_logs_table();
+
+	$table = freesiem_sentinel_get_logs_table_name();
+	$result = $wpdb->insert(
+		$table,
+		[
+			'created_at' => current_time('mysql', true),
+			'event_type' => sanitize_key($event_type),
+			'username' => sanitize_user($username, true),
+			'ip_address' => sanitize_text_field($ip_address !== '' ? $ip_address : freesiem_sentinel_get_request_ip()),
+			'message' => sanitize_textarea_field($message),
+			'context' => $context === [] ? null : wp_json_encode($context),
+		],
+		['%s', '%s', '%s', '%s', '%s', '%s']
+	);
+
+	return (bool) $result;
+}
+
+function freesiem_sentinel_get_log_rows(string $event_type = '', int $limit = 100): array
+{
+	global $wpdb;
+
+	freesiem_sentinel_maybe_upgrade_logs_table();
+	$table = freesiem_sentinel_get_logs_table_name();
+	$limit = max(1, min(500, $limit));
+
+	if ($event_type !== '') {
+		$query = $wpdb->prepare("SELECT * FROM {$table} WHERE event_type = %s ORDER BY id DESC LIMIT %d", sanitize_key($event_type), $limit);
+	} else {
+		$query = $wpdb->prepare("SELECT * FROM {$table} ORDER BY id DESC LIMIT %d", $limit);
+	}
+
+	$rows = $wpdb->get_results($query, ARRAY_A);
+
+	return is_array($rows) ? $rows : [];
+}
+
+function freesiem_sentinel_clear_log_rows(): void
+{
+	global $wpdb;
+
+	freesiem_sentinel_maybe_upgrade_logs_table();
+	$wpdb->query('TRUNCATE TABLE ' . freesiem_sentinel_get_logs_table_name());
+}
+
+function freesiem_sentinel_get_log_event_types(): array
+{
+	global $wpdb;
+
+	freesiem_sentinel_maybe_upgrade_logs_table();
+	$table = freesiem_sentinel_get_logs_table_name();
+	$rows = $wpdb->get_col("SELECT DISTINCT event_type FROM {$table} ORDER BY event_type ASC");
+
+	return array_values(array_filter(array_map('sanitize_key', is_array($rows) ? $rows : [])));
+}
+
+function freesiem_sentinel_get_login_lockout_key(string $username = ''): string
+{
+	$ip = freesiem_sentinel_get_request_ip();
+	$seed = strtolower(trim($username)) . '|' . $ip;
+
+	return 'freesiem_sentinel_login_' . md5($seed);
+}
+
+function freesiem_sentinel_get_login_lockout_state(string $username = ''): array
+{
+	$state = get_transient(freesiem_sentinel_get_login_lockout_key($username));
+
+	return is_array($state) ? $state : ['count' => 0, 'locked_until' => 0];
+}
+
+function freesiem_sentinel_update_login_lockout_state(string $username, array $state, int $minutes): void
+{
+	set_transient(freesiem_sentinel_get_login_lockout_key($username), $state, max(1, $minutes) * MINUTE_IN_SECONDS);
+}
+
+function freesiem_sentinel_clear_login_lockout_state(string $username = ''): void
+{
+	delete_transient(freesiem_sentinel_get_login_lockout_key($username));
+}
+
+function freesiem_sentinel_get_stealth_login_url(?array $settings = null): string
+{
+	$settings = is_array($settings) ? $settings : freesiem_sentinel_get_stealth_mode_settings();
+	$slug = (string) ($settings['custom_login_slug'] ?? 'sentinel-login');
+
+	return add_query_arg(['freesiem_login' => $slug], wp_login_url());
 }
 
 function freesiem_sentinel_sanitize_phone_number(string $value): string

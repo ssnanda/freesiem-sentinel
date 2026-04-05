@@ -51,6 +51,7 @@ class Freesiem_Plugin
 
 	public function register(): void
 	{
+		freesiem_sentinel_maybe_upgrade_logs_table();
 		$this->cron->register();
 		$this->updater->register();
 		$this->admin->register();
@@ -64,6 +65,7 @@ class Freesiem_Plugin
 		$instance = self::instance();
 		$instance->bootstrap_settings();
 		$instance->pending_tasks->install_or_upgrade();
+		freesiem_sentinel_install_logs_table();
 		$instance->ensure_plugin_uuid();
 		add_filter('cron_schedules', [$instance->cron, 'register_schedule']);
 		Freesiem_Cron::schedule_events();

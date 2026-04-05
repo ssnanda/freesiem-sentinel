@@ -49,6 +49,16 @@ class Freesiem_Admin
 		add_action('admin_post_freesiem_sentinel_detect_nginx_config', [$this, 'handle_detect_nginx_config']);
 		add_action('admin_post_freesiem_sentinel_apply_ssl_to_nginx', [$this, 'handle_apply_ssl_to_nginx']);
 		add_action('admin_post_freesiem_sentinel_install_certbot', [$this, 'handle_install_certbot']);
+		add_action('admin_post_freesiem_sentinel_save_login_protection', [$this, 'handle_save_login_protection']);
+		add_action('admin_post_freesiem_sentinel_save_stealth_mode', [$this, 'handle_save_stealth_mode']);
+		add_action('admin_post_freesiem_sentinel_clear_logs', [$this, 'handle_clear_logs']);
+		add_action('wp_login_failed', [$this, 'handle_login_failed_event']);
+		add_action('wp_login', [$this, 'handle_login_success_event'], 10, 2);
+		add_action('init', [$this, 'maybe_handle_stealth_mode'], 1);
+		add_filter('authenticate', [$this, 'maybe_enforce_login_lockout'], 30, 3);
+		add_filter('login_url', [$this, 'filter_login_url'], 10, 3);
+		add_action('freesiem_sentinel_tfa_success', [$this, 'handle_tfa_success_event'], 10, 2);
+		add_action('freesiem_sentinel_tfa_failure', [$this, 'handle_tfa_failure_event'], 10, 2);
 	}
 
 	public function register_menu(): void
@@ -62,12 +72,16 @@ class Freesiem_Admin
 			'dashicons-shield-alt'
 		);
 
-		add_submenu_page('freesiem-portal', __('Scan', 'freesiem-sentinel'), __('Scan', 'freesiem-sentinel'), 'manage_options', 'freesiem-scan', [$this, 'render_scan_page']);
+		add_submenu_page('freesiem-portal', __('Dashboard', 'freesiem-sentinel'), __('Dashboard', 'freesiem-sentinel'), 'manage_options', 'freesiem-portal', [$this, 'render_dashboard_page']);
 		add_submenu_page('freesiem-portal', __('Cloud', 'freesiem-sentinel'), __('Cloud', 'freesiem-sentinel'), 'manage_options', 'freesiem-remote', [$this, 'render_remote_page']);
 		add_submenu_page('freesiem-portal', __('SSL / HTTPS', 'freesiem-sentinel'), __('SSL / HTTPS', 'freesiem-sentinel'), 'manage_options', 'freesiem-ssl', [$this, 'render_ssl_page']);
-		add_submenu_page('freesiem-portal', __('Two-Factor Authentication', 'freesiem-sentinel'), __('TFA', 'freesiem-sentinel'), 'manage_options', 'freesiem-tfa', [$this, 'render_tfa_page']);
+		add_submenu_page('freesiem-portal', __('TFA (2FA)', 'freesiem-sentinel'), __('TFA (2FA)', 'freesiem-sentinel'), 'manage_options', 'freesiem-tfa', [$this, 'render_tfa_page']);
+		add_submenu_page('freesiem-portal', __('Login Protection', 'freesiem-sentinel'), __('Login Protection', 'freesiem-sentinel'), 'manage_options', 'freesiem-login-protection', [$this, 'render_login_protection_page']);
+		add_submenu_page('freesiem-portal', __('Stealth Mode', 'freesiem-sentinel'), __('Stealth Mode', 'freesiem-sentinel'), 'manage_options', 'freesiem-stealth-mode', [$this, 'render_stealth_mode_page']);
+		add_submenu_page('freesiem-portal', __('Logs', 'freesiem-sentinel'), __('Logs', 'freesiem-sentinel'), 'manage_options', 'freesiem-logs', [$this, 'render_logs_page']);
 		add_submenu_page('freesiem-portal', __('Pending Tasks', 'freesiem-sentinel'), __('Pending Tasks', 'freesiem-sentinel'), 'read', 'freesiem-pending-tasks', [$this, 'render_pending_tasks_page']);
 		add_submenu_page('freesiem-portal', __('About', 'freesiem-sentinel'), __('About', 'freesiem-sentinel'), 'manage_options', 'freesiem-about', [$this, 'render_about_page']);
+		add_submenu_page(null, __('Scan', 'freesiem-sentinel'), __('Scan', 'freesiem-sentinel'), 'manage_options', 'freesiem-scan', [$this, 'render_scan_page']);
 	}
 
 	public function handle_save_cloud_connect_contact(): void
@@ -664,6 +678,49 @@ class Freesiem_Admin
 		$this->redirect_to_page('freesiem-ssl', ['tab' => 'overview']);
 	}
 
+	public function handle_save_login_protection(): void
+	{
+		$this->assert_manage_permissions();
+		freesiem_sentinel_require_admin_post_nonce();
+
+		freesiem_sentinel_update_login_protection_settings([
+			'enabled' => empty($_POST['enabled']) ? 0 : 1,
+			'max_failed_attempts' => isset($_POST['max_failed_attempts']) ? (int) $_POST['max_failed_attempts'] : 5,
+			'lockout_duration_minutes' => isset($_POST['lockout_duration_minutes']) ? (int) $_POST['lockout_duration_minutes'] : 15,
+			'track_failed_login_count' => empty($_POST['track_failed_login_count']) ? 0 : 1,
+			'log_successful_logins' => empty($_POST['log_successful_logins']) ? 0 : 1,
+			'log_failed_logins' => empty($_POST['log_failed_logins']) ? 0 : 1,
+		]);
+
+		freesiem_sentinel_set_notice('success', __('Login Protection settings saved.', 'freesiem-sentinel'));
+		$this->redirect_to_page('freesiem-login-protection');
+	}
+
+	public function handle_save_stealth_mode(): void
+	{
+		$this->assert_manage_permissions();
+		freesiem_sentinel_require_admin_post_nonce();
+
+		$settings = freesiem_sentinel_update_stealth_mode_settings([
+			'enabled' => empty($_POST['enabled']) ? 0 : 1,
+			'custom_login_slug' => isset($_POST['custom_login_slug']) ? sanitize_title(wp_unslash((string) $_POST['custom_login_slug'])) : 'sentinel-login',
+			'block_direct_wp_login' => empty($_POST['block_direct_wp_login']) ? 0 : 1,
+			'redirect_wp_admin_guests' => empty($_POST['redirect_wp_admin_guests']) ? 0 : 1,
+		]);
+
+		freesiem_sentinel_set_notice('success', sprintf(__('Stealth Mode settings saved. Current login URL: %s', 'freesiem-sentinel'), freesiem_sentinel_get_stealth_login_url($settings)));
+		$this->redirect_to_page('freesiem-stealth-mode');
+	}
+
+	public function handle_clear_logs(): void
+	{
+		$this->assert_manage_permissions();
+		freesiem_sentinel_require_admin_post_nonce();
+		freesiem_sentinel_clear_log_rows();
+		freesiem_sentinel_set_notice('success', __('Sentinel logs cleared.', 'freesiem-sentinel'));
+		$this->redirect_to_page('freesiem-logs');
+	}
+
 	public function render_dashboard_page(): void
 	{
 		$settings = freesiem_sentinel_get_settings();
@@ -682,7 +739,7 @@ class Freesiem_Admin
 		$remote_url = freesiem_sentinel_admin_page_url('freesiem-remote');
 
 		echo '<div class="wrap">';
-		echo '<h1>' . esc_html__('Portal', 'freesiem-sentinel') . '</h1>';
+		echo '<h1>' . esc_html__('Dashboard', 'freesiem-sentinel') . '</h1>';
 		echo '<p>' . esc_html__('Your freeSIEM control center for current risk, scan activity, and next actions.', 'freesiem-sentinel') . '</p>';
 
 		echo '<div style="background:linear-gradient(135deg,#09111c,#15253b);padding:22px;border-radius:16px;color:#fff;margin:20px 0 24px;">';
@@ -771,6 +828,106 @@ class Freesiem_Admin
 		echo '<p><strong>' . esc_html__('Registration State', 'freesiem-sentinel') . ':</strong> ' . esc_html($this->registration_state_label($settings['registration_status'] ?? '')) . '</p>';
 		echo '</div>';
 		echo '</div>';
+		echo '</div>';
+	}
+
+	public function render_login_protection_page(): void
+	{
+		$this->assert_manage_permissions();
+		$settings = freesiem_sentinel_get_login_protection_settings();
+		$current_state = freesiem_sentinel_get_login_lockout_state();
+
+		echo '<div class="wrap">';
+		echo '<h1>' . esc_html__('Login Protection', 'freesiem-sentinel') . '</h1>';
+		echo '<p>' . esc_html__('Configure lightweight login attempt tracking and lockout behavior for WordPress sign-in events.', 'freesiem-sentinel') . '</p>';
+		echo '<form method="post" action="' . esc_url(admin_url('admin-post.php')) . '">';
+		wp_nonce_field(FREESIEM_SENTINEL_NONCE_ACTION);
+		echo '<input type="hidden" name="action" value="freesiem_sentinel_save_login_protection" />';
+		echo '<table class="form-table" role="presentation">';
+		$this->render_ssl_checkbox_field('enabled', __('Enable login protection', 'freesiem-sentinel'), !empty($settings['enabled']), __('When enabled, Sentinel tracks failed logins and temporarily locks out repeated attempts.', 'freesiem-sentinel'));
+		echo '<tr><th scope="row"><label for="freesiem-max-failed-attempts">' . esc_html__('Max failed login attempts', 'freesiem-sentinel') . '</label></th><td><input id="freesiem-max-failed-attempts" type="number" min="1" max="20" name="max_failed_attempts" value="' . esc_attr((string) ($settings['max_failed_attempts'] ?? 5)) . '" class="small-text" /></td></tr>';
+		echo '<tr><th scope="row"><label for="freesiem-lockout-duration">' . esc_html__('Lockout duration (minutes)', 'freesiem-sentinel') . '</label></th><td><input id="freesiem-lockout-duration" type="number" min="1" max="1440" name="lockout_duration_minutes" value="' . esc_attr((string) ($settings['lockout_duration_minutes'] ?? 15)) . '" class="small-text" /></td></tr>';
+		$this->render_ssl_checkbox_field('track_failed_login_count', __('Track failed login count', 'freesiem-sentinel'), !empty($settings['track_failed_login_count']), __('Stores the current failed-attempt counter per username/IP key for lockout evaluation.', 'freesiem-sentinel'));
+		$this->render_ssl_checkbox_field('log_successful_logins', __('Log successful logins', 'freesiem-sentinel'), !empty($settings['log_successful_logins']), __('Adds wp_login events to the Sentinel Logs page.', 'freesiem-sentinel'));
+		$this->render_ssl_checkbox_field('log_failed_logins', __('Log failed logins', 'freesiem-sentinel'), !empty($settings['log_failed_logins']), __('Adds wp_login_failed and lockout events to the Sentinel Logs page.', 'freesiem-sentinel'));
+		echo '</table>';
+		submit_button(__('Save Login Protection Settings', 'freesiem-sentinel'));
+		echo '</form>';
+		echo '<p><strong>' . esc_html__('Current failed-attempt state', 'freesiem-sentinel') . ':</strong> ' . esc_html(sprintf(__('count=%1$d locked_until=%2$s', 'freesiem-sentinel'), (int) ($current_state['count'] ?? 0), !empty($current_state['locked_until']) ? gmdate('Y-m-d H:i:s', (int) $current_state['locked_until']) : __('not locked', 'freesiem-sentinel'))) . '</p>';
+		echo '</div>';
+	}
+
+	public function render_stealth_mode_page(): void
+	{
+		$this->assert_manage_permissions();
+		$settings = freesiem_sentinel_get_stealth_mode_settings();
+		$current_login_url = freesiem_sentinel_get_stealth_login_url($settings);
+
+		echo '<div class="wrap">';
+		echo '<h1>' . esc_html__('Stealth Mode', 'freesiem-sentinel') . '</h1>';
+		echo '<p>' . esc_html__('Configure a safer login entry URL without introducing fragile rewrite-rule changes.', 'freesiem-sentinel') . '</p>';
+		echo '<div class="notice notice-warning inline"><p>' . esc_html__('Changing login access can lock you out. Keep another administrator session open before enabling Stealth Mode changes.', 'freesiem-sentinel') . '</p></div>';
+		echo '<form method="post" action="' . esc_url(admin_url('admin-post.php')) . '">';
+		wp_nonce_field(FREESIEM_SENTINEL_NONCE_ACTION);
+		echo '<input type="hidden" name="action" value="freesiem_sentinel_save_stealth_mode" />';
+		echo '<table class="form-table" role="presentation">';
+		$this->render_ssl_checkbox_field('enabled', __('Enable stealth mode', 'freesiem-sentinel'), !empty($settings['enabled']), __('Turns on Sentinel login obfuscation handling for the custom login URL below.', 'freesiem-sentinel'));
+		echo '<tr><th scope="row"><label for="freesiem-stealth-slug">' . esc_html__('Custom login slug', 'freesiem-sentinel') . '</label></th><td><input id="freesiem-stealth-slug" type="text" name="custom_login_slug" value="' . esc_attr((string) ($settings['custom_login_slug'] ?? 'sentinel-login')) . '" class="regular-text" /><p class="description">' . esc_html__('Sentinel uses this as a safe query-based login token rather than adding rewrite rules.', 'freesiem-sentinel') . '</p></td></tr>';
+		$this->render_ssl_checkbox_field('block_direct_wp_login', __('Block direct wp-login.php access', 'freesiem-sentinel'), !empty($settings['block_direct_wp_login']), __('When enabled, direct wp-login.php requests without the Sentinel login token are redirected away.', 'freesiem-sentinel'));
+		$this->render_ssl_checkbox_field('redirect_wp_admin_guests', __('Redirect unauthenticated wp-admin users', 'freesiem-sentinel'), !empty($settings['redirect_wp_admin_guests']), __('When enabled, guests trying to access wp-admin are sent to the Sentinel login URL.', 'freesiem-sentinel'));
+		echo '</table>';
+		submit_button(__('Save Stealth Mode Settings', 'freesiem-sentinel'));
+		echo '</form>';
+		echo '<p><strong>' . esc_html__('Current login URL', 'freesiem-sentinel') . ':</strong> <code>' . esc_html($current_login_url) . '</code></p>';
+		echo '<p style="color:#646970;">' . esc_html__('Stealth Mode currently uses a query-based login URL for safety. This avoids rewrite-rule complexity while still allowing direct wp-login.php blocking and guest wp-admin redirects.', 'freesiem-sentinel') . '</p>';
+		echo '</div>';
+	}
+
+	public function render_logs_page(): void
+	{
+		$this->assert_manage_permissions();
+		$selected_type = isset($_GET['event_type']) ? sanitize_key((string) wp_unslash($_GET['event_type'])) : '';
+		$rows = freesiem_sentinel_get_log_rows($selected_type, 200);
+		$types = freesiem_sentinel_get_log_event_types();
+
+		echo '<div class="wrap">';
+		echo '<h1>' . esc_html__('Logs', 'freesiem-sentinel') . '</h1>';
+		echo '<p>' . esc_html__('Review lightweight login, stealth, TFA, and related Sentinel events.', 'freesiem-sentinel') . '</p>';
+		echo '<form method="get" style="margin:0 0 14px 0;display:flex;gap:10px;align-items:center;flex-wrap:wrap;">';
+		echo '<input type="hidden" name="page" value="freesiem-logs" />';
+		echo '<label for="freesiem-log-type">' . esc_html__('Event type', 'freesiem-sentinel') . '</label>';
+		echo '<select id="freesiem-log-type" name="event_type"><option value="">' . esc_html__('All events', 'freesiem-sentinel') . '</option>';
+		foreach ($types as $type) {
+			echo '<option value="' . esc_attr($type) . '" ' . selected($selected_type, $type, false) . '>' . esc_html($type) . '</option>';
+		}
+		echo '</select>';
+		submit_button(__('Filter', 'freesiem-sentinel'), 'secondary', '', false);
+		echo '</form>';
+		echo '<form method="post" action="' . esc_url(admin_url('admin-post.php')) . '" style="margin:0 0 14px 0;">';
+		wp_nonce_field(FREESIEM_SENTINEL_NONCE_ACTION);
+		echo '<input type="hidden" name="action" value="freesiem_sentinel_clear_logs" />';
+		submit_button(__('Clear Logs', 'freesiem-sentinel'), 'delete', '', false, ['onclick' => "return confirm('" . esc_js(__('Clear all Sentinel log rows?', 'freesiem-sentinel')) . "');"]);
+		echo '</form>';
+		echo '<table class="widefat striped"><thead><tr><th>' . esc_html__('Timestamp', 'freesiem-sentinel') . '</th><th>' . esc_html__('Event Type', 'freesiem-sentinel') . '</th><th>' . esc_html__('Username', 'freesiem-sentinel') . '</th><th>' . esc_html__('IP', 'freesiem-sentinel') . '</th><th>' . esc_html__('Message / Details', 'freesiem-sentinel') . '</th></tr></thead><tbody>';
+		if ($rows === []) {
+			echo '<tr><td colspan="5">' . esc_html__('No log events recorded yet.', 'freesiem-sentinel') . '</td></tr>';
+		} else {
+			foreach ($rows as $row) {
+				$message = (string) ($row['message'] ?? '');
+				$context = !empty($row['context']) ? json_decode((string) $row['context'], true) : null;
+				if (is_array($context) && $context !== []) {
+					$message .= ' ' . wp_json_encode($context);
+				}
+				echo '<tr>';
+				echo '<td>' . esc_html(freesiem_sentinel_format_datetime((string) ($row['created_at'] ?? ''))) . '</td>';
+				echo '<td>' . esc_html((string) ($row['event_type'] ?? '')) . '</td>';
+				echo '<td>' . esc_html((string) ($row['username'] ?? '')) . '</td>';
+				echo '<td>' . esc_html((string) ($row['ip_address'] ?? '')) . '</td>';
+				echo '<td>' . esc_html($message) . '</td>';
+				echo '</tr>';
+			}
+		}
+		echo '</tbody></table>';
 		echo '</div>';
 	}
 
@@ -1120,7 +1277,7 @@ class Freesiem_Admin
 		$users = get_users(['orderby' => 'login', 'order' => 'ASC']);
 
 		echo '<div class="wrap">';
-		echo '<h1>' . esc_html__('Two-Factor Authentication', 'freesiem-sentinel') . '</h1>';
+		echo '<h1>' . esc_html__('TFA (2FA)', 'freesiem-sentinel') . '</h1>';
 		echo '<p>' . esc_html__('Manage local and Core-managed TFA state for WordPress users without exposing secrets in APIs, logs, or status payloads.', 'freesiem-sentinel') . '</p>';
 
 		echo '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin:20px 0;">';
@@ -2562,6 +2719,125 @@ class Freesiem_Admin
 			'warning', 'warn', 'blocked', 'no_action_needed', 'manual_required' => 'warning',
 			default => 'error',
 		};
+	}
+
+	public function maybe_enforce_login_lockout($user, string $username, string $password)
+	{
+		$settings = freesiem_sentinel_get_login_protection_settings();
+		if (empty($settings['enabled']) || $username === '' || $user instanceof WP_User) {
+			return $user;
+		}
+
+		$state = freesiem_sentinel_get_login_lockout_state($username);
+		if (!empty($state['locked_until']) && (int) ($state['locked_until'] ?? 0) > time()) {
+			freesiem_sentinel_log_event('lockout_active', __('Login attempt blocked because the username/IP is currently locked out.', 'freesiem-sentinel'), $username, '', [
+				'locked_until' => (int) $state['locked_until'],
+			]);
+
+			return new WP_Error('freesiem_login_locked', __('Too many failed login attempts. Please try again later.', 'freesiem-sentinel'));
+		}
+
+		return $user;
+	}
+
+	public function handle_login_failed_event(string $username): void
+	{
+		$settings = freesiem_sentinel_get_login_protection_settings();
+		if (empty($settings['enabled'])) {
+			if (!empty($settings['log_failed_logins'])) {
+				freesiem_sentinel_log_event('login_failed', __('WordPress login failed.', 'freesiem-sentinel'), $username);
+			}
+
+			return;
+		}
+
+		$state = freesiem_sentinel_get_login_lockout_state($username);
+		$state['count'] = (int) ($state['count'] ?? 0) + 1;
+
+		if ((int) $state['count'] >= (int) ($settings['max_failed_attempts'] ?? 5)) {
+			$state['locked_until'] = time() + ((int) ($settings['lockout_duration_minutes'] ?? 15) * MINUTE_IN_SECONDS);
+			freesiem_sentinel_log_event('lockout_triggered', __('Login lockout triggered after repeated failed attempts.', 'freesiem-sentinel'), $username, '', [
+				'count' => (int) $state['count'],
+				'locked_until' => (int) $state['locked_until'],
+			]);
+		}
+
+		freesiem_sentinel_update_login_lockout_state($username, $state, (int) ($settings['lockout_duration_minutes'] ?? 15));
+		if (!empty($settings['log_failed_logins'])) {
+			freesiem_sentinel_log_event('login_failed', __('WordPress login failed.', 'freesiem-sentinel'), $username, '', [
+				'count' => !empty($settings['track_failed_login_count']) ? (int) $state['count'] : 0,
+			]);
+		}
+	}
+
+	public function handle_login_success_event(string $user_login, WP_User $user): void
+	{
+		$settings = freesiem_sentinel_get_login_protection_settings();
+		freesiem_sentinel_clear_login_lockout_state($user_login);
+
+		if (!empty($settings['log_successful_logins'])) {
+			freesiem_sentinel_log_event('login_success', __('WordPress login succeeded.', 'freesiem-sentinel'), $user_login, '', [
+				'user_id' => (int) $user->ID,
+			]);
+		}
+	}
+
+	public function handle_tfa_success_event(int $user_id, array $context = []): void
+	{
+		$user = get_user_by('id', $user_id);
+		freesiem_sentinel_log_event('tfa_success', __('TFA verification succeeded.', 'freesiem-sentinel'), $user instanceof WP_User ? (string) $user->user_login : '', '', $context);
+	}
+
+	public function handle_tfa_failure_event(int $user_id, array $context = []): void
+	{
+		$user = get_user_by('id', $user_id);
+		freesiem_sentinel_log_event('tfa_failure', __('TFA verification failed.', 'freesiem-sentinel'), $user instanceof WP_User ? (string) $user->user_login : '', '', $context);
+	}
+
+	public function maybe_handle_stealth_mode(): void
+	{
+		$settings = freesiem_sentinel_get_stealth_mode_settings();
+		if (empty($settings['enabled'])) {
+			return;
+		}
+
+		$script_name = isset($_SERVER['SCRIPT_NAME']) ? (string) $_SERVER['SCRIPT_NAME'] : '';
+		$is_login_request = str_ends_with($script_name, 'wp-login.php');
+		$is_admin_request = is_admin() && !wp_doing_ajax();
+		$token = isset($_GET['freesiem_login']) ? sanitize_title((string) wp_unslash($_GET['freesiem_login'])) : '';
+		$expected = (string) ($settings['custom_login_slug'] ?? 'sentinel-login');
+		$login_action = isset($_REQUEST['action']) ? sanitize_key((string) wp_unslash($_REQUEST['action'])) : '';
+		$allowed_login_actions = ['logout', 'lostpassword', 'retrievepassword', 'rp', 'resetpass', 'postpass'];
+
+		if ($is_login_request && !is_user_logged_in() && !empty($settings['block_direct_wp_login']) && $token !== $expected && !in_array($login_action, $allowed_login_actions, true)) {
+			freesiem_sentinel_log_event('stealth_block', __('Direct wp-login.php access was blocked by Stealth Mode.', 'freesiem-sentinel'));
+			wp_safe_redirect(home_url('/'));
+			exit;
+		}
+
+		if ($is_admin_request && !is_user_logged_in() && !empty($settings['redirect_wp_admin_guests'])) {
+			freesiem_sentinel_log_event('stealth_redirect', __('Unauthenticated wp-admin access was redirected to the Sentinel login URL.', 'freesiem-sentinel'));
+			wp_safe_redirect(freesiem_sentinel_get_stealth_login_url($settings));
+			exit;
+		}
+	}
+
+	public function filter_login_url(string $login_url, string $redirect, bool $force_reauth): string
+	{
+		$settings = freesiem_sentinel_get_stealth_mode_settings();
+		if (empty($settings['enabled'])) {
+			return $login_url;
+		}
+
+		$url = add_query_arg(['freesiem_login' => (string) ($settings['custom_login_slug'] ?? 'sentinel-login')], $login_url);
+		if ($redirect !== '') {
+			$url = add_query_arg(['redirect_to' => $redirect], $url);
+		}
+		if ($force_reauth) {
+			$url = add_query_arg(['reauth' => '1'], $url);
+		}
+
+		return $url;
 	}
 
 	private function assert_manage_permissions(): void

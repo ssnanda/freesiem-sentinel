@@ -113,6 +113,7 @@ class Freesiem_TFA_Auth
 
 		if (!$this->service->verify_user_code($user_id, $code)) {
 			$this->record_failed_attempt($user_id);
+			do_action('freesiem_sentinel_tfa_failure', $user_id, ['reason' => 'invalid_code']);
 			$this->render_challenge_page($token, __('The verification code was not accepted.', 'freesiem-sentinel'));
 			exit;
 		}
@@ -121,6 +122,7 @@ class Freesiem_TFA_Auth
 			$result = $this->service->complete_pending_setup($user_id, $code);
 
 			if (is_wp_error($result)) {
+				do_action('freesiem_sentinel_tfa_failure', $user_id, ['reason' => $result->get_error_message()]);
 				$this->render_challenge_page($token, $result->get_error_message());
 				exit;
 			}
@@ -140,6 +142,7 @@ class Freesiem_TFA_Auth
 			exit;
 		}
 
+		do_action('freesiem_sentinel_tfa_success', $user_id, ['redirect_to' => $redirect_to]);
 		wp_set_current_user($user_id, (string) $user->user_login);
 		wp_set_auth_cookie($user_id, $remember);
 		do_action('wp_login', (string) $user->user_login, $user);
