@@ -1456,6 +1456,10 @@ function synchy_mark_sync_baseline_complete(array $raw_options)
 		isset($state['db_fingerprints']) && is_array($state['db_fingerprints']) ? $state['db_fingerprints'] : [],
 		synchy_build_sync_manual_baseline_fingerprints($selected_scope_ids)
 	);
+	$state['file_paths'] = array_replace(
+		isset($state['file_paths']) && is_array($state['file_paths']) ? $state['file_paths'] : [],
+		synchy_get_sync_current_file_paths_by_scope(synchy_get_selected_sync_scope_ids($options, 'files'))
+	);
 
 	$write = synchy_write_sync_state($state);
 
@@ -1534,6 +1538,7 @@ function synchy_get_sync_state(): array
 			'last_sync_time' => synchy_get_sync_last_time(),
 			'db_fingerprints' => [],
 			'scope_sync_times' => [],
+			'file_paths' => [],
 		];
 	}
 
@@ -1544,6 +1549,7 @@ function synchy_get_sync_state(): array
 			'last_sync_time' => synchy_get_sync_last_time(),
 			'db_fingerprints' => [],
 			'scope_sync_times' => [],
+			'file_paths' => [],
 		];
 	}
 
@@ -1553,6 +1559,12 @@ function synchy_get_sync_state(): array
 		: [];
 	$decoded['scope_sync_times'] = isset($decoded['scope_sync_times']) && is_array($decoded['scope_sync_times'])
 		? array_map(static fn($value): int => max(0, (int) $value), $decoded['scope_sync_times'])
+		: [];
+	$decoded['file_paths'] = isset($decoded['file_paths']) && is_array($decoded['file_paths'])
+		? array_map(
+			static fn($paths): array => array_values(array_unique(array_filter(array_map('strval', is_array($paths) ? $paths : []), static fn(string $path): bool => $path !== ''))),
+			$decoded['file_paths']
+		)
 		: [];
 
 	return $decoded;
@@ -1903,6 +1915,9 @@ function synchy_collect_sync_file_delta(array $state, array $selected_scope_ids,
 	$total_bytes = 0;
 	$baseline_scopes = [];
 	$scope_sync_times = isset($state['scope_sync_times']) && is_array($state['scope_sync_times']) ? $state['scope_sync_times'] : [];
+	$previous_file_paths = isset($state['file_paths']) && is_array($state['file_paths']) ? $state['file_paths'] : [];
+	$current_file_paths = [];
+	$deleted_paths = [];
 
 	foreach (synchy_get_sync_file_targets($selected_scope_ids) as $target) {
 		$scope_id = (string) ($target['scope_id'] ?? '');
@@ -1932,6 +1947,10 @@ function synchy_collect_sync_file_delta(array $state, array $selected_scope_ids,
 				continue;
 			}
 
+			if ($scope_id !== '') {
+				$current_file_paths[$scope_id][] = $archive_path;
+			}
+
 			$mtime = (int) $item->getMTime();
 
 			if (!$force_full && $scope_last_sync_time > 0 && $mtime <= $scope_last_sync_time) {
@@ -1950,6 +1969,20 @@ function synchy_collect_sync_file_delta(array $state, array $selected_scope_ids,
 
 			$total_bytes += $size;
 		}
+
+		$current_scope_paths = array_values(array_unique(array_map('strval', (array) ($current_file_paths[$scope_id] ?? []))));
+		sort($current_scope_paths);
+		$current_file_paths[$scope_id] = $current_scope_paths;
+		$previous_scope_paths = array_values(array_unique(array_map('strval', (array) ($previous_file_paths[$scope_id] ?? []))));
+
+		if (!$force_full && $scope_last_sync_time > 0 && $previous_scope_paths !== []) {
+			$deleted_scope_paths = array_values(array_diff($previous_scope_paths, $current_scope_paths));
+
+			if ($deleted_scope_paths !== []) {
+				sort($deleted_scope_paths);
+				$deleted_paths[$scope_id] = $deleted_scope_paths;
+			}
+		}
 	}
 
 	usort(
@@ -1964,7 +1997,23 @@ function synchy_collect_sync_file_delta(array $state, array $selected_scope_ids,
 		'bytes' => $total_bytes,
 		'baseline_scopes' => array_keys($baseline_scopes),
 		'selected_scopes' => array_values($selected_scope_ids),
+		'current_file_paths' => $current_file_paths,
+		'deleted_paths' => $deleted_paths,
 	];
+}
+
+function synchy_get_sync_current_file_paths_by_scope(array $selected_scope_ids): array
+{
+	$delta = synchy_collect_sync_file_delta(
+		[
+			'scope_sync_times' => [],
+			'file_paths' => [],
+		],
+		$selected_scope_ids,
+		true
+	);
+
+	return (array) ($delta['current_file_paths'] ?? []);
 }
 
 function synchy_should_sync_option_name(string $option_name): bool
@@ -2479,6 +2528,7 @@ function synchy_build_sync_manifest(array $file_delta, array $db_delta, int $syn
 	global $wpdb;
 
 	$tables = [];
+	$deleted_paths = [];
 
 	foreach ($db_delta['tables'] as $table => $data) {
 		$tables[$table] = [
@@ -2525,6 +2575,22 @@ function synchy_build_sync_manifest(array $file_delta, array $db_delta, int $syn
 			'count' => (int) ($file_delta['count'] ?? 0),
 			'bytes' => (int) ($file_delta['bytes'] ?? 0),
 			'paths' => array_values(array_map(static fn(array $file): string => (string) $file['archive_path'], (array) ($file_delta['files'] ?? []))),
+			'deletedPaths' => (static function () use ($file_delta, &$deleted_paths): array {
+				foreach ((array) ($file_delta['deleted_paths'] ?? []) as $paths) {
+					foreach ((array) $paths as $path) {
+						$path = (string) $path;
+
+						if ($path !== '') {
+							$deleted_paths[] = $path;
+						}
+					}
+				}
+
+				$deleted_paths = array_values(array_unique($deleted_paths));
+				sort($deleted_paths);
+
+				return $deleted_paths;
+			})(),
 		],
 		'database' => [
 			'totalRows' => (int) ($db_delta['total_rows'] ?? 0),
@@ -2789,6 +2855,10 @@ function synchy_prepare_sync_payload(array $options, array $selection = [], bool
 			(array) ($db_delta['current_fingerprints'] ?? [])
 		),
 		'scope_sync_times' => $scope_sync_times,
+		'file_paths' => array_replace(
+			isset($state['file_paths']) && is_array($state['file_paths']) ? $state['file_paths'] : [],
+			(array) ($file_delta['current_file_paths'] ?? [])
+		),
 	];
 
 	$summary = [
@@ -2796,6 +2866,8 @@ function synchy_prepare_sync_payload(array $options, array $selection = [], bool
 		'filesCount' => (int) ($manifest['files']['count'] ?? 0),
 		'filesBytes' => (int) ($manifest['files']['bytes'] ?? 0),
 		'filePaths' => array_slice((array) ($manifest['files']['paths'] ?? []), 0, 40),
+		'deletedPaths' => array_slice((array) ($manifest['files']['deletedPaths'] ?? []), 0, 40),
+		'deletedCount' => count((array) ($manifest['files']['deletedPaths'] ?? [])),
 		'dbRows' => (int) ($manifest['database']['totalRows'] ?? 0),
 		'tableCounts' => (array) ($manifest['database']['tableCounts'] ?? []),
 		'lastSyncTime' => synchy_get_sync_last_time(),
@@ -6278,6 +6350,154 @@ function synchy_clear_sync_caches(): void
 	}
 }
 
+function synchy_is_allowed_sync_deleted_path(string $relative_path): bool
+{
+	$relative_path = ltrim(wp_normalize_path($relative_path), '/');
+
+	if ($relative_path === '' || str_contains($relative_path, '../')) {
+		return false;
+	}
+
+	foreach (['plugins/', 'themes/', 'uploads/'] as $prefix) {
+		if (str_starts_with($relative_path, $prefix)) {
+			return true;
+		}
+	}
+
+	return false;
+}
+
+function synchy_get_sync_deleted_absolute_path(string $relative_path): string
+{
+	$relative_path = ltrim(wp_normalize_path($relative_path), '/');
+
+	return synchy_is_allowed_sync_deleted_path($relative_path)
+		? wp_normalize_path(trailingslashit(WP_CONTENT_DIR) . $relative_path)
+		: '';
+}
+
+function synchy_deactivate_plugins_for_deleted_sync_path(string $relative_path): void
+{
+	$relative_path = ltrim(wp_normalize_path($relative_path), '/');
+
+	if (!str_starts_with($relative_path, 'plugins/')) {
+		return;
+	}
+
+	if (!function_exists('is_plugin_active') || !function_exists('deactivate_plugins')) {
+		require_once ABSPATH . 'wp-admin/includes/plugin.php';
+	}
+
+	$plugin_relative = ltrim(substr($relative_path, strlen('plugins/')), '/');
+
+	if ($plugin_relative === '') {
+		return;
+	}
+
+	$plugin_root = explode('/', $plugin_relative)[0] ?? '';
+
+	if ($plugin_root === '') {
+		return;
+	}
+
+	foreach ((array) get_option('active_plugins', []) as $active_plugin) {
+		$active_plugin = wp_normalize_path((string) $active_plugin);
+
+		if ($active_plugin === '') {
+			continue;
+		}
+
+		if ($active_plugin === $plugin_relative || str_starts_with($active_plugin, $plugin_root . '/')) {
+			deactivate_plugins($active_plugin, true, false);
+		}
+	}
+}
+
+function synchy_prune_empty_sync_deleted_parent_dirs(array $deleted_paths): int
+{
+	$candidate_dirs = [];
+
+	foreach ($deleted_paths as $relative_path) {
+		$relative_path = ltrim(wp_normalize_path((string) $relative_path), '/');
+
+		if (!synchy_is_allowed_sync_deleted_path($relative_path)) {
+			continue;
+		}
+
+		$dir = wp_normalize_path(dirname($relative_path));
+
+		while ($dir !== '.' && $dir !== '' && !in_array($dir, ['plugins', 'themes', 'uploads'], true)) {
+			$candidate_dirs[$dir] = true;
+			$dir = wp_normalize_path(dirname($dir));
+		}
+	}
+
+	$dirs = array_keys($candidate_dirs);
+	usort($dirs, static fn(string $left, string $right): int => strlen($right) <=> strlen($left));
+	$removed = 0;
+
+	foreach ($dirs as $relative_dir) {
+		$absolute_dir = synchy_get_sync_deleted_absolute_path($relative_dir);
+
+		if ($absolute_dir === '' || !is_dir($absolute_dir)) {
+			continue;
+		}
+
+		$items = @scandir($absolute_dir);
+
+		if ($items === false) {
+			continue;
+		}
+
+		$items = array_values(array_diff($items, ['.', '..']));
+
+		if ($items !== []) {
+			continue;
+		}
+
+		if (@rmdir($absolute_dir)) {
+			$removed++;
+		}
+	}
+
+	return $removed;
+}
+
+function synchy_apply_sync_deleted_paths(array $manifest): array|WP_Error
+{
+	$deleted_paths = array_values(array_unique(array_filter(array_map(
+		static fn($path): string => ltrim(wp_normalize_path((string) $path), '/'),
+		(array) (($manifest['files']['deletedPaths'] ?? []))
+	), static fn(string $path): bool => $path !== '')));
+	$deleted_files = 0;
+
+	foreach ($deleted_paths as $relative_path) {
+		if (!synchy_is_allowed_sync_deleted_path($relative_path)) {
+			return new WP_Error('synchy_sync_deleted_path_invalid', __('The Sync package contains an invalid deleted file path.', 'synchy'));
+		}
+
+		$absolute_path = synchy_get_sync_deleted_absolute_path($relative_path);
+
+		if ($absolute_path === '') {
+			continue;
+		}
+
+		synchy_deactivate_plugins_for_deleted_sync_path($relative_path);
+
+		if (is_file($absolute_path) && @unlink($absolute_path)) {
+			$deleted_files++;
+		}
+	}
+
+	$deleted_dirs = synchy_prune_empty_sync_deleted_parent_dirs($deleted_paths);
+
+	return [
+		'deletedFiles' => $deleted_files,
+		'deletedDirs' => $deleted_dirs,
+		'deletedPaths' => $deleted_paths,
+	];
+}
+
 function synchy_handle_remote_sync_request(WP_REST_Request $request)
 {
 	if (!class_exists('ZipArchive')) {
@@ -6351,6 +6571,11 @@ function synchy_handle_remote_sync_request(WP_REST_Request $request)
 		}
 
 		$applied_option_rows = synchy_apply_sync_option_rows((array) ($prepared_sql['optionRows'] ?? []));
+		$deleted_result = synchy_apply_sync_deleted_paths($manifest);
+
+		if (is_wp_error($deleted_result)) {
+			return new WP_Error($deleted_result->get_error_code(), $deleted_result->get_error_message(), ['status' => 400]);
+		}
 
 		$synced_at = max(0, (int) ($manifest['syncedAt'] ?? time()));
 		$files_synced = (int) ($manifest['files']['count'] ?? 0);
@@ -6368,12 +6593,15 @@ function synchy_handle_remote_sync_request(WP_REST_Request $request)
 			'at' => gmdate('c'),
 			'lastSyncTime' => $synced_at,
 			'message' => sprintf(
-				/* translators: 1: file count, 2: row count */
-				__('Applied Sync with %1$d files and %2$d DB rows on the destination site.', 'synchy'),
+				/* translators: 1: file count, 2: row count, 3: deleted file count */
+				__('Applied Sync with %1$d files, %2$d DB rows, and %3$d deleted files on the destination site.', 'synchy'),
 				$files_synced,
-				$db_rows_synced
+				$db_rows_synced,
+				(int) ($deleted_result['deletedFiles'] ?? 0)
 			),
 			'optionRowsApplied' => $applied_option_rows,
+			'deletedFiles' => (int) ($deleted_result['deletedFiles'] ?? 0),
+			'deletedDirs' => (int) ($deleted_result['deletedDirs'] ?? 0),
 		]);
 
 		synchy_clear_sync_caches();
@@ -6385,11 +6613,14 @@ function synchy_handle_remote_sync_request(WP_REST_Request $request)
 			'dbRowsSynced' => $db_rows_synced,
 			'lastSyncTime' => $synced_at,
 			'message' => sprintf(
-				/* translators: 1: file count, 2: row count */
-				__('Synced %1$d files and %2$d DB rows on the destination site.', 'synchy'),
+				/* translators: 1: file count, 2: row count, 3: deleted file count */
+				__('Synced %1$d files, %2$d DB rows, and %3$d deleted files on the destination site.', 'synchy'),
 				$files_synced,
-				$db_rows_synced
+				$db_rows_synced,
+				(int) ($deleted_result['deletedFiles'] ?? 0)
 			),
+			'deletedFiles' => (int) ($deleted_result['deletedFiles'] ?? 0),
+			'deletedDirs' => (int) ($deleted_result['deletedDirs'] ?? 0),
 		]);
 	} finally {
 		if ($meta_root !== '' && is_dir($meta_root)) {
