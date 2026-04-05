@@ -1246,6 +1246,43 @@ function freesiem_sentinel_detect_permission_denied_message(string $stdout, stri
 		|| str_contains($combined, 'eacces');
 }
 
+function freesiem_sentinel_get_nginx_backup_directory(?array $ssl_settings = null): string
+{
+	$user_space = freesiem_sentinel_get_ssl_user_space_paths($ssl_settings);
+	$logs_dir = trim((string) ($user_space['logs_dir'] ?? ''));
+	$backup_dir = $logs_dir !== '' ? $logs_dir . '/nginx-backups' : '';
+
+	if ($backup_dir !== '' && !file_exists($backup_dir)) {
+		wp_mkdir_p($backup_dir);
+	}
+
+	if ($backup_dir !== '' && file_exists($backup_dir) && function_exists('chmod')) {
+		@chmod($backup_dir, 0755);
+	}
+
+	return $backup_dir;
+}
+
+function freesiem_sentinel_create_nginx_backup(string $source_path, string $backup_type, ?array $ssl_settings = null): string
+{
+	$source_path = trim($source_path);
+	if ($source_path === '' || !file_exists($source_path)) {
+		return '';
+	}
+
+	$backup_dir = freesiem_sentinel_get_nginx_backup_directory($ssl_settings);
+	if ($backup_dir === '' || !freesiem_sentinel_path_is_writable($backup_dir)) {
+		return '';
+	}
+
+	$filename = sanitize_file_name(
+		$backup_type . '-' . basename($source_path) . '-' . gmdate('YmdHis') . '-' . substr(md5($source_path), 0, 8) . '.bak'
+	);
+	$backup_path = trailingslashit($backup_dir) . $filename;
+
+	return @copy($source_path, $backup_path) ? $backup_path : '';
+}
+
 function freesiem_sentinel_get_ssl_method_validation_items(?array $ssl_settings = null, ?array $environment = null): array
 {
 	$ssl_settings = is_array($ssl_settings) ? $ssl_settings : freesiem_sentinel_get_ssl_settings();
@@ -2621,6 +2658,7 @@ function freesiem_sentinel_apply_ssl_to_nginx(bool $enable_redirect = false): ar
 	$integration = freesiem_sentinel_detect_nginx_integration($ssl_settings, $environment, $ssl_state);
 	$executed_at = freesiem_sentinel_get_iso8601_time();
 	$preview = freesiem_sentinel_get_nginx_preview_config($integration, $enable_redirect);
+	$backup_dir = freesiem_sentinel_get_nginx_backup_directory($ssl_settings);
 	$state_updates = [
 		'nginx_integration_mode' => $integration['mode'],
 		'nginx_config_path' => (string) ($integration['target_path'] ?? ''),
@@ -2685,10 +2723,11 @@ function freesiem_sentinel_apply_ssl_to_nginx(bool $enable_redirect = false): ar
 	}
 
 	if ($had_existing_file) {
-		$backup_path = $target_path . '.freesiem-sentinel.' . gmdate('YmdHis') . '.bak';
-		if (!@copy($target_path, $backup_path)) {
+		$backup_path = freesiem_sentinel_create_nginx_backup($target_path, 'config', $ssl_settings);
+		if ($backup_path === '') {
 			$state_updates['nginx_last_apply_status'] = 'failed';
-			$state_updates['nginx_last_apply_result'] = __('Sentinel could not create an nginx config backup before writing.', 'freesiem-sentinel');
+			$state_updates['nginx_last_apply_result'] = __('Sentinel could not create an nginx config backup in user-space storage before writing.', 'freesiem-sentinel');
+			$state_updates['nginx_backup_path'] = $backup_dir;
 			freesiem_sentinel_update_ssl_state($state_updates);
 
 			return [
@@ -2697,7 +2736,7 @@ function freesiem_sentinel_apply_ssl_to_nginx(bool $enable_redirect = false): ar
 				'summary' => (string) $state_updates['nginx_last_apply_result'],
 				'preview' => $preview,
 				'integration' => $integration,
-				'backup_path' => '',
+				'backup_path' => $backup_dir,
 				'test' => null,
 				'reload' => null,
 				'executed_at' => $executed_at,
@@ -2706,8 +2745,7 @@ function freesiem_sentinel_apply_ssl_to_nginx(bool $enable_redirect = false): ar
 	}
 
 	if ($snippet_exists) {
-		$snippet_backup_path = $snippet_path . '.freesiem-sentinel.' . gmdate('YmdHis') . '.bak';
-		@copy($snippet_path, $snippet_backup_path);
+		$snippet_backup_path = freesiem_sentinel_create_nginx_backup($snippet_path, 'snippet', $ssl_settings);
 	}
 
 	if (!is_dir(dirname($snippet_path)) || !freesiem_sentinel_path_is_writable(dirname($snippet_path))) {
