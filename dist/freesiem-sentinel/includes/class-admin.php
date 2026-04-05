@@ -2076,6 +2076,7 @@ class Freesiem_Admin
 		echo '<p><strong>' . esc_html__('Matched file', 'freesiem-sentinel') . ':</strong> ' . esc_html((string) ($integration['target_path'] ?? __('Unavailable', 'freesiem-sentinel'))) . '</p>';
 		echo '<p><strong>' . esc_html__('Matched server_name', 'freesiem-sentinel') . ':</strong> ' . esc_html((string) ($integration['matched_server_name'] ?? __('Unavailable', 'freesiem-sentinel'))) . '</p>';
 		echo '<p><strong>' . esc_html__('Confidence level', 'freesiem-sentinel') . ':</strong> ' . esc_html((string) ($integration['detection_confidence'] ?? 'ambiguous')) . '</p>';
+		echo '<p><strong>' . esc_html__('Current detection result', 'freesiem-sentinel') . ':</strong> ' . esc_html((string) ($integration['detection_result'] ?? __('Unavailable', 'freesiem-sentinel'))) . '</p>';
 		echo '<p><strong>' . esc_html__('Last detection result', 'freesiem-sentinel') . ':</strong> ' . esc_html(!empty($ssl_state['nginx_last_detect_result']) ? (string) $ssl_state['nginx_last_detect_result'] : __('None yet', 'freesiem-sentinel')) . '</p>';
 		echo '<p><strong>' . esc_html__('Last apply attempt', 'freesiem-sentinel') . ':</strong> ' . esc_html($this->summary_value_or_fallback((string) ($ssl_state['nginx_last_apply_at'] ?? ''), true) . ' / ' . (!empty($ssl_state['nginx_last_apply_status']) ? (string) $ssl_state['nginx_last_apply_status'] : __('none', 'freesiem-sentinel'))) . '</p>';
 		echo '<div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:14px;">';
@@ -2097,11 +2098,11 @@ class Freesiem_Admin
 		}
 		echo '<table class="widefat striped" style="margin-bottom:14px;"><thead><tr><th>' . esc_html__('Check', 'freesiem-sentinel') . '</th><th>' . esc_html__('Status', 'freesiem-sentinel') . '</th></tr></thead><tbody>';
 		foreach ([
-			__('Nginx binary', 'freesiem-sentinel') => !empty($integration['binary_available']) ? 'PASS' : 'FAIL',
-			__('Command execution', 'freesiem-sentinel') => !empty($integration['execution_available']) ? 'PASS' : 'FAIL',
-			__('nginx -T', 'freesiem-sentinel') => !empty($integration['nginx_t_ok']) ? 'PASS' : 'WARN',
-			__('Hostname match', 'freesiem-sentinel') => !empty($integration['matched_server_name']) ? 'PASS' : 'FAIL',
-			__('Config path', 'freesiem-sentinel') => !empty($integration['target_path']) ? 'PASS' : 'FAIL',
+			__('Nginx binary', 'freesiem-sentinel') => !empty($integration['detection_checks']['binary']) ? strtoupper((string) $integration['detection_checks']['binary']) : (!empty($integration['binary_available']) ? 'PASS' : 'FAIL'),
+			__('Command execution', 'freesiem-sentinel') => !empty($integration['detection_checks']['execution']) ? strtoupper((string) $integration['detection_checks']['execution']) : (!empty($integration['execution_available']) ? 'PASS' : 'FAIL'),
+			__('Hostname', 'freesiem-sentinel') => !empty($integration['detection_checks']['hostname']) ? strtoupper((string) $integration['detection_checks']['hostname']) : (!empty($environment['configured_host']) ? 'PASS' : 'WARN'),
+			__('nginx -T', 'freesiem-sentinel') => !empty($integration['detection_checks']['nginx_t']) ? strtoupper((string) $integration['detection_checks']['nginx_t']) : (!empty($integration['nginx_t_ok']) ? 'PASS' : 'WARN'),
+			__('Parsing / config path', 'freesiem-sentinel') => !empty($integration['detection_checks']['parsing']) ? strtoupper((string) $integration['detection_checks']['parsing']) : (!empty($integration['target_path']) ? 'PASS' : 'FAIL'),
 		] as $label => $status) {
 			echo '<tr><td>' . esc_html($label) . '</td><td><span style="' . esc_attr($this->ssl_preflight_badge_style($status)) . '">' . esc_html($status) . '</span></td></tr>';
 		}

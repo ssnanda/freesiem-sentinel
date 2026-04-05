@@ -1436,6 +1436,22 @@ function freesiem_sentinel_detect_binary(string $binary): array
 	$result = freesiem_sentinel_run_ssl_shell_command('command -v ' . escapeshellarg($binary), 'detect_binary_' . sanitize_key($binary), 15, 'command -v ' . $binary);
 	$path = trim((string) ($result['stdout_summary'] ?? ''));
 
+	if ($path === '') {
+		$common_paths = match ($binary) {
+			'nginx' => ['/usr/sbin/nginx', '/usr/bin/nginx', '/usr/local/sbin/nginx', '/usr/local/bin/nginx'],
+			'certbot' => ['/usr/bin/certbot', '/usr/local/bin/certbot', '/snap/bin/certbot'],
+			'openssl' => ['/usr/bin/openssl', '/usr/local/bin/openssl', '/opt/homebrew/bin/openssl'],
+			default => [],
+		};
+
+		foreach ($common_paths as $common_path) {
+			if (is_file($common_path) && is_executable($common_path)) {
+				$path = $common_path;
+				break;
+			}
+		}
+	}
+
 	return [
 		'available' => $path !== '',
 		'path' => $path,
@@ -2152,7 +2168,22 @@ function freesiem_sentinel_detect_active_nginx_config(?array $ssl_settings = nul
 	$host = strtolower(trim((string) ($environment['configured_host'] ?? '')));
 	$executed_at = freesiem_sentinel_get_iso8601_time();
 
-	if (empty($environment['execution_support']) || empty($nginx_binary['available']) || $host === '') {
+	$checks = [
+		'binary' => !empty($nginx_binary['available']) ? 'pass' : 'fail',
+		'execution' => !empty($environment['execution_support']) ? 'pass' : 'fail',
+		'hostname' => $host !== '' ? 'pass' : 'warn',
+		'nginx_t' => 'fail',
+		'parsing' => 'fail',
+	];
+	$failure_reasons = [];
+	if (empty($environment['execution_support'])) {
+		$failure_reasons[] = __('PHP command execution support is unavailable.', 'freesiem-sentinel');
+	}
+	if (empty($nginx_binary['available'])) {
+		$failure_reasons[] = __('The nginx binary could not be found in PATH or common locations.', 'freesiem-sentinel');
+	}
+
+	if ($failure_reasons !== []) {
 		$result = [
 			'source' => 'nginx_t',
 			'binary_available' => !empty($nginx_binary['available']),
@@ -2162,16 +2193,10 @@ function freesiem_sentinel_detect_active_nginx_config(?array $ssl_settings = nul
 			'confidence' => 'ambiguous',
 			'matched_server_name' => '',
 			'file_path' => '',
-			'result' => __('Active nginx config detection is unavailable because nginx execution support or hostname detection is missing.', 'freesiem-sentinel'),
+			'result' => implode(' ', $failure_reasons),
 			'output_summary' => '',
 			'executed_at' => $executed_at,
-			'checks' => [
-				'binary' => !empty($nginx_binary['available']) ? 'pass' : 'fail',
-				'execution' => !empty($environment['execution_support']) ? 'pass' : 'fail',
-				'hostname' => $host !== '' ? 'pass' : 'fail',
-				'nginx_t' => 'fail',
-				'parsing' => 'fail',
-			],
+			'checks' => $checks,
 		];
 		if ($persist) {
 			freesiem_sentinel_update_ssl_state([
@@ -2191,8 +2216,20 @@ function freesiem_sentinel_detect_active_nginx_config(?array $ssl_settings = nul
 	$runtime = freesiem_sentinel_run_ssl_shell_command($command, 'nginx_detect', 120, 'nginx -T');
 	$output = trim((string) (($runtime['stdout_summary'] ?? '') . "\n" . ($runtime['stderr_summary'] ?? '')));
 	$blocks = freesiem_sentinel_parse_nginx_runtime_config($output);
-	$selection = freesiem_sentinel_select_nginx_server_block($blocks, $host);
+	$checks['nginx_t'] = !empty($runtime['success']) ? 'pass' : 'warn';
+	if ($host === '') {
+		$selection = [
+			'confidence' => 'ambiguous',
+			'matched_server_name' => '',
+			'file_path' => '',
+			'block' => null,
+			'result' => __('nginx -T ran, but no hostname was available to match against the active config.', 'freesiem-sentinel'),
+		];
+	} else {
+		$selection = freesiem_sentinel_select_nginx_server_block($blocks, $host);
+	}
 	$file_path = freesiem_sentinel_is_allowed_nginx_config_path((string) ($selection['file_path'] ?? '')) ? (string) $selection['file_path'] : '';
+	$checks['parsing'] = $file_path !== '' ? 'pass' : 'fail';
 
 	$result = [
 		'source' => 'nginx_t',
@@ -2206,13 +2243,7 @@ function freesiem_sentinel_detect_active_nginx_config(?array $ssl_settings = nul
 		'result' => (string) ($selection['result'] ?? __('Nginx detection completed.', 'freesiem-sentinel')),
 		'output_summary' => freesiem_sentinel_summarize_ssl_command_output($output),
 		'executed_at' => $executed_at,
-		'checks' => [
-			'binary' => !empty($nginx_binary['available']) ? 'pass' : 'fail',
-			'execution' => !empty($environment['execution_support']) ? 'pass' : 'fail',
-			'hostname' => $host !== '' ? 'pass' : 'fail',
-			'nginx_t' => !empty($runtime['success']) ? 'pass' : 'warn',
-			'parsing' => $file_path !== '' ? 'pass' : 'fail',
-		],
+		'checks' => $checks,
 	];
 
 	if ($persist) {
@@ -2310,9 +2341,18 @@ function freesiem_sentinel_detect_nginx_integration(?array $ssl_settings = null,
 		$target_exists = true;
 		$contents = is_readable($candidate) ? (string) file_get_contents($candidate) : '';
 		$target_is_managed = str_contains($contents, '# BEGIN freeSIEM Sentinel Nginx SSL');
+		$basename = strtolower((string) pathinfo($candidate, PATHINFO_FILENAME));
+		$candidate_matches_host = $host !== '' && (str_contains($basename, strtolower($host)) || str_contains(strtolower($candidate), '/' . strtolower($host)));
 		if ($target_is_managed) {
 			$mode = 'patch';
 			$reason = __('Sentinel-managed nginx config detected and can be updated safely.', 'freesiem-sentinel');
+			$confidence = $confidence === 'ambiguous' ? 'probable' : $confidence;
+			$matched_server_name = $matched_server_name !== '' ? $matched_server_name : $host;
+		} elseif ($candidate_matches_host) {
+			$mode = 'patch';
+			$reason = __('A domain-matched nginx site config file was found and can be patched automatically.', 'freesiem-sentinel');
+			$confidence = $confidence === 'ambiguous' ? 'probable' : $confidence;
+			$matched_server_name = $matched_server_name !== '' ? $matched_server_name : $host;
 		} else {
 			$mode = 'manual_required';
 			$reason = __('An existing nginx site config was detected, so Sentinel is staying in preview/manual mode for safety.', 'freesiem-sentinel');
