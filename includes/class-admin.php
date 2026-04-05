@@ -46,6 +46,7 @@ class Freesiem_Admin
 		add_action('admin_post_freesiem_sentinel_run_ssl_dry_run', [$this, 'handle_run_ssl_dry_run']);
 		add_action('admin_post_freesiem_sentinel_issue_ssl_certificate', [$this, 'handle_issue_ssl_certificate']);
 		add_action('admin_post_freesiem_sentinel_renew_ssl_certificate', [$this, 'handle_renew_ssl_certificate']);
+		add_action('admin_post_freesiem_sentinel_apply_ssl_to_nginx', [$this, 'handle_apply_ssl_to_nginx']);
 		add_action('admin_post_freesiem_sentinel_install_certbot', [$this, 'handle_install_certbot']);
 	}
 
@@ -519,6 +520,45 @@ class Freesiem_Admin
 			$notice_level = 'warning';
 		}
 		freesiem_sentinel_set_notice($notice_level, (string) ($result['summary'] ?? __('Certificate renewal completed.', 'freesiem-sentinel')));
+		$this->redirect_to_page('freesiem-ssl', ['tab' => 'overview']);
+	}
+
+	public function handle_apply_ssl_to_nginx(): void
+	{
+		$this->assert_manage_permissions();
+		freesiem_sentinel_require_admin_post_nonce();
+
+		$enable_redirect = !empty($_POST['enable_nginx_https_redirect']);
+		freesiem_sentinel_add_ssl_log('info', __('Apply SSL to nginx was requested from wp-admin.', 'freesiem-sentinel'), 'nginx_apply_request', [
+			'redirect_enabled' => $enable_redirect ? 'yes' : 'no',
+		]);
+
+		$result = freesiem_sentinel_apply_ssl_to_nginx($enable_redirect);
+		freesiem_sentinel_add_ssl_log($this->ssl_result_log_level((string) ($result['status'] ?? 'failed')), (string) ($result['summary'] ?? __('Nginx SSL apply completed.', 'freesiem-sentinel')), 'nginx_apply', [
+			'status' => (string) ($result['status'] ?? 'failed'),
+			'target_path' => (string) (($result['integration']['target_path'] ?? '')),
+			'backup_path' => (string) ($result['backup_path'] ?? ''),
+		]);
+
+		if (!empty($result['test'])) {
+			freesiem_sentinel_add_ssl_log(!empty($result['test']['success']) ? 'success' : 'error', !empty($result['test']['success']) ? __('Nginx syntax test passed.', 'freesiem-sentinel') : __('Nginx syntax test failed.', 'freesiem-sentinel'), 'nginx_test', [
+				'result' => !empty($result['test']['stderr_summary']) ? (string) $result['test']['stderr_summary'] : (string) ($result['test']['stdout_summary'] ?? ''),
+			]);
+		}
+
+		if (!empty($result['reload'])) {
+			freesiem_sentinel_add_ssl_log(!empty($result['reload']['success']) ? 'success' : 'error', !empty($result['reload']['success']) ? __('Nginx reload completed.', 'freesiem-sentinel') : __('Nginx reload failed.', 'freesiem-sentinel'), 'nginx_reload', [
+				'result' => !empty($result['reload']['stderr_summary']) ? (string) $result['reload']['stderr_summary'] : (string) ($result['reload']['stdout_summary'] ?? ''),
+			]);
+		}
+
+		$notice = (string) ($result['summary'] ?? __('Nginx SSL apply completed.', 'freesiem-sentinel'));
+		if (!empty($result['success']) && !is_ssl() && strtolower((string) wp_parse_url(home_url('/'), PHP_URL_SCHEME)) !== 'https') {
+			$notice .= ' ' . __('SSL is active at nginx, but WordPress URLs still need to be switched to HTTPS manually or in a later phase.', 'freesiem-sentinel');
+		}
+
+		$notice_level = !empty($result['success']) ? 'success' : (((string) ($result['status'] ?? '') === 'manual_required') ? 'warning' : 'error');
+		freesiem_sentinel_set_notice($notice_level, $notice);
 		$this->redirect_to_page('freesiem-ssl', ['tab' => 'overview']);
 	}
 
@@ -1130,7 +1170,7 @@ class Freesiem_Admin
 
 		echo '<div class="wrap">';
 		echo '<h1>' . esc_html__('SSL / HTTPS', 'freesiem-sentinel') . '</h1>';
-		echo '<div class="notice notice-warning inline"><p>' . esc_html__('Phase 3 adds explicit admin-triggered certbot execution for issuance and renewal. Force HTTPS and HSTS still remain inactive, and this version still does not write Apache or nginx configuration automatically.', 'freesiem-sentinel') . '</p></div>';
+		echo '<div class="notice notice-warning inline"><p>' . esc_html__('Sentinel now supports explicit admin-triggered certbot actions and optional nginx SSL apply. Force HTTPS and HSTS still remain inactive, and Apache automation is still not included in this version.', 'freesiem-sentinel') . '</p></div>';
 		echo '<nav class="nav-tab-wrapper" style="margin-bottom:20px;">';
 		foreach ([
 			'overview' => __('Overview', 'freesiem-sentinel'),
@@ -1928,6 +1968,9 @@ class Freesiem_Admin
 		$this->render_detail_row(__('Certbot logs dir', 'freesiem-sentinel'), $user_space_logs !== '' ? $user_space_logs : __('Unavailable', 'freesiem-sentinel'));
 		$this->render_detail_row(__('Certificate path summary', 'freesiem-sentinel'), trim(implode(' | ', array_filter([(string) ($ssl_state['cert_path'] ?? ''), (string) ($ssl_state['fullchain_path'] ?? ''), (string) ($ssl_state['privkey_path'] ?? '')]))));
 		$this->render_detail_row(__('Expiry summary', 'freesiem-sentinel'), !empty($ssl_state['expires_at']) ? (string) $ssl_state['expires_at'] : __('Unavailable', 'freesiem-sentinel'));
+		$this->render_detail_row(__('Nginx integration mode', 'freesiem-sentinel'), !empty($ssl_state['nginx_integration_mode']) ? (string) $ssl_state['nginx_integration_mode'] : __('preview_only', 'freesiem-sentinel'));
+		$this->render_detail_row(__('Nginx config path', 'freesiem-sentinel'), !empty($ssl_state['nginx_config_path']) ? (string) $ssl_state['nginx_config_path'] : __('Unavailable', 'freesiem-sentinel'));
+		$this->render_detail_row(__('Nginx backup path', 'freesiem-sentinel'), !empty($ssl_state['nginx_backup_path']) ? (string) $ssl_state['nginx_backup_path'] : __('None yet', 'freesiem-sentinel'));
 		$this->render_detail_row(__('SSL feature mode', 'freesiem-sentinel'), __('manual-live-actions', 'freesiem-sentinel'));
 		echo '</tbody></table>';
 		echo '</div>';
@@ -1991,8 +2034,50 @@ class Freesiem_Admin
 		echo '<p><strong>' . esc_html__('Available install method', 'freesiem-sentinel') . ':</strong> ' . esc_html(!empty($install_environment['install_method']) ? strtoupper((string) $install_environment['install_method']) : __('Unsupported / manual only', 'freesiem-sentinel')) . '</p>';
 		$this->render_ssl_install_section($environment, $install_environment, $install_gate);
 		echo '</div>';
+
+		echo '<div style="background:#fff;padding:20px;border:1px solid #dcdcde;border-radius:12px;">';
+		$this->render_ssl_nginx_section($ssl_settings, $environment, $ssl_state);
 		echo '</div>';
 		echo '</div>';
+		echo '</div>';
+	}
+
+	private function render_ssl_nginx_section(array $ssl_settings, array $environment, array $ssl_state): void
+	{
+		$integration = freesiem_sentinel_detect_nginx_integration($ssl_settings, $environment, $ssl_state);
+		$preview_without_redirect = freesiem_sentinel_get_nginx_preview_config($integration, false);
+		$preview_with_redirect = freesiem_sentinel_get_nginx_preview_config($integration, true);
+
+		echo '<h2 style="margin-top:0;">' . esc_html__('Nginx Integration', 'freesiem-sentinel') . '</h2>';
+		echo '<p><strong>' . esc_html__('Detection result', 'freesiem-sentinel') . ':</strong> ' . esc_html((string) ($integration['reason'] ?? __('Unavailable', 'freesiem-sentinel'))) . '</p>';
+		echo '<p><strong>' . esc_html__('Target file path', 'freesiem-sentinel') . ':</strong> ' . esc_html((string) ($integration['target_path'] ?? __('Unavailable', 'freesiem-sentinel'))) . '</p>';
+		echo '<p><strong>' . esc_html__('Detected cert path', 'freesiem-sentinel') . ':</strong> ' . esc_html((string) ($integration['fullchain_path'] ?? __('Unavailable', 'freesiem-sentinel'))) . '</p>';
+		echo '<p><strong>' . esc_html__('Detected key path', 'freesiem-sentinel') . ':</strong> ' . esc_html((string) ($integration['privkey_path'] ?? __('Unavailable', 'freesiem-sentinel'))) . '</p>';
+		echo '<p><strong>' . esc_html__('Last apply attempt', 'freesiem-sentinel') . ':</strong> ' . esc_html($this->summary_value_or_fallback((string) ($ssl_state['nginx_last_apply_at'] ?? ''), true) . ' / ' . (!empty($ssl_state['nginx_last_apply_status']) ? (string) $ssl_state['nginx_last_apply_status'] : __('none', 'freesiem-sentinel'))) . '</p>';
+		echo '<p><strong>' . esc_html__('Last nginx test result', 'freesiem-sentinel') . ':</strong> ' . esc_html(!empty($ssl_state['nginx_last_test_result']) ? (string) $ssl_state['nginx_last_test_result'] : __('None yet', 'freesiem-sentinel')) . '</p>';
+		echo '<p><strong>' . esc_html__('Last nginx reload result', 'freesiem-sentinel') . ':</strong> ' . esc_html(!empty($ssl_state['nginx_last_reload_result']) ? (string) $ssl_state['nginx_last_reload_result'] : __('None yet', 'freesiem-sentinel')) . '</p>';
+		echo '<p><strong>' . esc_html__('Current mode', 'freesiem-sentinel') . ':</strong> ' . esc_html(!empty($ssl_state['nginx_integration_mode']) ? (string) $ssl_state['nginx_integration_mode'] : (string) ($integration['mode'] ?? 'preview_only')) . '</p>';
+		echo '<div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:14px;">';
+		echo '<a class="button" href="#freesiem-sentinel-nginx-preview">' . esc_html__('Preview Nginx SSL Config', 'freesiem-sentinel') . '</a>';
+		echo '<form method="post" action="' . esc_url(admin_url('admin-post.php')) . '" style="margin:0;display:grid;gap:8px;">';
+		wp_nonce_field(FREESIEM_SENTINEL_NONCE_ACTION);
+		echo '<input type="hidden" name="action" value="freesiem_sentinel_apply_ssl_to_nginx" />';
+		echo '<label><input type="checkbox" name="enable_nginx_https_redirect" value="1" /> ' . esc_html__('Enable HTTP -> HTTPS redirect', 'freesiem-sentinel') . '</label>';
+		submit_button(__('Apply SSL to Nginx', 'freesiem-sentinel'), 'secondary', '', false, !empty($integration['apply_allowed']) ? [] : ['disabled' => 'disabled']);
+		echo '</form>';
+		echo '</div>';
+		if (empty($integration['apply_allowed'])) {
+			echo '<p><strong>' . esc_html__('Apply gate', 'freesiem-sentinel') . ':</strong> ' . esc_html((string) ($integration['reason'] ?? __('Automatic nginx apply is unavailable.', 'freesiem-sentinel'))) . '</p>';
+		}
+		echo '<div id="freesiem-sentinel-nginx-preview" style="margin-top:16px;">';
+		echo '<p><strong>' . esc_html__('Preview without redirect', 'freesiem-sentinel') . ':</strong></p>';
+		echo '<pre style="white-space:pre-wrap;overflow:auto;">' . esc_html($preview_without_redirect) . '</pre>';
+		echo '<p><strong>' . esc_html__('Preview with redirect', 'freesiem-sentinel') . ':</strong></p>';
+		echo '<pre style="white-space:pre-wrap;overflow:auto;">' . esc_html($preview_with_redirect) . '</pre>';
+		echo '</div>';
+		echo '<p><strong>' . esc_html__('Manual fallback', 'freesiem-sentinel') . ':</strong></p>';
+		echo '<p style="margin-bottom:6px;color:#646970;">' . esc_html__('If automatic patching is not safe, copy the preview into your nginx site config, then run these commands manually.', 'freesiem-sentinel') . '</p>';
+		echo '<pre style="white-space:pre-wrap;overflow:auto;">' . esc_html((string) ($integration['test_command'] ?? 'nginx -t') . "\n" . (string) ($integration['reload_command'] ?? 'nginx -s reload')) . '</pre>';
 	}
 
 	private function render_ssl_preflight_tab(array $preflight): void
@@ -2305,8 +2390,8 @@ class Freesiem_Admin
 	private function ssl_result_log_level(string $status): string
 	{
 		return match (sanitize_key($status)) {
-			'success' => 'success',
-			'warning', 'warn', 'blocked', 'no_action_needed' => 'warning',
+			'success', 'applied' => 'success',
+			'warning', 'warn', 'blocked', 'no_action_needed', 'manual_required' => 'warning',
 			default => 'error',
 		};
 	}
