@@ -404,6 +404,11 @@ function freesiem_sentinel_get_default_ssl_state(): array
 		'nginx_last_test_result' => '',
 		'nginx_last_reload_result' => '',
 		'nginx_redirect_enabled' => 0,
+		'nginx_detection_source' => '',
+		'nginx_matched_server_name' => '',
+		'nginx_detection_confidence' => '',
+		'nginx_last_detect_result' => '',
+		'nginx_last_detect_at' => '',
 		'issued_at' => '',
 		'expires_at' => '',
 		'last_issue_status' => '',
@@ -475,6 +480,11 @@ function freesiem_sentinel_sanitize_ssl_state(array $state): array
 	$state['nginx_last_test_result'] = sanitize_text_field((string) ($state['nginx_last_test_result'] ?? ''));
 	$state['nginx_last_reload_result'] = sanitize_text_field((string) ($state['nginx_last_reload_result'] ?? ''));
 	$state['nginx_redirect_enabled'] = empty($state['nginx_redirect_enabled']) ? 0 : 1;
+	$state['nginx_detection_source'] = sanitize_key((string) ($state['nginx_detection_source'] ?? ''));
+	$state['nginx_matched_server_name'] = sanitize_text_field((string) ($state['nginx_matched_server_name'] ?? ''));
+	$state['nginx_detection_confidence'] = sanitize_key((string) ($state['nginx_detection_confidence'] ?? ''));
+	$state['nginx_last_detect_result'] = sanitize_text_field((string) ($state['nginx_last_detect_result'] ?? ''));
+	$state['nginx_last_detect_at'] = freesiem_sentinel_sanitize_datetime((string) ($state['nginx_last_detect_at'] ?? ''));
 	$state['issued_at'] = freesiem_sentinel_sanitize_datetime((string) ($state['issued_at'] ?? ''));
 	$state['expires_at'] = freesiem_sentinel_sanitize_datetime((string) ($state['expires_at'] ?? ''));
 	$state['last_issue_status'] = sanitize_key((string) ($state['last_issue_status'] ?? ''));
@@ -1969,6 +1979,215 @@ function freesiem_sentinel_get_nginx_config_candidates(string $host, array $ssl_
 	return array_values(array_unique(array_filter($candidates, 'freesiem_sentinel_is_allowed_nginx_config_path')));
 }
 
+function freesiem_sentinel_get_nginx_ssl_snippet_path(string $host): string
+{
+	$host = sanitize_key(str_replace('.', '-', strtolower(trim($host))));
+
+	return '/etc/nginx/snippets/freesiem-' . $host . '-ssl.conf';
+}
+
+function freesiem_sentinel_parse_nginx_runtime_config(string $output): array
+{
+	$lines = preg_split("/\r\n|\n|\r/", $output) ?: [];
+	$current_file = '';
+	$blocks = [];
+	$in_server = false;
+	$server_depth = 0;
+	$brace_depth = 0;
+	$server_lines = [];
+	$server_names = [];
+
+	foreach ($lines as $line) {
+		if (preg_match('/^# configuration file (.+?):\s*$/', trim($line), $matches)) {
+			$current_file = trim($matches[1]);
+		}
+
+		if (!$in_server && preg_match('/^\s*server\s*\{/', $line)) {
+			$in_server = true;
+			$server_depth = $brace_depth;
+			$server_lines = [$line];
+			$server_names = [];
+		} elseif ($in_server) {
+			$server_lines[] = $line;
+		}
+
+		if ($in_server && preg_match('/^\s*server_name\s+(.+?);/', trim($line), $matches)) {
+			$names = preg_split('/\s+/', trim($matches[1])) ?: [];
+			foreach ($names as $name) {
+				if ($name !== '') {
+					$server_names[] = strtolower(trim($name));
+				}
+			}
+		}
+
+		$open_count = substr_count($line, '{');
+		$close_count = substr_count($line, '}');
+		$brace_depth += $open_count - $close_count;
+
+		if ($in_server && $brace_depth <= $server_depth) {
+			$blocks[] = [
+				'file_path' => $current_file,
+				'server_names' => array_values(array_unique($server_names)),
+				'content' => implode("\n", $server_lines),
+			];
+			$in_server = false;
+			$server_lines = [];
+			$server_names = [];
+		}
+	}
+
+	return $blocks;
+}
+
+function freesiem_sentinel_select_nginx_server_block(array $blocks, string $host): array
+{
+	$host = strtolower(trim($host));
+	$www_host = str_starts_with($host, 'www.') ? $host : 'www.' . $host;
+	$matches = [];
+
+	foreach ($blocks as $index => $block) {
+		if (!is_array($block) || empty($block['file_path']) || !freesiem_sentinel_is_allowed_nginx_config_path((string) $block['file_path'])) {
+			continue;
+		}
+
+		$names = array_map('strtolower', (array) ($block['server_names'] ?? []));
+		$score = 0;
+		$confidence = 'ambiguous';
+		$matched_name = '';
+
+		if (in_array($host, $names, true)) {
+			$score = 400;
+			$confidence = 'exact';
+			$matched_name = $host;
+		} elseif (in_array($www_host, $names, true)) {
+			$score = 350;
+			$confidence = 'exact';
+			$matched_name = $www_host;
+		} elseif (in_array($host, $names, true) && in_array($www_host, $names, true)) {
+			$score = 390;
+			$confidence = 'exact';
+			$matched_name = $host . ', ' . $www_host;
+		} else {
+			foreach ($names as $name) {
+				if ($name === '*') {
+					$score = max($score, 100);
+					$confidence = 'probable';
+					$matched_name = $name;
+				} elseif (str_starts_with($name, '*.')) {
+					$suffix = substr($name, 1);
+					if ($suffix !== '' && str_ends_with($host, $suffix)) {
+						$score = max($score, 150);
+						$confidence = 'probable';
+						$matched_name = $name;
+					}
+				}
+			}
+		}
+
+		if ($score > 0) {
+			$matches[] = [
+				'index' => $index,
+				'score' => $score,
+				'confidence' => $confidence,
+				'matched_server_name' => $matched_name,
+				'block' => $block,
+			];
+		}
+	}
+
+	if ($matches === []) {
+		return [
+			'confidence' => 'ambiguous',
+			'matched_server_name' => '',
+			'file_path' => '',
+			'block' => null,
+			'result' => __('No active nginx server block match was found in nginx -T output.', 'freesiem-sentinel'),
+		];
+	}
+
+	usort($matches, static function ($left, $right) {
+		return ((int) $right['score']) <=> ((int) $left['score']);
+	});
+
+	$best = $matches[0];
+	$second = $matches[1] ?? null;
+	$is_ambiguous = $second !== null && (int) $best['score'] === (int) $second['score'];
+
+	return [
+		'confidence' => $is_ambiguous ? 'ambiguous' : (string) $best['confidence'],
+		'matched_server_name' => $is_ambiguous ? '' : (string) $best['matched_server_name'],
+		'file_path' => $is_ambiguous ? '' : (string) ($best['block']['file_path'] ?? ''),
+		'block' => $is_ambiguous ? null : $best['block'],
+		'result' => $is_ambiguous
+			? __('Multiple nginx server blocks matched with equal confidence in nginx -T output.', 'freesiem-sentinel')
+			: sprintf(__('Nginx -T matched `%1$s` in `%2$s`.', 'freesiem-sentinel'), (string) $best['matched_server_name'], (string) ($best['block']['file_path'] ?? '')),
+	];
+}
+
+function freesiem_sentinel_detect_active_nginx_config(?array $ssl_settings = null, ?array $environment = null, ?array $ssl_state = null, bool $persist = true): array
+{
+	$ssl_settings = is_array($ssl_settings) ? $ssl_settings : freesiem_sentinel_get_ssl_settings();
+	$environment = is_array($environment) ? $environment : freesiem_sentinel_get_ssl_environment_snapshot($ssl_settings);
+	$ssl_state = is_array($ssl_state) ? $ssl_state : freesiem_sentinel_get_ssl_state();
+	$nginx_binary = freesiem_sentinel_detect_binary('nginx');
+	$host = strtolower(trim((string) ($environment['configured_host'] ?? '')));
+	$executed_at = freesiem_sentinel_get_iso8601_time();
+
+	if (empty($environment['execution_support']) || empty($nginx_binary['available']) || $host === '') {
+		$result = [
+			'source' => 'nginx_t',
+			'confidence' => 'ambiguous',
+			'matched_server_name' => '',
+			'file_path' => '',
+			'result' => __('Active nginx config detection is unavailable because nginx execution support or hostname detection is missing.', 'freesiem-sentinel'),
+			'output_summary' => '',
+			'executed_at' => $executed_at,
+		];
+		if ($persist) {
+			freesiem_sentinel_update_ssl_state([
+				'nginx_detection_source' => 'nginx_t',
+				'nginx_detection_confidence' => 'ambiguous',
+				'nginx_matched_server_name' => '',
+				'nginx_config_path' => '',
+				'nginx_last_detect_result' => (string) $result['result'],
+				'nginx_last_detect_at' => $executed_at,
+			]);
+		}
+
+		return $result;
+	}
+
+	$command = escapeshellarg((string) $nginx_binary['path']) . ' -T';
+	$runtime = freesiem_sentinel_run_ssl_shell_command($command, 'nginx_detect', 120, 'nginx -T');
+	$output = trim((string) (($runtime['stdout_summary'] ?? '') . "\n" . ($runtime['stderr_summary'] ?? '')));
+	$blocks = freesiem_sentinel_parse_nginx_runtime_config($output);
+	$selection = freesiem_sentinel_select_nginx_server_block($blocks, $host);
+	$file_path = freesiem_sentinel_is_allowed_nginx_config_path((string) ($selection['file_path'] ?? '')) ? (string) $selection['file_path'] : '';
+
+	$result = [
+		'source' => 'nginx_t',
+		'confidence' => (string) ($selection['confidence'] ?? 'ambiguous'),
+		'matched_server_name' => (string) ($selection['matched_server_name'] ?? ''),
+		'file_path' => $file_path,
+		'result' => (string) ($selection['result'] ?? __('Nginx detection completed.', 'freesiem-sentinel')),
+		'output_summary' => freesiem_sentinel_summarize_ssl_command_output($output),
+		'executed_at' => $executed_at,
+	];
+
+	if ($persist) {
+		freesiem_sentinel_update_ssl_state([
+			'nginx_detection_source' => 'nginx_t',
+			'nginx_detection_confidence' => (string) $result['confidence'],
+			'nginx_matched_server_name' => (string) $result['matched_server_name'],
+			'nginx_config_path' => $file_path !== '' ? $file_path : (string) ($ssl_state['nginx_config_path'] ?? ''),
+			'nginx_last_detect_result' => (string) $result['result'],
+			'nginx_last_detect_at' => $executed_at,
+		]);
+	}
+
+	return $result;
+}
+
 function freesiem_sentinel_get_nginx_preview_config(array $integration, bool $enable_redirect = false): string
 {
 	$host = (string) ($integration['host'] ?? 'example.com');
@@ -2016,14 +2235,32 @@ function freesiem_sentinel_detect_nginx_integration(?array $ssl_settings = null,
 	$privkey_path = (string) ($ssl_state['privkey_path'] ?? '');
 	$fullchain_exists = $fullchain_path !== '' && file_exists($fullchain_path);
 	$privkey_exists = $privkey_path !== '' && file_exists($privkey_path);
+	$detection = freesiem_sentinel_detect_active_nginx_config($ssl_settings, $environment, $ssl_state, false);
 	$candidates = freesiem_sentinel_get_nginx_config_candidates($host, $ssl_state);
-	$target_path = '';
+	$target_path = (string) ($detection['file_path'] ?? '');
 	$target_exists = false;
 	$target_is_managed = false;
 	$mode = 'manual_required';
-	$reason = __('Automatic nginx patching is only available for a Sentinel-managed config target.', 'freesiem-sentinel');
+	$reason = (string) ($detection['result'] ?? __('Automatic nginx patching requires nginx detection.', 'freesiem-sentinel'));
+	$confidence = (string) ($detection['confidence'] ?? 'ambiguous');
+	$matched_server_name = (string) ($detection['matched_server_name'] ?? '');
+
+	if ($target_path !== '' && file_exists($target_path)) {
+		$target_exists = true;
+		$contents = is_readable($target_path) ? (string) file_get_contents($target_path) : '';
+		$target_is_managed = str_contains($contents, 'include ' . freesiem_sentinel_get_nginx_ssl_snippet_path($host) . ';') || str_contains($contents, '# BEGIN freeSIEM Sentinel');
+		if (in_array($confidence, ['exact', 'probable'], true)) {
+			$mode = 'patch';
+			$reason = $confidence === 'exact'
+				? __('Nginx -T found an exact active config match, so auto patch mode is enabled.', 'freesiem-sentinel')
+				: __('Nginx -T found a probable active config match, so auto patch mode is enabled.', 'freesiem-sentinel');
+		}
+	}
 
 	foreach ($candidates as $candidate) {
+		if ($target_path !== '') {
+			break;
+		}
 		if (!file_exists($candidate)) {
 			continue;
 		}
@@ -2073,6 +2310,11 @@ function freesiem_sentinel_detect_nginx_integration(?array $ssl_settings = null,
 		'mode' => $mode,
 		'apply_allowed' => $apply_allowed,
 		'reason' => $reason,
+		'detection_source' => (string) ($detection['source'] ?? 'nginx_t'),
+		'detection_confidence' => $confidence,
+		'matched_server_name' => $matched_server_name,
+		'detection_result' => (string) ($detection['result'] ?? ''),
+		'detection_output_summary' => (string) ($detection['output_summary'] ?? ''),
 		'test_command' => (!empty($nginx_binary['path']) ? $nginx_binary['path'] : 'nginx') . ' -t',
 		'reload_command' => (!empty($nginx_binary['path']) ? $nginx_binary['path'] : 'nginx') . ' -s reload',
 	];
@@ -2093,6 +2335,9 @@ function freesiem_sentinel_apply_ssl_to_nginx(bool $enable_redirect = false): ar
 		'nginx_key_path' => (string) ($integration['privkey_path'] ?? ''),
 		'nginx_last_apply_at' => $executed_at,
 		'nginx_redirect_enabled' => $enable_redirect ? 1 : 0,
+		'nginx_detection_source' => (string) ($integration['detection_source'] ?? 'nginx_t'),
+		'nginx_matched_server_name' => (string) ($integration['matched_server_name'] ?? ''),
+		'nginx_detection_confidence' => (string) ($integration['detection_confidence'] ?? 'ambiguous'),
 	];
 
 	if (empty($integration['apply_allowed'])) {
@@ -2117,7 +2362,34 @@ function freesiem_sentinel_apply_ssl_to_nginx(bool $enable_redirect = false): ar
 	$backup_path = '';
 	$existing_contents = file_exists($target_path) ? (string) file_get_contents($target_path) : '';
 	$had_existing_file = file_exists($target_path);
-	$managed_content = "# BEGIN freeSIEM Sentinel Nginx SSL\n" . $preview . "\n# END freeSIEM Sentinel Nginx SSL\n";
+	$snippet_path = freesiem_sentinel_get_nginx_ssl_snippet_path((string) ($integration['host'] ?? 'site'));
+	$snippet_backup_path = '';
+	$snippet_exists = file_exists($snippet_path);
+	$snippet_content = "# BEGIN freeSIEM Sentinel Nginx SSL\n";
+	$snippet_content .= "listen 443 ssl;\n";
+	$snippet_content .= 'ssl_certificate ' . (string) ($integration['fullchain_path'] ?? '') . ";\n";
+	$snippet_content .= 'ssl_certificate_key ' . (string) ($integration['privkey_path'] ?? '') . ";\n";
+	if ($enable_redirect) {
+		$snippet_content .= "if (\$scheme = http) { return 301 https://\$host\$request_uri; }\n";
+	}
+	$snippet_content .= "# END freeSIEM Sentinel Nginx SSL\n";
+
+	$include_line = 'include ' . $snippet_path . ';';
+	$patched_contents = $existing_contents;
+	if (!str_contains($patched_contents, $include_line)) {
+		$server_name_pattern = '/(server_name\s+[^;]*' . preg_quote((string) ($integration['matched_server_name'] ?: $integration['host']), '/') . '[^;]*;)/i';
+		if (preg_match($server_name_pattern, $patched_contents, $matches, PREG_OFFSET_CAPTURE)) {
+			$matched_line = (string) $matches[1][0];
+			$offset = (int) $matches[1][1] + strlen($matched_line);
+			$patched_contents = substr($patched_contents, 0, $offset) . "\n    " . $include_line . substr($patched_contents, $offset);
+		} elseif (preg_match('/server_name\s+[^;]+;/i', $patched_contents, $matches, PREG_OFFSET_CAPTURE)) {
+			$matched_line = (string) $matches[0][0];
+			$offset = (int) $matches[0][1] + strlen($matched_line);
+			$patched_contents = substr($patched_contents, 0, $offset) . "\n    " . $include_line . substr($patched_contents, $offset);
+		} else {
+			$patched_contents .= "\n    " . $include_line . "\n";
+		}
+	}
 
 	if ($had_existing_file) {
 		$backup_path = $target_path . '.freesiem-sentinel.' . gmdate('YmdHis') . '.bak';
@@ -2140,9 +2412,41 @@ function freesiem_sentinel_apply_ssl_to_nginx(bool $enable_redirect = false): ar
 		}
 	}
 
-	if (@file_put_contents($target_path, $managed_content) === false) {
+	if ($snippet_exists) {
+		$snippet_backup_path = $snippet_path . '.freesiem-sentinel.' . gmdate('YmdHis') . '.bak';
+		@copy($snippet_path, $snippet_backup_path);
+	}
+
+	if (!is_dir(dirname($snippet_path)) || !freesiem_sentinel_path_is_writable(dirname($snippet_path))) {
 		if ($backup_path !== '' && file_exists($backup_path)) {
 			@copy($backup_path, $target_path);
+		}
+		$state_updates['nginx_backup_path'] = $backup_path;
+		$state_updates['nginx_last_apply_status'] = 'failed';
+		$state_updates['nginx_last_apply_result'] = __('Sentinel could not write the nginx snippets directory for SSL include management.', 'freesiem-sentinel');
+		freesiem_sentinel_update_ssl_state($state_updates);
+
+		return [
+			'success' => false,
+			'status' => 'failed',
+			'summary' => (string) $state_updates['nginx_last_apply_result'],
+			'preview' => $preview,
+			'integration' => $integration,
+			'backup_path' => $backup_path,
+			'test' => null,
+			'reload' => null,
+			'executed_at' => $executed_at,
+		];
+	}
+
+	if (@file_put_contents($snippet_path, $snippet_content) === false || @file_put_contents($target_path, $patched_contents) === false) {
+		if ($backup_path !== '' && file_exists($backup_path)) {
+			@copy($backup_path, $target_path);
+		}
+		if ($snippet_exists && $snippet_backup_path !== '' && file_exists($snippet_backup_path)) {
+			@copy($snippet_backup_path, $snippet_path);
+		} elseif (!$snippet_exists && file_exists($snippet_path)) {
+			@unlink($snippet_path);
 		}
 		$state_updates['nginx_backup_path'] = $backup_path;
 		$state_updates['nginx_last_apply_status'] = 'failed';
@@ -2168,6 +2472,11 @@ function freesiem_sentinel_apply_ssl_to_nginx(bool $enable_redirect = false): ar
 			@copy($backup_path, $target_path);
 		} elseif (!$had_existing_file && file_exists($target_path)) {
 			@unlink($target_path);
+		}
+		if ($snippet_exists && $snippet_backup_path !== '' && file_exists($snippet_backup_path)) {
+			@copy($snippet_backup_path, $snippet_path);
+		} elseif (!$snippet_exists && file_exists($snippet_path)) {
+			@unlink($snippet_path);
 		}
 
 		$state_updates['nginx_backup_path'] = $backup_path;
@@ -2196,6 +2505,11 @@ function freesiem_sentinel_apply_ssl_to_nginx(bool $enable_redirect = false): ar
 			@copy($backup_path, $target_path);
 		} elseif (!$had_existing_file && file_exists($target_path)) {
 			@unlink($target_path);
+		}
+		if ($snippet_exists && $snippet_backup_path !== '' && file_exists($snippet_backup_path)) {
+			@copy($snippet_backup_path, $snippet_path);
+		} elseif (!$snippet_exists && file_exists($snippet_path)) {
+			@unlink($snippet_path);
 		}
 		@freesiem_sentinel_run_ssl_shell_command(escapeshellarg((string) ($integration['nginx_binary']['path'] ?: 'nginx')) . ' -t', 'nginx_test_after_restore', 60, (string) ($integration['test_command'] ?? 'nginx -t'));
 		@freesiem_sentinel_run_ssl_shell_command(escapeshellarg((string) ($integration['nginx_binary']['path'] ?: 'nginx')) . ' -s reload', 'nginx_reload_after_restore', 60, (string) ($integration['reload_command'] ?? 'nginx -s reload'));
