@@ -573,21 +573,33 @@ class Freesiem_Admin
 		freesiem_sentinel_require_admin_post_nonce();
 
 		freesiem_sentinel_add_ssl_log('info', __('Active nginx config detection was requested from wp-admin.', 'freesiem-sentinel'), 'nginx_detect_attempt');
-		$detection = freesiem_sentinel_detect_active_nginx_config();
-		$level = match ((string) ($detection['confidence'] ?? 'ambiguous')) {
+		$ssl_settings = freesiem_sentinel_get_ssl_settings();
+		$environment = freesiem_sentinel_get_ssl_environment_snapshot($ssl_settings);
+		$ssl_state = freesiem_sentinel_get_ssl_state();
+		$integration = freesiem_sentinel_detect_nginx_integration($ssl_settings, $environment, $ssl_state);
+		freesiem_sentinel_update_ssl_state([
+			'nginx_integration_mode' => (string) ($integration['mode'] ?? 'manual_required'),
+			'nginx_detection_source' => (string) ($integration['detection_source'] ?? 'nginx_t'),
+			'nginx_detection_confidence' => (string) ($integration['detection_confidence'] ?? 'ambiguous'),
+			'nginx_matched_server_name' => (string) ($integration['matched_server_name'] ?? ''),
+			'nginx_config_path' => (string) ($integration['target_path'] ?? ''),
+			'nginx_last_detect_result' => (string) ($integration['detection_result'] ?? __('Nginx detection completed.', 'freesiem-sentinel')),
+			'nginx_last_detect_at' => freesiem_sentinel_get_iso8601_time(),
+		]);
+		$level = match ((string) ($integration['detection_confidence'] ?? 'ambiguous')) {
 			'exact' => 'success',
 			'probable' => 'warning',
 			default => 'error',
 		};
-		$category = (string) ($detection['confidence'] ?? '') === 'ambiguous' ? 'nginx_detect_ambiguous' : 'nginx_detect_success';
-		freesiem_sentinel_add_ssl_log($level, (string) ($detection['result'] ?? __('Nginx detection completed.', 'freesiem-sentinel')), $category, [
-			'config_path' => (string) ($detection['file_path'] ?? ''),
-			'matched_domain' => (string) ($detection['matched_server_name'] ?? ''),
-			'confidence' => (string) ($detection['confidence'] ?? 'ambiguous'),
+		$category = (string) ($integration['detection_confidence'] ?? '') === 'ambiguous' ? 'nginx_detect_ambiguous' : 'nginx_detect_success';
+		freesiem_sentinel_add_ssl_log($level, (string) ($integration['detection_result'] ?? __('Nginx detection completed.', 'freesiem-sentinel')), $category, [
+			'config_path' => (string) ($integration['target_path'] ?? ''),
+			'matched_domain' => (string) ($integration['matched_server_name'] ?? ''),
+			'confidence' => (string) ($integration['detection_confidence'] ?? 'ambiguous'),
 		]);
 
-		$notice_level = (string) ($detection['confidence'] ?? '') === 'exact' ? 'success' : ((string) ($detection['confidence'] ?? '') === 'probable' ? 'warning' : 'error');
-		freesiem_sentinel_set_notice($notice_level, (string) ($detection['result'] ?? __('Nginx detection completed.', 'freesiem-sentinel')));
+		$notice_level = (string) ($integration['detection_confidence'] ?? '') === 'exact' ? 'success' : ((string) ($integration['detection_confidence'] ?? '') === 'probable' ? 'warning' : 'error');
+		freesiem_sentinel_set_notice($notice_level, (string) ($integration['detection_result'] ?? __('Nginx detection completed.', 'freesiem-sentinel')));
 		$this->redirect_to_page('freesiem-ssl', ['tab' => 'overview']);
 	}
 
@@ -2045,7 +2057,7 @@ class Freesiem_Admin
 		$this->render_ssl_action_form(__('Run Dry Run', 'freesiem-sentinel'), 'freesiem_sentinel_run_ssl_dry_run', true, '', 'secondary', ['redirect_tab' => 'dry-run']);
 		$this->render_ssl_action_form(__('Issue Certificate', 'freesiem-sentinel'), 'freesiem_sentinel_issue_ssl_certificate', !empty($issue_gate['allowed']), (string) ($issue_gate['reason'] ?? ''), 'primary', ['force_reissue_existing_certificate' => $lineage_exists ? '0' : '']);
 		$this->render_ssl_action_form(__('Renew', 'freesiem-sentinel'), 'freesiem_sentinel_renew_ssl_certificate', !empty($renew_gate['allowed']), (string) ($renew_gate['reason'] ?? ''), 'secondary');
-		$this->render_ssl_action_form(__('Apply SSL to Nginx', 'freesiem-sentinel'), 'freesiem_sentinel_apply_ssl_to_nginx', !empty($integration['apply_allowed']), (string) ($integration['reason'] ?? ''), 'secondary');
+		$this->render_ssl_action_form(__('Apply SSL to Nginx', 'freesiem-sentinel'), 'freesiem_sentinel_apply_ssl_to_nginx', !empty($integration['apply_allowed']), (string) ($integration['apply_reason'] ?? $integration['reason'] ?? ''), 'secondary');
 		echo '</div>';
 	}
 
@@ -2094,7 +2106,7 @@ class Freesiem_Admin
 		echo '</form>';
 		echo '</div>';
 		if (empty($integration['apply_allowed'])) {
-			echo '<p><strong>' . esc_html__('Apply gate', 'freesiem-sentinel') . ':</strong> ' . esc_html((string) ($integration['reason'] ?? __('Automatic nginx apply is unavailable.', 'freesiem-sentinel'))) . '</p>';
+			echo '<p><strong>' . esc_html__('Apply gate', 'freesiem-sentinel') . ':</strong> ' . esc_html((string) ($integration['apply_reason'] ?? $integration['reason'] ?? __('Automatic nginx apply is unavailable.', 'freesiem-sentinel'))) . '</p>';
 		}
 		echo '<table class="widefat striped" style="margin-bottom:14px;"><thead><tr><th>' . esc_html__('Check', 'freesiem-sentinel') . '</th><th>' . esc_html__('Status', 'freesiem-sentinel') . '</th></tr></thead><tbody>';
 		foreach ([
@@ -2103,6 +2115,9 @@ class Freesiem_Admin
 			__('Hostname', 'freesiem-sentinel') => !empty($integration['detection_checks']['hostname']) ? strtoupper((string) $integration['detection_checks']['hostname']) : (!empty($environment['configured_host']) ? 'PASS' : 'WARN'),
 			__('nginx -T', 'freesiem-sentinel') => !empty($integration['detection_checks']['nginx_t']) ? strtoupper((string) $integration['detection_checks']['nginx_t']) : (!empty($integration['nginx_t_ok']) ? 'PASS' : 'WARN'),
 			__('Parsing / config path', 'freesiem-sentinel') => !empty($integration['detection_checks']['parsing']) ? strtoupper((string) $integration['detection_checks']['parsing']) : (!empty($integration['target_path']) ? 'PASS' : 'FAIL'),
+			__('Config writable', 'freesiem-sentinel') => !empty($integration['config_writable']) ? 'PASS' : 'FAIL',
+			__('Snippets writable', 'freesiem-sentinel') => !empty($integration['snippet_dir_writable']) ? 'PASS' : 'FAIL',
+			__('Certificate files', 'freesiem-sentinel') => (!empty($integration['fullchain_exists']) && !empty($integration['privkey_exists'])) ? 'PASS' : 'FAIL',
 		] as $label => $status) {
 			echo '<tr><td>' . esc_html($label) . '</td><td><span style="' . esc_attr($this->ssl_preflight_badge_style($status)) . '">' . esc_html($status) . '</span></td></tr>';
 		}

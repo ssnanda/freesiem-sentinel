@@ -2316,6 +2316,8 @@ function freesiem_sentinel_detect_nginx_integration(?array $ssl_settings = null,
 	$reason = (string) ($detection['result'] ?? __('Automatic nginx patching requires nginx detection.', 'freesiem-sentinel'));
 	$confidence = (string) ($detection['confidence'] ?? 'ambiguous');
 	$matched_server_name = (string) ($detection['matched_server_name'] ?? '');
+	$detection_result = (string) ($detection['result'] ?? '');
+	$detection_checks = (array) ($detection['checks'] ?? []);
 
 	if ($target_path !== '' && file_exists($target_path)) {
 		$target_exists = true;
@@ -2326,6 +2328,7 @@ function freesiem_sentinel_detect_nginx_integration(?array $ssl_settings = null,
 			$reason = $confidence === 'exact'
 				? __('Nginx -T found an exact active config match, so auto patch mode is enabled.', 'freesiem-sentinel')
 				: __('Nginx -T found a probable active config match, so auto patch mode is enabled.', 'freesiem-sentinel');
+			$detection_result = $reason;
 		}
 	}
 
@@ -2348,11 +2351,15 @@ function freesiem_sentinel_detect_nginx_integration(?array $ssl_settings = null,
 			$reason = __('Sentinel-managed nginx config detected and can be updated safely.', 'freesiem-sentinel');
 			$confidence = $confidence === 'ambiguous' ? 'probable' : $confidence;
 			$matched_server_name = $matched_server_name !== '' ? $matched_server_name : $host;
+			$detection_result = $reason;
+			$detection_checks['parsing'] = 'pass';
 		} elseif ($candidate_matches_host) {
 			$mode = 'patch';
 			$reason = __('A domain-matched nginx site config file was found and can be patched automatically.', 'freesiem-sentinel');
 			$confidence = $confidence === 'ambiguous' ? 'probable' : $confidence;
 			$matched_server_name = $matched_server_name !== '' ? $matched_server_name : $host;
+			$detection_result = $reason;
+			$detection_checks['parsing'] = 'pass';
 		} else {
 			$mode = 'manual_required';
 			$reason = __('An existing nginx site config was detected, so Sentinel is staying in preview/manual mode for safety.', 'freesiem-sentinel');
@@ -2367,12 +2374,49 @@ function freesiem_sentinel_detect_nginx_integration(?array $ssl_settings = null,
 			$reason = $mode === 'patch'
 				? __('Sentinel can create a dedicated nginx config file for this host.', 'freesiem-sentinel')
 				: __('A likely nginx config directory was detected, but it is not writable by PHP.', 'freesiem-sentinel');
+			if ($mode === 'patch') {
+				$detection_result = $reason;
+			}
 		}
 	}
 
 	$config_writable = $target_path !== '' && ($target_exists ? freesiem_sentinel_path_is_writable($target_path) : freesiem_sentinel_path_is_writable(dirname($target_path)));
+	$snippet_path = freesiem_sentinel_get_nginx_ssl_snippet_path($host);
+	$snippet_dir = dirname($snippet_path);
+	$snippet_dir_writable = is_dir($snippet_dir) && freesiem_sentinel_path_is_writable($snippet_dir);
 	$preview_only = !$fullchain_exists || !$privkey_exists || empty($environment['execution_support']) || empty($nginx_binary['available']) || (!$server_is_nginx && !$target_exists && !is_dir('/etc/nginx'));
-	$apply_allowed = !$preview_only && $mode === 'patch' && $config_writable && $target_path !== '';
+	$apply_blockers = [];
+	if ($mode !== 'patch') {
+		$apply_blockers[] = $reason;
+	}
+	if ($target_path === '') {
+		$apply_blockers[] = __('No nginx config target path is available for automatic patching.', 'freesiem-sentinel');
+	}
+	if (!$fullchain_exists) {
+		$apply_blockers[] = __('The SSL fullchain certificate file is not available yet.', 'freesiem-sentinel');
+	}
+	if (!$privkey_exists) {
+		$apply_blockers[] = __('The SSL private key file is not available yet.', 'freesiem-sentinel');
+	}
+	if (empty($environment['execution_support'])) {
+		$apply_blockers[] = __('PHP command execution support is unavailable for nginx validation and reload.', 'freesiem-sentinel');
+	}
+	if (empty($nginx_binary['available'])) {
+		$apply_blockers[] = __('The nginx binary is not available on this server.', 'freesiem-sentinel');
+	}
+	if (!$config_writable) {
+		$apply_blockers[] = sprintf(__('The nginx config target is not writable by PHP: %s', 'freesiem-sentinel'), $target_path !== '' ? $target_path : __('unknown target', 'freesiem-sentinel'));
+	}
+	if (!$snippet_dir_writable) {
+		$apply_blockers[] = sprintf(__('The nginx snippets directory is not writable by PHP: %s', 'freesiem-sentinel'), $snippet_dir);
+	}
+	$apply_allowed = !$preview_only && $mode === 'patch' && $config_writable && $snippet_dir_writable && $target_path !== '';
+	$apply_reason = $apply_allowed
+		? __('Detected nginx config and certificate files are ready for automatic apply.', 'freesiem-sentinel')
+		: implode(' ', array_values(array_unique(array_filter($apply_blockers))));
+	if ($apply_reason === '') {
+		$apply_reason = $reason;
+	}
 
 	return [
 		'host' => $host,
@@ -2388,16 +2432,19 @@ function freesiem_sentinel_detect_nginx_integration(?array $ssl_settings = null,
 		'target_exists' => $target_exists,
 		'target_is_managed' => $target_is_managed,
 		'config_writable' => $config_writable,
+		'snippet_path' => $snippet_path,
+		'snippet_dir_writable' => $snippet_dir_writable,
 		'mode' => $mode,
 		'apply_allowed' => $apply_allowed,
 		'reason' => $reason,
+		'apply_reason' => $apply_reason,
 		'detection_source' => (string) ($detection['source'] ?? 'nginx_t'),
 		'detection_confidence' => $confidence,
 		'matched_server_name' => $matched_server_name,
-		'detection_result' => (string) ($detection['result'] ?? ''),
+		'detection_result' => $detection_result,
 		'detection_output_summary' => (string) ($detection['output_summary'] ?? ''),
 		'detection_exit_code' => $detection['exit_code'] ?? null,
-		'detection_checks' => (array) ($detection['checks'] ?? []),
+		'detection_checks' => $detection_checks,
 		'binary_available' => !empty($detection['binary_available']),
 		'execution_available' => !empty($detection['execution_available']),
 		'nginx_t_ok' => !empty($detection['nginx_t_ok']),
