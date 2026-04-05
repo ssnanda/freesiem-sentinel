@@ -1232,7 +1232,7 @@ class Freesiem_Admin
 
 		echo '<div class="wrap">';
 		echo '<h1>' . esc_html__('SSL / HTTPS', 'freesiem-sentinel') . '</h1>';
-		echo '<div class="notice notice-warning inline"><p>' . esc_html__('Sentinel now supports explicit admin-triggered certbot actions and nginx SSL apply. Force HTTPS is applied through the nginx workflow when enabled, HSTS remains inactive, and Apache automation is still not included in this version.', 'freesiem-sentinel') . '</p></div>';
+		echo '<div class="notice notice-warning inline"><p>' . esc_html__('Sentinel now supports explicit admin-triggered certbot actions plus nginx SSL apply. Force HTTPS and HSTS are both applied through the nginx workflow when enabled. Apache automation is still not included in this version.', 'freesiem-sentinel') . '</p></div>';
 		echo '<nav class="nav-tab-wrapper" style="margin-bottom:20px;">';
 		foreach ([
 			'overview' => __('Overview', 'freesiem-sentinel'),
@@ -1995,47 +1995,18 @@ class Freesiem_Admin
 
 		$this->render_ssl_action_bar($issue_gate, $renew_gate, $integration, $lineage_exists, $ssl_settings);
 
-		echo '<div style="display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:12px;margin-bottom:20px;">';
+		echo '<div style="display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:12px;margin-bottom:20px;">';
 		$this->render_summary_stat(__('Domain', 'freesiem-sentinel'), $environment['configured_host'] !== '' ? $environment['configured_host'] : __('Unavailable', 'freesiem-sentinel'));
 		$this->render_summary_stat(__('HTTPS', 'freesiem-sentinel'), (string) ($endpoint_status['https'] ?? __('Unavailable', 'freesiem-sentinel')), __('WordPress HTTPS', 'freesiem-sentinel'), $environment['is_https_configured'] ? __('Yes', 'freesiem-sentinel') : __('No', 'freesiem-sentinel'));
 		$this->render_summary_stat(__('Redirect', 'freesiem-sentinel'), (string) ($endpoint_status['redirect'] ?? __('Unavailable', 'freesiem-sentinel')), __('Force HTTPS', 'freesiem-sentinel'), !empty($ssl_settings['force_https']) ? __('Enabled', 'freesiem-sentinel') : __('Off', 'freesiem-sentinel'));
 		$this->render_summary_stat(__('Certbot', 'freesiem-sentinel'), !empty($environment['certbot']['available']) ? __('Installed', 'freesiem-sentinel') : __('Missing', 'freesiem-sentinel'), __('Version', 'freesiem-sentinel'), !empty($environment['certbot']['version']) ? (string) $environment['certbot']['version'] : __('Unavailable', 'freesiem-sentinel'));
 		$this->render_summary_stat(__('Certificate', 'freesiem-sentinel'), !empty($certificate['exists']) ? (!empty($certificate['is_staging_certificate']) ? __('Staging cert', 'freesiem-sentinel') : __('Present', 'freesiem-sentinel')) : __('Not found', 'freesiem-sentinel'), __('Nginx', 'freesiem-sentinel'), in_array((string) ($integration['mode'] ?? ''), ['patch', 'pending_root_finalize'], true) ? __('Ready', 'freesiem-sentinel') : __('Needs setup', 'freesiem-sentinel'));
+		$this->render_summary_stat(__('HSTS', 'freesiem-sentinel'), (string) ($endpoint_status['hsts'] ?? __('Unavailable', 'freesiem-sentinel')), __('Configured', 'freesiem-sentinel'), !empty($ssl_settings['hsts_enabled']) ? __('Enabled', 'freesiem-sentinel') : __('Off', 'freesiem-sentinel'));
 		echo '</div>';
 
 		echo '<div style="display:grid;gap:16px;">';
 		echo '<div style="background:#fff;padding:18px;border:1px solid #dcdcde;border-radius:12px;">';
 		$this->render_ssl_next_steps_panel($ssl_settings, $environment, $ssl_state, $certificate, $integration, $endpoint_status);
-		echo '</div>';
-
-		echo '<div style="background:#fff;padding:18px;border:1px solid #dcdcde;border-radius:12px;">';
-		echo '<h2 style="margin-top:0;">' . esc_html__('Readiness Summary', 'freesiem-sentinel') . '</h2>';
-		echo '<p style="margin:0 0 10px 0;"><span style="' . esc_attr($this->ssl_readiness_badge_style((string) ($readiness['state'] ?? 'not_configured'))) . '">' . esc_html(strtoupper((string) ($readiness['state'] ?? 'not_configured'))) . '</span></p>';
-		echo '<p style="margin:0 0 8px 0;"><strong>' . esc_html((string) ($readiness['label'] ?? __('Not configured', 'freesiem-sentinel'))) . '</strong></p>';
-		echo '<p style="margin:0 0 12px 0;color:#646970;">' . esc_html((string) ($readiness['description'] ?? '')) . '</p>';
-		echo '<p style="margin:0 0 8px 0;"><strong>' . esc_html__('Last action', 'freesiem-sentinel') . ':</strong> ' . esc_html(!empty($ssl_state['last_action_type']) ? (string) $ssl_state['last_action_type'] : __('none', 'freesiem-sentinel')) . ' / ' . esc_html(!empty($ssl_state['last_action_result_code']) ? (string) $ssl_state['last_action_result_code'] : __('none', 'freesiem-sentinel')) . '</p>';
-		echo '<p style="margin:0;color:#646970;">' . esc_html(!empty($ssl_state['last_issue_result']) ? (string) $ssl_state['last_issue_result'] : (!empty($ssl_state['last_renew_result']) ? (string) $ssl_state['last_renew_result'] : __('No certificate actions recorded yet.', 'freesiem-sentinel'))) . '</p>';
-		if ($lineage_exists) {
-			echo '<div style="margin-top:14px;padding:12px;border-radius:8px;background:#fff7ed;border:1px solid #fdba74;">';
-			echo '<p style="margin:0 0 10px 0;"><strong>' . esc_html__('Existing certificate detected.', 'freesiem-sentinel') . '</strong> ' . esc_html__('Use Issue Certificate to replace the current lineage. Force reissue adds --force-renewal only when you explicitly choose it.', 'freesiem-sentinel') . '</p>';
-			echo '<form method="post" action="' . esc_url(admin_url('admin-post.php')) . '" style="margin:0;display:flex;gap:10px;align-items:center;flex-wrap:wrap;">';
-			wp_nonce_field(FREESIEM_SENTINEL_NONCE_ACTION);
-			echo '<input type="hidden" name="action" value="freesiem_sentinel_issue_ssl_certificate" />';
-			echo '<label><input type="checkbox" name="force_reissue_existing_certificate" value="1" /> ' . esc_html__('Force reissue existing certificate', 'freesiem-sentinel') . '</label>';
-			submit_button(__('Issue With Force Reissue', 'freesiem-sentinel'), 'secondary', '', false);
-			echo '</form>';
-			echo '</div>';
-		}
-		if (!empty($readiness['blocker_messages']) || !empty($readiness['warning_messages'])) {
-			echo '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:14px;">';
-			foreach ((array) ($readiness['blocker_messages'] ?? []) as $message) {
-				echo '<span style="' . esc_attr($this->ssl_preflight_badge_style('FAIL')) . '">' . esc_html((string) $message) . '</span>';
-			}
-			foreach ((array) ($readiness['warning_messages'] ?? []) as $message) {
-				echo '<span style="' . esc_attr($this->ssl_preflight_badge_style('WARN')) . '">' . esc_html((string) $message) . '</span>';
-			}
-			echo '</div>';
-		}
 		echo '</div>';
 
 		echo '<div style="background:#fff;padding:18px;border:1px solid #dcdcde;border-radius:12px;">';
@@ -2068,7 +2039,8 @@ class Freesiem_Admin
 		$this->render_ssl_action_form(__('Detect Nginx Config', 'freesiem-sentinel'), 'freesiem_sentinel_detect_nginx_config', true, '', 'secondary');
 		$this->render_ssl_action_form(__('Run Preflight', 'freesiem-sentinel'), 'freesiem_sentinel_run_ssl_preflight', true, '', 'secondary', ['redirect_tab' => 'preflight']);
 		$this->render_ssl_action_form(__('Run Dry Run', 'freesiem-sentinel'), 'freesiem_sentinel_run_ssl_dry_run', true, '', 'secondary', ['redirect_tab' => 'dry-run']);
-		$this->render_ssl_action_form(__('Issue Certificate', 'freesiem-sentinel'), 'freesiem_sentinel_issue_ssl_certificate', !empty($issue_gate['allowed']), (string) ($issue_gate['reason'] ?? ''), 'primary', ['force_reissue_existing_certificate' => $lineage_exists ? '0' : '']);
+		$this->render_ssl_action_form(__('Issue Certificate', 'freesiem-sentinel'), 'freesiem_sentinel_issue_ssl_certificate', !empty($issue_gate['allowed']), (string) ($issue_gate['reason'] ?? ''), 'primary');
+		$this->render_ssl_action_form(__('Re-Issue Certificate', 'freesiem-sentinel'), 'freesiem_sentinel_issue_ssl_certificate', !empty($issue_gate['allowed']) && $lineage_exists, $lineage_exists ? __('Re-Issue uses force renewal to replace the current certificate lineage.', 'freesiem-sentinel') : __('No existing certificate lineage is available to replace yet.', 'freesiem-sentinel'), 'secondary', ['force_reissue_existing_certificate' => '1']);
 		$this->render_ssl_action_form(__('Renew', 'freesiem-sentinel'), 'freesiem_sentinel_renew_ssl_certificate', !empty($renew_gate['allowed']), (string) ($renew_gate['reason'] ?? ''), 'secondary');
 		$this->render_ssl_action_form(__('Apply SSL to Nginx', 'freesiem-sentinel'), 'freesiem_sentinel_apply_ssl_to_nginx', !empty($integration['apply_allowed']), (string) ($integration['apply_reason'] ?? $integration['reason'] ?? ''), 'secondary', ['enable_nginx_https_redirect' => !empty($ssl_settings['force_https']) ? '1' : '0']);
 		echo '</div>';
@@ -2158,6 +2130,7 @@ class Freesiem_Admin
 		echo '<p><strong>' . esc_html__('Matched server_name', 'freesiem-sentinel') . ':</strong> ' . esc_html((string) ($integration['matched_server_name'] ?? __('Unavailable', 'freesiem-sentinel'))) . '</p>';
 		echo '<p><strong>' . esc_html__('Confidence level', 'freesiem-sentinel') . ':</strong> ' . esc_html((string) ($integration['detection_confidence'] ?? 'ambiguous')) . '</p>';
 		echo '<p><strong>' . esc_html__('Redirect on apply', 'freesiem-sentinel') . ':</strong> ' . esc_html(!empty($ssl_settings['force_https']) ? __('Enabled', 'freesiem-sentinel') : __('Off', 'freesiem-sentinel')) . '</p>';
+		echo '<p><strong>' . esc_html__('HSTS on apply', 'freesiem-sentinel') . ':</strong> ' . esc_html(!empty($ssl_settings['hsts_enabled']) ? __('Enabled', 'freesiem-sentinel') : __('Off', 'freesiem-sentinel')) . '</p>';
 		echo '<p><strong>' . esc_html__('Last apply attempt', 'freesiem-sentinel') . ':</strong> ' . esc_html($this->summary_value_or_fallback((string) ($ssl_state['nginx_last_apply_at'] ?? ''), true) . ' / ' . (!empty($ssl_state['nginx_last_apply_status']) ? (string) $ssl_state['nginx_last_apply_status'] : __('none', 'freesiem-sentinel'))) . '</p>';
 		if (empty($integration['apply_allowed'])) {
 			echo '<p><strong>' . esc_html__('Apply gate', 'freesiem-sentinel') . ':</strong> ' . esc_html((string) ($integration['apply_reason'] ?? $integration['reason'] ?? __('Automatic nginx apply is unavailable.', 'freesiem-sentinel'))) . '</p>';
@@ -2173,13 +2146,15 @@ class Freesiem_Admin
 			__('Snippets writable', 'freesiem-sentinel') => !empty($integration['snippet_dir_writable']) ? 'PASS' : 'FAIL',
 			__('Certificate files', 'freesiem-sentinel') => (!empty($integration['fullchain_exists']) && !empty($integration['privkey_exists'])) ? 'PASS' : 'FAIL',
 			__('Redirect status', 'freesiem-sentinel') => !empty($endpoint_status['redirect_enabled']) ? 'PASS' : (!empty($ssl_settings['force_https']) ? 'FAIL' : 'WARN'),
+			__('HSTS status', 'freesiem-sentinel') => !empty($endpoint_status['hsts_enabled']) ? 'PASS' : (!empty($ssl_settings['hsts_enabled']) ? 'FAIL' : 'WARN'),
 		] as $label => $status) {
 			echo '<tr><td>' . esc_html($label) . '</td><td><span style="' . esc_attr($this->ssl_preflight_badge_style($status)) . '">' . esc_html($status) . '</span></td></tr>';
 		}
 		echo '</tbody></table>';
+		echo '<p><strong>' . esc_html__('Last live status check', 'freesiem-sentinel') . ':</strong> ' . esc_html($this->summary_value_or_fallback((string) ($ssl_state['live_status_checked_at'] ?? ''), true)) . '</p>';
 		echo '<p><strong>' . esc_html__('Last nginx test result', 'freesiem-sentinel') . ':</strong> ' . esc_html(!empty($ssl_state['nginx_last_test_result']) ? (string) $ssl_state['nginx_last_test_result'] : __('None yet', 'freesiem-sentinel')) . '</p>';
 		echo '<p><strong>' . esc_html__('Last nginx reload result', 'freesiem-sentinel') . ':</strong> ' . esc_html(!empty($ssl_state['nginx_last_reload_result']) ? (string) $ssl_state['nginx_last_reload_result'] : __('None yet', 'freesiem-sentinel')) . '</p>';
-		echo '<p style="margin-bottom:6px;color:#646970;">' . esc_html__('Deep nginx preview and parser output now live in the Logs tab. Apply SSL to Nginx respects the Force HTTPS setting from Core SSL Settings.', 'freesiem-sentinel') . '</p>';
+		echo '<p style="margin-bottom:6px;color:#646970;">' . esc_html__('Deep nginx preview and parser output now live in the Logs tab. Apply SSL to Nginx respects both Force HTTPS and HSTS from Core SSL Settings.', 'freesiem-sentinel') . '</p>';
 		echo '<pre style="white-space:pre-wrap;overflow:auto;">' . esc_html((string) ($integration['test_command'] ?? 'nginx -t') . "\n" . (string) ($integration['reload_command'] ?? 'nginx -s reload')) . '</pre>';
 	}
 
@@ -2190,7 +2165,7 @@ class Freesiem_Admin
 
 		if (!empty($certificate['is_staging_certificate']) && empty($ssl_settings['use_staging'])) {
 			$steps[] = __('Issue a production certificate now.', 'freesiem-sentinel');
-			$steps[] = __('If the lineage is reused, use Force reissue in Readiness Summary.', 'freesiem-sentinel');
+			$steps[] = __('If the lineage is reused, use Re-Issue Certificate from the top action bar.', 'freesiem-sentinel');
 			$steps[] = __('After issuance, apply the updated cert to nginx.', 'freesiem-sentinel');
 		} elseif (!empty($certificate['is_staging_certificate'])) {
 			$steps[] = __('Turn off staging in Core SSL Settings.', 'freesiem-sentinel');
@@ -2306,7 +2281,7 @@ class Freesiem_Admin
 		$this->render_ssl_checkbox_field('check_port_80', __('Intent to use port 80', 'freesiem-sentinel'), !empty($ssl_settings['check_port_80']), __('Used for readiness reporting only right now.', 'freesiem-sentinel'));
 		$this->render_ssl_checkbox_field('check_port_443', __('Intent to use port 443', 'freesiem-sentinel'), !empty($ssl_settings['check_port_443']), __('Used for readiness reporting only right now.', 'freesiem-sentinel'));
 		$this->render_ssl_checkbox_field('force_https', __('Force HTTPS', 'freesiem-sentinel'), !empty($ssl_settings['force_https']), __('Stored only for future implementation; no redirects are added in this version.', 'freesiem-sentinel'));
-		$this->render_ssl_checkbox_field('hsts_enabled', __('HSTS', 'freesiem-sentinel'), !empty($ssl_settings['hsts_enabled']), __('Stored only for future implementation; no headers are sent in this version.', 'freesiem-sentinel'));
+		$this->render_ssl_checkbox_field('hsts_enabled', __('HSTS', 'freesiem-sentinel'), !empty($ssl_settings['hsts_enabled']), __('Applied through nginx SSL config when you run Apply SSL to Nginx.', 'freesiem-sentinel'));
 		$this->render_ssl_checkbox_field('auto_renew', __('Auto-renew', 'freesiem-sentinel'), !empty($ssl_settings['auto_renew']), __('Stored only for future implementation; no renewal jobs are scheduled in this version.', 'freesiem-sentinel'));
 		$this->render_ssl_checkbox_field('use_staging', __('Use Let’s Encrypt staging', 'freesiem-sentinel'), !empty($ssl_settings['use_staging']), __('Recommended for safe simulated execution planning.', 'freesiem-sentinel'));
 		$this->render_ssl_checkbox_field('detailed_logs', __('Enable detailed SSL logs', 'freesiem-sentinel'), !empty($ssl_settings['detailed_logs']), __('Adds category and context details to the lightweight SSL log store.', 'freesiem-sentinel'));

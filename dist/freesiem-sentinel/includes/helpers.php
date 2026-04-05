@@ -436,11 +436,16 @@ function freesiem_sentinel_get_default_ssl_state(): array
 		'nginx_last_test_result' => '',
 		'nginx_last_reload_result' => '',
 		'nginx_redirect_enabled' => 0,
+		'nginx_hsts_enabled' => 0,
 		'nginx_detection_source' => '',
 		'nginx_matched_server_name' => '',
 		'nginx_detection_confidence' => '',
 		'nginx_last_detect_result' => '',
 		'nginx_last_detect_at' => '',
+		'live_https_status' => '',
+		'live_redirect_status' => '',
+		'live_hsts_status' => '',
+		'live_status_checked_at' => '',
 		'issued_at' => '',
 		'expires_at' => '',
 		'last_issue_status' => '',
@@ -512,11 +517,16 @@ function freesiem_sentinel_sanitize_ssl_state(array $state): array
 	$state['nginx_last_test_result'] = sanitize_text_field((string) ($state['nginx_last_test_result'] ?? ''));
 	$state['nginx_last_reload_result'] = sanitize_text_field((string) ($state['nginx_last_reload_result'] ?? ''));
 	$state['nginx_redirect_enabled'] = empty($state['nginx_redirect_enabled']) ? 0 : 1;
+	$state['nginx_hsts_enabled'] = empty($state['nginx_hsts_enabled']) ? 0 : 1;
 	$state['nginx_detection_source'] = sanitize_key((string) ($state['nginx_detection_source'] ?? ''));
 	$state['nginx_matched_server_name'] = sanitize_text_field((string) ($state['nginx_matched_server_name'] ?? ''));
 	$state['nginx_detection_confidence'] = sanitize_key((string) ($state['nginx_detection_confidence'] ?? ''));
 	$state['nginx_last_detect_result'] = sanitize_text_field((string) ($state['nginx_last_detect_result'] ?? ''));
 	$state['nginx_last_detect_at'] = freesiem_sentinel_sanitize_datetime((string) ($state['nginx_last_detect_at'] ?? ''));
+	$state['live_https_status'] = sanitize_text_field((string) ($state['live_https_status'] ?? ''));
+	$state['live_redirect_status'] = sanitize_text_field((string) ($state['live_redirect_status'] ?? ''));
+	$state['live_hsts_status'] = sanitize_text_field((string) ($state['live_hsts_status'] ?? ''));
+	$state['live_status_checked_at'] = freesiem_sentinel_sanitize_datetime((string) ($state['live_status_checked_at'] ?? ''));
 	$state['issued_at'] = freesiem_sentinel_sanitize_datetime((string) ($state['issued_at'] ?? ''));
 	$state['expires_at'] = freesiem_sentinel_sanitize_datetime((string) ($state['expires_at'] ?? ''));
 	$state['last_issue_status'] = sanitize_key((string) ($state['last_issue_status'] ?? ''));
@@ -2353,7 +2363,7 @@ function freesiem_sentinel_detect_active_nginx_config(?array $ssl_settings = nul
 	return $result;
 }
 
-function freesiem_sentinel_get_nginx_preview_config(array $integration, bool $enable_redirect = false): string
+function freesiem_sentinel_get_nginx_preview_config(array $integration, bool $enable_redirect = false, bool $enable_hsts = false): string
 {
 	$host = (string) ($integration['host'] ?? 'example.com');
 	$root = (string) ($integration['webroot'] ?? ABSPATH);
@@ -2376,9 +2386,12 @@ function freesiem_sentinel_get_nginx_preview_config(array $integration, bool $en
 		$lines[] = '    root ' . $root . ';';
 		$lines[] = '    index index.php index.html index.htm;';
 		$lines[] = '';
-		$lines[] = '    ssl_certificate ' . $fullchain . ';';
-		$lines[] = '    ssl_certificate_key ' . $privkey . ';';
-		$lines[] = '';
+	$lines[] = '    ssl_certificate ' . $fullchain . ';';
+	$lines[] = '    ssl_certificate_key ' . $privkey . ';';
+	if ($enable_hsts) {
+		$lines[] = '    add_header Strict-Transport-Security "max-age=31536000" always;';
+	}
+	$lines[] = '';
 		$lines[] = '    location / {';
 		$lines[] = '        try_files $uri $uri/ /index.php?$args;';
 		$lines[] = '    }';
@@ -2753,6 +2766,10 @@ function freesiem_sentinel_get_ssl_endpoint_status(?array $environment = null): 
 		'redirect_enabled' => false,
 		'http_code' => null,
 		'http_location' => '',
+		'hsts' => __('Unavailable', 'freesiem-sentinel'),
+		'hsts_enabled' => false,
+		'hsts_value' => '',
+		'checked_at' => freesiem_sentinel_get_iso8601_time(),
 	];
 
 	if ($host === '' || !function_exists('wp_remote_get')) {
@@ -2780,11 +2797,20 @@ function freesiem_sentinel_get_ssl_endpoint_status(?array $environment = null): 
 	$https = wp_remote_get('https://' . $host, ['timeout' => 8, 'redirection' => 0, 'sslverify' => false]);
 	if (is_wp_error($https)) {
 		$result['https'] = __('HTTPS Error', 'freesiem-sentinel');
+		$result['hsts'] = __('HSTS Error', 'freesiem-sentinel');
 	} else {
 		$https_code = (int) wp_remote_retrieve_response_code($https);
 		$result['https_code'] = $https_code;
 		$result['https_ok'] = $https_code >= 200 && $https_code < 400;
 		$result['https'] = $result['https_ok'] ? __('HTTPS OK', 'freesiem-sentinel') : sprintf(__('HTTPS %d', 'freesiem-sentinel'), $https_code);
+		$hsts_value = trim((string) wp_remote_retrieve_header($https, 'strict-transport-security'));
+		$result['hsts_value'] = $hsts_value;
+		if ($hsts_value !== '') {
+			$result['hsts'] = __('HSTS Enabled', 'freesiem-sentinel');
+			$result['hsts_enabled'] = true;
+		} else {
+			$result['hsts'] = __('HSTS Missing', 'freesiem-sentinel');
+		}
 	}
 
 	return $result;
@@ -2797,7 +2823,8 @@ function freesiem_sentinel_apply_ssl_to_nginx(bool $enable_redirect = false): ar
 	$ssl_state = freesiem_sentinel_get_ssl_state();
 	$integration = freesiem_sentinel_detect_nginx_integration($ssl_settings, $environment, $ssl_state);
 	$executed_at = freesiem_sentinel_get_iso8601_time();
-	$preview = freesiem_sentinel_get_nginx_preview_config($integration, $enable_redirect);
+	$enable_hsts = !empty($ssl_settings['hsts_enabled']);
+	$preview = freesiem_sentinel_get_nginx_preview_config($integration, $enable_redirect, $enable_hsts);
 	$backup_dir = freesiem_sentinel_get_nginx_backup_directory($ssl_settings);
 	$state_updates = [
 		'nginx_integration_mode' => $integration['mode'],
@@ -2806,6 +2833,7 @@ function freesiem_sentinel_apply_ssl_to_nginx(bool $enable_redirect = false): ar
 		'nginx_key_path' => (string) ($integration['privkey_path'] ?? ''),
 		'nginx_last_apply_at' => $executed_at,
 		'nginx_redirect_enabled' => $enable_redirect ? 1 : 0,
+		'nginx_hsts_enabled' => $enable_hsts ? 1 : 0,
 		'nginx_detection_source' => (string) ($integration['detection_source'] ?? 'nginx_t'),
 		'nginx_matched_server_name' => (string) ($integration['matched_server_name'] ?? ''),
 		'nginx_detection_confidence' => (string) ($integration['detection_confidence'] ?? 'ambiguous'),
@@ -2840,6 +2868,9 @@ function freesiem_sentinel_apply_ssl_to_nginx(bool $enable_redirect = false): ar
 	$snippet_content .= "listen 443 ssl;\n";
 	$snippet_content .= 'ssl_certificate ' . (string) ($integration['fullchain_path'] ?? '') . ";\n";
 	$snippet_content .= 'ssl_certificate_key ' . (string) ($integration['privkey_path'] ?? '') . ";\n";
+	if ($enable_hsts) {
+		$snippet_content .= "add_header Strict-Transport-Security \"max-age=31536000\" always;\n";
+	}
 	$snippet_content .= "# END freeSIEM Sentinel Nginx SSL\n";
 
 	$include_line = 'include ' . $snippet_path . ';';
@@ -3028,6 +3059,7 @@ function freesiem_sentinel_apply_ssl_to_nginx(bool $enable_redirect = false): ar
 	$https_summary = is_wp_error($https_check)
 		? $https_check->get_error_message()
 		: (is_array($https_check) ? 'HTTP ' . (string) wp_remote_retrieve_response_code($https_check) : '');
+	$endpoint_status = freesiem_sentinel_get_ssl_endpoint_status($environment);
 
 	$state_updates['nginx_backup_path'] = $backup_path;
 	$state_updates['nginx_integration_mode'] = 'applied';
@@ -3035,6 +3067,10 @@ function freesiem_sentinel_apply_ssl_to_nginx(bool $enable_redirect = false): ar
 	$state_updates['nginx_last_apply_result'] = __('Nginx SSL config was applied successfully.', 'freesiem-sentinel');
 	$state_updates['nginx_last_test_result'] = !empty($test['stderr_summary']) ? (string) $test['stderr_summary'] : (string) ($test['stdout_summary'] ?? __('nginx -t passed.', 'freesiem-sentinel'));
 	$state_updates['nginx_last_reload_result'] = !empty($reload['stderr_summary']) ? (string) $reload['stderr_summary'] : (string) ($reload['stdout_summary'] ?? __('nginx reload completed.', 'freesiem-sentinel'));
+	$state_updates['live_https_status'] = (string) ($endpoint_status['https'] ?? '');
+	$state_updates['live_redirect_status'] = (string) ($endpoint_status['redirect'] ?? '');
+	$state_updates['live_hsts_status'] = (string) ($endpoint_status['hsts'] ?? '');
+	$state_updates['live_status_checked_at'] = (string) ($endpoint_status['checked_at'] ?? $executed_at);
 	freesiem_sentinel_update_ssl_state($state_updates);
 
 	return [
@@ -3047,6 +3083,7 @@ function freesiem_sentinel_apply_ssl_to_nginx(bool $enable_redirect = false): ar
 		'test' => $test,
 		'reload' => $reload,
 		'https_summary' => $https_summary,
+		'endpoint_status' => $endpoint_status,
 		'executed_at' => $executed_at,
 	];
 }

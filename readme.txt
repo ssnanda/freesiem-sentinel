@@ -3,7 +3,7 @@ Contributors: freesiem
 Requires at least: 6.4
 Tested up to: 6.8
 Requires PHP: 8.1
-Stable tag: 0.3.14
+Stable tag: 0.3.15
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -70,6 +70,10 @@ Version bumps should always have matching git tags.
 GitHub Actions publishes the ZIP automatically when a `v*` tag is pushed.
 
 == Changelog ==
+
+= 0.3.15 =
+
+* Remove the SSL readiness overview block, add a dedicated Re-Issue Certificate action, and make Force HTTPS plus HSTS apply through nginx with live status checks
 
 = 0.3.14 =
 
