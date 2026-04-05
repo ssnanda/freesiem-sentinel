@@ -19,6 +19,7 @@ class Freesiem_Admin
 		add_action('admin_menu', [$this, 'remove_synchy_top_level_menu'], 999);
 		add_action('admin_init', [$this->plugin, 'maybe_process_pending_task_maintenance']);
 		add_action('admin_init', [$this, 'maybe_redirect_legacy_synchy_pages']);
+		add_action('admin_init', [$this, 'maybe_redirect_removed_about_pages']);
 		add_action('admin_enqueue_scripts', [$this, 'maybe_enqueue_synchy_assets']);
 		add_action('admin_notices', 'freesiem_sentinel_render_notices');
 		add_action('admin_post_freesiem_sentinel_save_cloud_connect_contact', [$this, 'handle_save_cloud_connect_contact']);
@@ -89,7 +90,6 @@ class Freesiem_Admin
 		add_submenu_page('freesiem-portal', __('Synchy', 'freesiem-sentinel'), __('Synchy', 'freesiem-sentinel'), 'manage_options', FREESIEM_SENTINEL_SYNCHY_PAGE, [$this, 'render_synchy_page']);
 		add_submenu_page('freesiem-portal', __('Logs', 'freesiem-sentinel'), __('Logs', 'freesiem-sentinel'), 'manage_options', 'freesiem-logs', [$this, 'render_logs_page']);
 		add_submenu_page('freesiem-portal', __('Pending Tasks', 'freesiem-sentinel'), __('Pending Tasks', 'freesiem-sentinel'), 'read', 'freesiem-pending-tasks', [$this, 'render_pending_tasks_page']);
-		add_submenu_page('freesiem-portal', __('About', 'freesiem-sentinel'), __('About', 'freesiem-sentinel'), 'manage_options', 'freesiem-about', [$this, 'render_about_page']);
 		add_submenu_page('', __('Scan', 'freesiem-sentinel'), __('Scan', 'freesiem-sentinel'), 'manage_options', 'freesiem-scan', [$this, 'render_scan_page']);
 	}
 
@@ -136,6 +136,20 @@ class Freesiem_Admin
 			)
 		);
 		exit;
+	}
+
+	public function maybe_redirect_removed_about_pages(): void
+	{
+		if (!is_admin() || !current_user_can('manage_options')) {
+			return;
+		}
+
+		$page = isset($_GET['page']) ? sanitize_key((string) wp_unslash($_GET['page'])) : '';
+
+		if ($page === 'freesiem-about') {
+			wp_safe_redirect(freesiem_sentinel_admin_page_url('freesiem-portal'));
+			exit;
+		}
 	}
 
 	public function maybe_enqueue_synchy_assets(string $hook_suffix): void
@@ -196,7 +210,7 @@ class Freesiem_Admin
 					[
 						'ajaxUrl' => admin_url('admin-ajax.php'),
 						'nonce' => wp_create_nonce('synchy_sync_ajax'),
-						'localPluginVersion' => defined('SYNCHY_VERSION') ? SYNCHY_VERSION : FREESIEM_SENTINEL_VERSION,
+						'localPluginVersion' => FREESIEM_SENTINEL_VERSION,
 						'currentJob' => synchy_build_sync_job_response(synchy_get_visible_sync_job()),
 						'connectionState' => synchy_get_current_sync_connection_state(synchy_get_site_sync_options()),
 						'defaultStages' => synchy_get_sync_stage_items([]),
@@ -1239,7 +1253,10 @@ class Freesiem_Admin
 		echo '</h2>';
 		echo '</div>';
 
+		ob_start();
 		synchy_render_page($this->get_synchy_legacy_page_slug($current_tab));
+		$html = (string) ob_get_clean();
+		echo $this->filter_synchy_rendered_page_html($html, $current_tab); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped
 	}
 
 	public function render_stealth_mode_page(): void
@@ -3513,10 +3530,6 @@ class Freesiem_Admin
 				'label' => __('Sync', 'freesiem-sentinel'),
 				'legacy_slug' => 'synchy-site-sync',
 			],
-			'about' => [
-				'label' => __('About', 'freesiem-sentinel'),
-				'legacy_slug' => 'synchy-settings',
-			],
 		];
 	}
 
@@ -3541,6 +3554,10 @@ class Freesiem_Admin
 			return 'export';
 		}
 
+		if ($page === 'synchy-settings') {
+			return 'export';
+		}
+
 		foreach ($this->get_synchy_tabs() as $tab => $config) {
 			if ((string) ($config['legacy_slug'] ?? '') === $page) {
 				return $tab;
@@ -3548,6 +3565,37 @@ class Freesiem_Admin
 		}
 
 		return '';
+	}
+
+	private function filter_synchy_rendered_page_html(string $html, string $current_tab): string
+	{
+		$about_urls = [
+			preg_quote(admin_url('admin.php?page=synchy-settings'), '#'),
+			preg_quote(admin_url('admin.php?page=' . FREESIEM_SENTINEL_SYNCHY_PAGE . '&tab=about'), '#'),
+		];
+
+		foreach ($about_urls as $about_url) {
+			$html = preg_replace('#<a[^>]+href="' . $about_url . '"[^>]*>.*?</a>#si', '', $html) ?? $html;
+		}
+
+		if ($current_tab === 'sync') {
+			$sentinel_version = esc_html(FREESIEM_SENTINEL_VERSION);
+			$html = preg_replace(
+				'#(<span class="synchy-export-meta__label">\s*Local plugin version\s*</span>\s*<strong>)([^<]+)(</strong>)#i',
+				'$1' . $sentinel_version . '$3',
+				$html
+			) ?? $html;
+			if (defined('SYNCHY_VERSION') && SYNCHY_VERSION !== '') {
+				$html = str_replace(SYNCHY_VERSION, FREESIEM_SENTINEL_VERSION, $html);
+			}
+			$html = str_replace(
+				'"localPluginVersion":"' . esc_js(defined('SYNCHY_VERSION') ? SYNCHY_VERSION : ''),
+				'"localPluginVersion":"' . esc_js(FREESIEM_SENTINEL_VERSION),
+				$html
+			);
+		}
+
+		return $html;
 	}
 
 	private function get_synchy_asset_path(string $asset): string

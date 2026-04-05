@@ -24,7 +24,6 @@ try {
 		'schedule' => 'Schedule',
 		'upload-live' => 'Upload to Live',
 		'sync' => 'Sync',
-		'about' => 'About',
 	];
 
 	$assert(function_exists('synchy_render_page'), 'Expected Synchy runtime functions to be available.');

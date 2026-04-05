@@ -28,6 +28,11 @@ const SYNCHY_IMPORT_OPTIONS = 'synchy_import_options';
 const SYNCHY_IMPORT_RESULT_OPTION = 'synchy_import_result';
 const SYNCHY_NOTICE_PREFIX = 'synchy_admin_notice_';
 
+function synchy_get_display_version(): string
+{
+	return defined('FREESIEM_SENTINEL_VERSION') ? FREESIEM_SENTINEL_VERSION : SYNCHY_VERSION;
+}
+
 if (!defined('SYNCHY_GITHUB_REPOSITORY')) {
 	define('SYNCHY_GITHUB_REPOSITORY', 'https://github.com/ssnanda/synchy');
 }
@@ -488,13 +493,6 @@ function synchy_get_pages(): array
 				'headline' => __('Sync', 'synchy'),
 				'description' => __('Sync only changed files and selected database deltas after the first baseline.', 'synchy'),
 			],
-		[
-			'slug' => 'synchy-settings',
-			'title' => __('About', 'synchy'),
-			'menu_title' => __('About', 'synchy'),
-			'headline' => __('About', 'synchy'),
-			'description' => __('See Synchy configuration details, release/update wiring, and what each workflow area is responsible for.', 'synchy'),
-		],
 	];
 }
 
@@ -9092,7 +9090,7 @@ function synchy_render_incremental_site_sync_page(array $current): void
 										</div>
 										<div>
 											<span class="synchy-export-meta__label"><?php esc_html_e('Local plugin version', 'synchy'); ?></span>
-											<strong><?php echo esc_html(SYNCHY_VERSION); ?></strong>
+											<strong><?php echo esc_html(synchy_get_display_version()); ?></strong>
 										</div>
 										<div>
 											<span class="synchy-export-meta__label"><?php esc_html_e('Plugin version', 'synchy'); ?></span>
@@ -9944,7 +9942,7 @@ add_action('rest_api_init', function (): void {
 					[
 						'name' => get_bloginfo('name'),
 						'siteUrl' => home_url('/'),
-						'pluginVersion' => SYNCHY_VERSION,
+						'pluginVersion' => synchy_get_display_version(),
 						'wordpressVersion' => get_bloginfo('version'),
 						'authenticatedAs' => $user instanceof WP_User ? (string) $user->user_login : '',
 						'receiverMode' => 'root_installer_package_upload',
@@ -10011,7 +10009,7 @@ add_action('rest_api_init', function (): void {
 					return rest_ensure_response([
 						'success' => true,
 						'message' => __('Synchy updated the destination plugin files successfully.', 'synchy'),
-						'pluginVersion' => SYNCHY_VERSION,
+						'pluginVersion' => synchy_get_display_version(),
 					]);
 				} finally {
 					if (is_dir($temp_dir)) {
@@ -10291,7 +10289,7 @@ add_action('admin_enqueue_scripts', function (string $hook_suffix): void {
 			[
 				'ajaxUrl' => admin_url('admin-ajax.php'),
 				'nonce' => wp_create_nonce('synchy_sync_ajax'),
-				'localPluginVersion' => SYNCHY_VERSION,
+				'localPluginVersion' => synchy_get_display_version(),
 				'currentJob' => synchy_build_sync_job_response(synchy_get_visible_sync_job()),
 				'connectionState' => synchy_get_current_sync_connection_state(synchy_get_site_sync_options()),
 				'defaultStages' => synchy_get_sync_stage_items([]),
