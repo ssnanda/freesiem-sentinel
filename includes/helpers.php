@@ -87,6 +87,9 @@ function freesiem_sentinel_get_default_login_protection_settings(): array
 		'enabled' => 0,
 		'max_failed_attempts' => 5,
 		'lockout_duration_minutes' => 15,
+		'tracking_mode' => 'both',
+		'enable_permanent_ban' => 0,
+		'permanent_ban_threshold' => 0,
 		'track_failed_login_count' => 1,
 		'log_successful_logins' => 1,
 		'log_failed_logins' => 1,
@@ -119,13 +122,48 @@ function freesiem_sentinel_sanitize_login_protection_settings(array $settings): 
 {
 	$settings = wp_parse_args($settings, freesiem_sentinel_get_default_login_protection_settings());
 	$settings['enabled'] = empty($settings['enabled']) ? 0 : 1;
-	$settings['max_failed_attempts'] = max(1, min(20, (int) ($settings['max_failed_attempts'] ?? 5)));
+	$settings['max_failed_attempts'] = max(1, min(100, (int) ($settings['max_failed_attempts'] ?? 5)));
 	$settings['lockout_duration_minutes'] = max(1, min(1440, (int) ($settings['lockout_duration_minutes'] ?? 15)));
+	$settings['tracking_mode'] = in_array((string) ($settings['tracking_mode'] ?? 'both'), ['ip', 'username', 'both'], true) ? (string) $settings['tracking_mode'] : 'both';
+	$settings['enable_permanent_ban'] = empty($settings['enable_permanent_ban']) ? 0 : 1;
+	$settings['permanent_ban_threshold'] = max(0, min(1000, (int) ($settings['permanent_ban_threshold'] ?? 0)));
 	$settings['track_failed_login_count'] = empty($settings['track_failed_login_count']) ? 0 : 1;
 	$settings['log_successful_logins'] = empty($settings['log_successful_logins']) ? 0 : 1;
 	$settings['log_failed_logins'] = empty($settings['log_failed_logins']) ? 0 : 1;
 
 	return $settings;
+}
+
+function freesiem_sentinel_get_login_protection_failed_login_delay_ms(): int
+{
+	return 350;
+}
+
+function freesiem_sentinel_get_login_protection_progressive_thresholds(?array $settings = null): array
+{
+	$settings = is_array($settings) ? $settings : freesiem_sentinel_get_login_protection_settings();
+	$base_attempts = max(1, (int) ($settings['max_failed_attempts'] ?? 5));
+	$base_duration = max(1, (int) ($settings['lockout_duration_minutes'] ?? 15));
+	$rules = [
+		[
+			'threshold' => $base_attempts,
+			'duration_minutes' => $base_duration,
+		],
+		[
+			'threshold' => max($base_attempts * 2, 10),
+			'duration_minutes' => max($base_duration * 4, 60),
+		],
+		[
+			'threshold' => max($base_attempts * 4, 20),
+			'duration_minutes' => max($base_duration * 96, 1440),
+		],
+	];
+
+	usort($rules, static function (array $left, array $right): int {
+		return (int) ($left['threshold'] ?? 0) <=> (int) ($right['threshold'] ?? 0);
+	});
+
+	return $rules;
 }
 
 function freesiem_sentinel_get_default_stealth_mode_settings(): array
@@ -525,29 +563,329 @@ function freesiem_sentinel_get_log_event_types(): array
 	return array_values(array_filter(array_map('sanitize_key', is_array($rows) ? $rows : [])));
 }
 
+function freesiem_sentinel_get_filtered_log_rows(array $filters = [], int $limit = 100): array
+{
+	global $wpdb;
+
+	freesiem_sentinel_maybe_upgrade_logs_table();
+	$table = freesiem_sentinel_get_logs_table_name();
+	$limit = max(1, min(500, $limit));
+	$where = [];
+	$params = [];
+	$event_type = sanitize_key((string) ($filters['event_type'] ?? ''));
+	$scope = sanitize_key((string) ($filters['scope'] ?? ''));
+	$username = sanitize_user((string) ($filters['username'] ?? ''), true);
+	$ip_address = sanitize_text_field((string) ($filters['ip_address'] ?? ''));
+
+	if ($event_type !== '') {
+		$where[] = 'event_type = %s';
+		$params[] = $event_type;
+	}
+
+	if ($scope !== '') {
+		$scope_types = match ($scope) {
+			'failures' => ['login_failed', 'invalid_username_attempt'],
+			'lockouts' => ['lockout_triggered', 'lockout_denied_request'],
+			'bans' => ['permanent_ban_triggered'],
+			default => [],
+		};
+
+		if ($scope_types !== []) {
+			$placeholders = implode(', ', array_fill(0, count($scope_types), '%s'));
+			$where[] = "event_type IN ({$placeholders})";
+			foreach ($scope_types as $type) {
+				$params[] = sanitize_key($type);
+			}
+		}
+	}
+
+	if ($username !== '') {
+		$where[] = 'username LIKE %s';
+		$params[] = '%' . $wpdb->esc_like($username) . '%';
+	}
+
+	if ($ip_address !== '') {
+		$where[] = 'ip_address LIKE %s';
+		$params[] = '%' . $wpdb->esc_like($ip_address) . '%';
+	}
+
+	$sql = "SELECT * FROM {$table}";
+	if ($where !== []) {
+		$sql .= ' WHERE ' . implode(' AND ', $where);
+	}
+	$sql .= ' ORDER BY id DESC LIMIT %d';
+	$params[] = $limit;
+
+	$query = $wpdb->prepare($sql, ...$params);
+	$rows = $wpdb->get_results($query, ARRAY_A);
+
+	return is_array($rows) ? $rows : [];
+}
+
+function freesiem_sentinel_normalize_login_protection_record(array $record): array
+{
+	$locked_until = (int) ($record['locked_until'] ?? 0);
+	$last_failure_at = (int) ($record['last_failure_at'] ?? 0);
+	$attempts = max(0, (int) ($record['attempts'] ?? 0));
+	$total_offenses = max(0, (int) ($record['total_offenses'] ?? 0));
+
+	return [
+		'key' => sanitize_key((string) ($record['key'] ?? '')),
+		'key_type' => in_array((string) ($record['key_type'] ?? ''), ['ip', 'username', 'combined'], true) ? (string) $record['key_type'] : 'combined',
+		'ip_address' => sanitize_text_field((string) ($record['ip_address'] ?? '')),
+		'username' => sanitize_user((string) ($record['username'] ?? ''), true),
+		'attempts' => $attempts,
+		'total_offenses' => $total_offenses,
+		'locked_until' => $locked_until,
+		'permanently_banned' => empty($record['permanently_banned']) ? 0 : 1,
+		'last_failure_at' => $last_failure_at,
+		'reason' => sanitize_text_field((string) ($record['reason'] ?? '')),
+	];
+}
+
+function freesiem_sentinel_get_login_protection_record_status(array $record): string
+{
+	if (!empty($record['permanently_banned'])) {
+		return 'permanent_ban';
+	}
+
+	if ((int) ($record['locked_until'] ?? 0) > time()) {
+		return 'active_lockout';
+	}
+
+	return 'expired';
+}
+
+function freesiem_sentinel_get_login_protection_records(bool $include_expired = true): array
+{
+	$stored = get_option(FREESIEM_SENTINEL_LOGIN_PROTECTION_STATE_OPTION, []);
+	$records = [];
+	$changed = false;
+	$prune_before = time() - (30 * DAY_IN_SECONDS);
+
+	if (!is_array($stored)) {
+		$stored = [];
+	}
+
+	foreach ($stored as $key => $record) {
+		if (!is_array($record)) {
+			$changed = true;
+			continue;
+		}
+
+		$normalized = freesiem_sentinel_normalize_login_protection_record($record);
+		if ($normalized['key'] === '') {
+			$normalized['key'] = sanitize_key((string) $key);
+		}
+
+		if ($normalized['key'] === '') {
+			$changed = true;
+			continue;
+		}
+
+		if (
+			empty($normalized['permanently_banned']) &&
+			(int) $normalized['locked_until'] === 0 &&
+			(int) $normalized['attempts'] === 0 &&
+			(int) $normalized['last_failure_at'] > 0 &&
+			(int) $normalized['last_failure_at'] < $prune_before
+		) {
+			$changed = true;
+			continue;
+		}
+
+		if (!$include_expired && freesiem_sentinel_get_login_protection_record_status($normalized) === 'expired') {
+			continue;
+		}
+
+		$records[$normalized['key']] = $normalized;
+	}
+
+	if ($changed) {
+		if ($records === []) {
+			delete_option(FREESIEM_SENTINEL_LOGIN_PROTECTION_STATE_OPTION);
+		} else {
+			update_option(FREESIEM_SENTINEL_LOGIN_PROTECTION_STATE_OPTION, $records, false);
+		}
+	}
+
+	uasort($records, static function (array $left, array $right): int {
+		return (int) ($right['last_failure_at'] ?? 0) <=> (int) ($left['last_failure_at'] ?? 0);
+	});
+
+	return $records;
+}
+
+function freesiem_sentinel_save_login_protection_records(array $records): void
+{
+	$normalized_records = [];
+
+	foreach ($records as $record) {
+		if (!is_array($record)) {
+			continue;
+		}
+
+		$normalized = freesiem_sentinel_normalize_login_protection_record($record);
+		if ($normalized['key'] === '') {
+			continue;
+		}
+
+		$normalized_records[$normalized['key']] = $normalized;
+	}
+
+	if (get_option(FREESIEM_SENTINEL_LOGIN_PROTECTION_STATE_OPTION, null) === null) {
+		add_option(FREESIEM_SENTINEL_LOGIN_PROTECTION_STATE_OPTION, $normalized_records, '', false);
+	} else {
+		update_option(FREESIEM_SENTINEL_LOGIN_PROTECTION_STATE_OPTION, $normalized_records, false);
+	}
+}
+
+function freesiem_sentinel_get_login_protection_identity(string $username = '', string $ip_address = '', ?array $settings = null): array
+{
+	$settings = is_array($settings) ? $settings : freesiem_sentinel_get_login_protection_settings();
+	$tracking_mode = (string) ($settings['tracking_mode'] ?? 'both');
+	$username = sanitize_user($username, true);
+	$ip_address = $ip_address !== '' ? sanitize_text_field($ip_address) : freesiem_sentinel_get_request_ip();
+	$key_type = 'combined';
+	$seed = '';
+
+	if ($tracking_mode === 'ip' || ($tracking_mode === 'both' && $username === '')) {
+		$key_type = 'ip';
+		$seed = strtolower($ip_address);
+	} elseif ($tracking_mode === 'username' || ($tracking_mode === 'both' && $ip_address === '')) {
+		$key_type = 'username';
+		$seed = strtolower($username);
+	} else {
+		$key_type = 'combined';
+		$seed = strtolower($username . '|' . $ip_address);
+	}
+
+	return [
+		'key' => $seed !== '' ? 'freesiem_sentinel_login_' . md5($seed) : '',
+		'key_type' => $key_type,
+		'username' => $username,
+		'ip_address' => $ip_address,
+	];
+}
+
+function freesiem_sentinel_get_login_protection_record(string $username = '', string $ip_address = '', ?array $settings = null): array
+{
+	$identity = freesiem_sentinel_get_login_protection_identity($username, $ip_address, $settings);
+	if ($identity['key'] === '') {
+		return [
+			'key' => '',
+			'key_type' => 'combined',
+			'ip_address' => $identity['ip_address'],
+			'username' => $identity['username'],
+			'attempts' => 0,
+			'total_offenses' => 0,
+			'locked_until' => 0,
+			'permanently_banned' => 0,
+			'last_failure_at' => 0,
+			'reason' => '',
+		];
+	}
+
+	$records = freesiem_sentinel_get_login_protection_records(true);
+	if (!isset($records[$identity['key']])) {
+		return array_merge($identity, [
+			'attempts' => 0,
+			'total_offenses' => 0,
+			'locked_until' => 0,
+			'permanently_banned' => 0,
+			'last_failure_at' => 0,
+			'reason' => '',
+		]);
+	}
+
+	return array_merge($identity, $records[$identity['key']]);
+}
+
+function freesiem_sentinel_upsert_login_protection_record(array $record): array
+{
+	$normalized = freesiem_sentinel_normalize_login_protection_record($record);
+	if ($normalized['key'] === '') {
+		return $normalized;
+	}
+
+	$records = freesiem_sentinel_get_login_protection_records(true);
+	$records[$normalized['key']] = $normalized;
+	freesiem_sentinel_save_login_protection_records($records);
+
+	return $normalized;
+}
+
+function freesiem_sentinel_delete_login_protection_record(string $key): bool
+{
+	$key = sanitize_key($key);
+	if ($key === '') {
+		return false;
+	}
+
+	$records = freesiem_sentinel_get_login_protection_records(true);
+	if (!isset($records[$key])) {
+		return false;
+	}
+
+	unset($records[$key]);
+	freesiem_sentinel_save_login_protection_records($records);
+
+	return true;
+}
+
+function freesiem_sentinel_delete_expired_login_protection_records(): int
+{
+	$records = freesiem_sentinel_get_login_protection_records(true);
+	$removed = 0;
+
+	foreach ($records as $key => $record) {
+		if (freesiem_sentinel_get_login_protection_record_status($record) !== 'expired') {
+			continue;
+		}
+
+		unset($records[$key]);
+		$removed++;
+	}
+
+	if ($removed > 0) {
+		freesiem_sentinel_save_login_protection_records($records);
+	}
+
+	return $removed;
+}
+
 function freesiem_sentinel_get_login_lockout_key(string $username = ''): string
 {
-	$ip = freesiem_sentinel_get_request_ip();
-	$seed = strtolower(trim($username)) . '|' . $ip;
-
-	return 'freesiem_sentinel_login_' . md5($seed);
+	return (string) freesiem_sentinel_get_login_protection_identity($username)['key'];
 }
 
 function freesiem_sentinel_get_login_lockout_state(string $username = ''): array
 {
-	$state = get_transient(freesiem_sentinel_get_login_lockout_key($username));
+	$record = freesiem_sentinel_get_login_protection_record($username);
 
-	return is_array($state) ? $state : ['count' => 0, 'locked_until' => 0];
+	return [
+		'count' => (int) ($record['attempts'] ?? 0),
+		'locked_until' => (int) ($record['locked_until'] ?? 0),
+		'permanently_banned' => empty($record['permanently_banned']) ? 0 : 1,
+		'key' => (string) ($record['key'] ?? ''),
+	];
 }
 
 function freesiem_sentinel_update_login_lockout_state(string $username, array $state, int $minutes): void
 {
-	set_transient(freesiem_sentinel_get_login_lockout_key($username), $state, max(1, $minutes) * MINUTE_IN_SECONDS);
+	$record = freesiem_sentinel_get_login_protection_record($username);
+	$record['attempts'] = max(0, (int) ($state['count'] ?? $record['attempts'] ?? 0));
+	$record['locked_until'] = !empty($state['locked_until']) ? (int) $state['locked_until'] : (time() + (max(1, $minutes) * MINUTE_IN_SECONDS));
+	$record['last_failure_at'] = max((int) ($record['last_failure_at'] ?? 0), time());
+	freesiem_sentinel_upsert_login_protection_record($record);
 }
 
 function freesiem_sentinel_clear_login_lockout_state(string $username = ''): void
 {
-	delete_transient(freesiem_sentinel_get_login_lockout_key($username));
+	$key = freesiem_sentinel_get_login_lockout_key($username);
+	if ($key !== '') {
+		freesiem_sentinel_delete_login_protection_record($key);
+	}
 }
 
 function freesiem_sentinel_get_stealth_login_url(?array $settings = null): string

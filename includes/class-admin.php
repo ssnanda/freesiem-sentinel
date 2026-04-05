@@ -50,9 +50,11 @@ class Freesiem_Admin
 		add_action('admin_post_freesiem_sentinel_apply_ssl_to_nginx', [$this, 'handle_apply_ssl_to_nginx']);
 		add_action('admin_post_freesiem_sentinel_install_certbot', [$this, 'handle_install_certbot']);
 		add_action('admin_post_freesiem_sentinel_save_login_protection', [$this, 'handle_save_login_protection']);
+		add_action('admin_post_freesiem_sentinel_unblock_login_protection_record', [$this, 'handle_unblock_login_protection_record']);
+		add_action('admin_post_freesiem_sentinel_unblock_expired_login_protection_records', [$this, 'handle_unblock_expired_login_protection_records']);
 		add_action('admin_post_freesiem_sentinel_save_stealth_mode', [$this, 'handle_save_stealth_mode']);
 		add_action('admin_post_freesiem_sentinel_clear_logs', [$this, 'handle_clear_logs']);
-		add_action('wp_login_failed', [$this, 'handle_login_failed_event']);
+		add_action('wp_login_failed', [$this, 'handle_login_failed_event'], 10, 2);
 		add_action('wp_login', [$this, 'handle_login_success_event'], 10, 2);
 		add_action('init', [$this, 'maybe_handle_stealth_mode'], 1);
 		add_action('login_form', [$this, 'render_stealth_login_token_field']);
@@ -686,16 +688,66 @@ class Freesiem_Admin
 		$this->assert_manage_permissions();
 		freesiem_sentinel_require_admin_post_nonce();
 
-		freesiem_sentinel_update_login_protection_settings([
+		$settings = freesiem_sentinel_update_login_protection_settings([
 			'enabled' => empty($_POST['enabled']) ? 0 : 1,
 			'max_failed_attempts' => isset($_POST['max_failed_attempts']) ? (int) $_POST['max_failed_attempts'] : 5,
 			'lockout_duration_minutes' => isset($_POST['lockout_duration_minutes']) ? (int) $_POST['lockout_duration_minutes'] : 15,
+			'tracking_mode' => isset($_POST['tracking_mode']) ? sanitize_key(wp_unslash((string) $_POST['tracking_mode'])) : 'both',
+			'enable_permanent_ban' => empty($_POST['enable_permanent_ban']) ? 0 : 1,
+			'permanent_ban_threshold' => isset($_POST['permanent_ban_threshold']) ? (int) $_POST['permanent_ban_threshold'] : 0,
 			'track_failed_login_count' => empty($_POST['track_failed_login_count']) ? 0 : 1,
 			'log_successful_logins' => empty($_POST['log_successful_logins']) ? 0 : 1,
 			'log_failed_logins' => empty($_POST['log_failed_logins']) ? 0 : 1,
 		]);
 
+		if (!empty($settings['enable_permanent_ban']) && (int) ($settings['permanent_ban_threshold'] ?? 0) < 1) {
+			freesiem_sentinel_set_notice('error', __('Permanent ban threshold must be at least 1 when permanent bans are enabled.', 'freesiem-sentinel'));
+			$this->redirect_to_page('freesiem-login-protection');
+		}
+
 		freesiem_sentinel_set_notice('success', __('Login Protection settings saved.', 'freesiem-sentinel'));
+		$this->redirect_to_page('freesiem-login-protection');
+	}
+
+	public function handle_unblock_login_protection_record(): void
+	{
+		$this->assert_manage_permissions();
+		freesiem_sentinel_require_admin_post_nonce();
+
+		$key = isset($_POST['record_key']) ? sanitize_key(wp_unslash((string) $_POST['record_key'])) : '';
+		$record = $key !== '' ? freesiem_sentinel_get_login_protection_records(true)[$key] ?? null : null;
+
+		if (!is_array($record) || $key === '') {
+			freesiem_sentinel_set_notice('error', __('Login Protection record not found.', 'freesiem-sentinel'));
+			$this->redirect_to_page('freesiem-login-protection');
+		}
+
+		freesiem_sentinel_delete_login_protection_record($key);
+		freesiem_sentinel_log_event('login_unblocked', __('A Login Protection record was manually unblocked.', 'freesiem-sentinel'), (string) ($record['username'] ?? ''), (string) ($record['ip_address'] ?? ''), [
+			'key_type' => (string) ($record['key_type'] ?? 'combined'),
+			'actor' => 'admin',
+		]);
+		do_action('freesiem_sentinel_login_unblocked', $record, ['source' => 'admin']);
+
+		freesiem_sentinel_set_notice('success', __('Login Protection record unblocked.', 'freesiem-sentinel'));
+		$this->redirect_to_page('freesiem-login-protection');
+	}
+
+	public function handle_unblock_expired_login_protection_records(): void
+	{
+		$this->assert_manage_permissions();
+		freesiem_sentinel_require_admin_post_nonce();
+
+		$removed = freesiem_sentinel_delete_expired_login_protection_records();
+		if ($removed > 0) {
+			freesiem_sentinel_log_event('login_unblocked', __('Expired Login Protection records were cleared.', 'freesiem-sentinel'), '', '', [
+				'count' => $removed,
+				'actor' => 'admin',
+			]);
+			do_action('freesiem_sentinel_login_unblocked', ['bulk' => true, 'count' => $removed], ['source' => 'admin']);
+		}
+
+		freesiem_sentinel_set_notice('success', sprintf(_n('%d expired record cleared.', '%d expired records cleared.', $removed, 'freesiem-sentinel'), $removed));
 		$this->redirect_to_page('freesiem-login-protection');
 	}
 
@@ -839,25 +891,99 @@ class Freesiem_Admin
 	{
 		$this->assert_manage_permissions();
 		$settings = freesiem_sentinel_get_login_protection_settings();
-		$current_state = freesiem_sentinel_get_login_lockout_state();
+		$records = array_values(freesiem_sentinel_get_login_protection_records(true));
+		$active_count = 0;
+		$ban_count = 0;
+
+		foreach ($records as $record) {
+			$status = freesiem_sentinel_get_login_protection_record_status($record);
+			if ($status === 'active_lockout') {
+				$active_count++;
+			} elseif ($status === 'permanent_ban') {
+				$ban_count++;
+			}
+		}
 
 		echo '<div class="wrap">';
 		echo '<h1>' . esc_html__('Login Protection', 'freesiem-sentinel') . '</h1>';
-		echo '<p>' . esc_html__('Configure lightweight login attempt tracking and lockout behavior for WordPress sign-in events.', 'freesiem-sentinel') . '</p>';
+		echo '<p>' . esc_html__('Configure brute-force protection, failed login tracking, lockouts, and recovery actions for WordPress sign-in events.', 'freesiem-sentinel') . '</p>';
+		echo '<p><strong>' . esc_html__('Current status', 'freesiem-sentinel') . ':</strong> ' . esc_html(sprintf(__('Active lockouts: %1$d | Permanent bans: %2$d | Tracked records: %3$d', 'freesiem-sentinel'), $active_count, $ban_count, count($records))) . '</p>';
 		echo '<form method="post" action="' . esc_url(admin_url('admin-post.php')) . '">';
 		wp_nonce_field(FREESIEM_SENTINEL_NONCE_ACTION);
 		echo '<input type="hidden" name="action" value="freesiem_sentinel_save_login_protection" />';
 		echo '<table class="form-table" role="presentation">';
 		$this->render_ssl_checkbox_field('enabled', __('Enable login protection', 'freesiem-sentinel'), !empty($settings['enabled']), __('When enabled, Sentinel tracks failed logins and temporarily locks out repeated attempts.', 'freesiem-sentinel'));
-		echo '<tr><th scope="row"><label for="freesiem-max-failed-attempts">' . esc_html__('Max failed login attempts', 'freesiem-sentinel') . '</label></th><td><input id="freesiem-max-failed-attempts" type="number" min="1" max="20" name="max_failed_attempts" value="' . esc_attr((string) ($settings['max_failed_attempts'] ?? 5)) . '" class="small-text" /></td></tr>';
+		echo '<tr><th scope="row"><label for="freesiem-max-failed-attempts">' . esc_html__('Max failed login attempts', 'freesiem-sentinel') . '</label></th><td><input id="freesiem-max-failed-attempts" type="number" min="1" max="100" name="max_failed_attempts" value="' . esc_attr((string) ($settings['max_failed_attempts'] ?? 5)) . '" class="small-text" /><p class="description">' . esc_html__('Base threshold for the first lockout. Progressive lockouts automatically escalate from this value.', 'freesiem-sentinel') . '</p></td></tr>';
 		echo '<tr><th scope="row"><label for="freesiem-lockout-duration">' . esc_html__('Lockout duration (minutes)', 'freesiem-sentinel') . '</label></th><td><input id="freesiem-lockout-duration" type="number" min="1" max="1440" name="lockout_duration_minutes" value="' . esc_attr((string) ($settings['lockout_duration_minutes'] ?? 15)) . '" class="small-text" /></td></tr>';
+		echo '<tr><th scope="row"><label for="freesiem-tracking-mode">' . esc_html__('Tracking mode', 'freesiem-sentinel') . '</label></th><td><select id="freesiem-tracking-mode" name="tracking_mode">';
+		foreach ([
+			'both' => __('Both username and IP', 'freesiem-sentinel'),
+			'username' => __('Username only', 'freesiem-sentinel'),
+			'ip' => __('IP only', 'freesiem-sentinel'),
+		] as $value => $label) {
+			echo '<option value="' . esc_attr($value) . '" ' . selected((string) ($settings['tracking_mode'] ?? 'both'), $value, false) . '>' . esc_html($label) . '</option>';
+		}
+		echo '</select><p class="description">' . esc_html__('Both username and IP is the recommended default because it reduces collateral lockouts while still slowing brute-force attempts.', 'freesiem-sentinel') . '</p></td></tr>';
+		$this->render_ssl_checkbox_field('enable_permanent_ban', __('Enable permanent bans', 'freesiem-sentinel'), !empty($settings['enable_permanent_ban']), __('When enabled, repeated lockout offenses can be converted into a permanent block until an admin clears the record.', 'freesiem-sentinel'));
+		echo '<tr><th scope="row"><label for="freesiem-permanent-ban-threshold">' . esc_html__('Permanent ban after offenses', 'freesiem-sentinel') . '</label></th><td><input id="freesiem-permanent-ban-threshold" type="number" min="0" max="1000" name="permanent_ban_threshold" value="' . esc_attr((string) ($settings['permanent_ban_threshold'] ?? 0)) . '" class="small-text" /><p class="description">' . esc_html__('Set to 0 to disable permanent bans. When enabled, the value represents how many lockout offenses must occur before a permanent ban is applied.', 'freesiem-sentinel') . '</p></td></tr>';
 		$this->render_ssl_checkbox_field('track_failed_login_count', __('Track failed login count', 'freesiem-sentinel'), !empty($settings['track_failed_login_count']), __('Stores the current failed-attempt counter per username/IP key for lockout evaluation.', 'freesiem-sentinel'));
 		$this->render_ssl_checkbox_field('log_successful_logins', __('Log successful logins', 'freesiem-sentinel'), !empty($settings['log_successful_logins']), __('Adds wp_login events to the Sentinel Logs page.', 'freesiem-sentinel'));
 		$this->render_ssl_checkbox_field('log_failed_logins', __('Log failed logins', 'freesiem-sentinel'), !empty($settings['log_failed_logins']), __('Adds wp_login_failed and lockout events to the Sentinel Logs page.', 'freesiem-sentinel'));
 		echo '</table>';
+		$thresholds = freesiem_sentinel_get_login_protection_progressive_thresholds($settings);
+		echo '<p><strong>' . esc_html__('Progressive lockout defaults', 'freesiem-sentinel') . ':</strong> ';
+		$threshold_labels = [];
+		foreach ($thresholds as $rule) {
+			$threshold_labels[] = sprintf(__('%1$d attempts => %2$d minutes', 'freesiem-sentinel'), (int) ($rule['threshold'] ?? 0), (int) ($rule['duration_minutes'] ?? 0));
+		}
+		echo esc_html(implode(' | ', $threshold_labels)) . '</p>';
 		submit_button(__('Save Login Protection Settings', 'freesiem-sentinel'));
 		echo '</form>';
-		echo '<p><strong>' . esc_html__('Current failed-attempt state', 'freesiem-sentinel') . ':</strong> ' . esc_html(sprintf(__('count=%1$d locked_until=%2$s', 'freesiem-sentinel'), (int) ($current_state['count'] ?? 0), !empty($current_state['locked_until']) ? gmdate('Y-m-d H:i:s', (int) $current_state['locked_until']) : __('not locked', 'freesiem-sentinel'))) . '</p>';
+
+		echo '<hr style="margin:24px 0;" />';
+		echo '<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:0 0 12px 0;">';
+		echo '<h2 style="margin:0;">' . esc_html__('Active Lockouts / Bans', 'freesiem-sentinel') . '</h2>';
+		echo '<form method="post" action="' . esc_url(admin_url('admin-post.php')) . '" style="margin:0;">';
+		wp_nonce_field(FREESIEM_SENTINEL_NONCE_ACTION);
+		echo '<input type="hidden" name="action" value="freesiem_sentinel_unblock_expired_login_protection_records" />';
+		submit_button(__('Unblock All Expired', 'freesiem-sentinel'), 'secondary', '', false);
+		echo '</form>';
+		echo '</div>';
+
+		if ($records === []) {
+			echo '<p>' . esc_html__('No login protection records exist yet.', 'freesiem-sentinel') . '</p>';
+		} else {
+			echo '<div style="overflow:auto;">';
+			echo '<table class="widefat striped" style="min-width:1080px;"><thead><tr><th>' . esc_html__('Key Type', 'freesiem-sentinel') . '</th><th>' . esc_html__('IP', 'freesiem-sentinel') . '</th><th>' . esc_html__('Username', 'freesiem-sentinel') . '</th><th>' . esc_html__('Attempts', 'freesiem-sentinel') . '</th><th>' . esc_html__('Total Offenses', 'freesiem-sentinel') . '</th><th>' . esc_html__('Locked Until', 'freesiem-sentinel') . '</th><th>' . esc_html__('Status', 'freesiem-sentinel') . '</th><th>' . esc_html__('Last Failure', 'freesiem-sentinel') . '</th><th>' . esc_html__('Reason', 'freesiem-sentinel') . '</th><th>' . esc_html__('Actions', 'freesiem-sentinel') . '</th></tr></thead><tbody>';
+			foreach ($records as $record) {
+				$status = freesiem_sentinel_get_login_protection_record_status($record);
+				echo '<tr>';
+				echo '<td>' . esc_html((string) ($record['key_type'] ?? 'combined')) . '</td>';
+				echo '<td>' . esc_html((string) ($record['ip_address'] ?? '')) . '</td>';
+				echo '<td>' . esc_html((string) ($record['username'] ?? '')) . '</td>';
+				echo '<td>' . esc_html((string) ((int) ($record['attempts'] ?? 0))) . '</td>';
+				echo '<td>' . esc_html((string) ((int) ($record['total_offenses'] ?? 0))) . '</td>';
+				echo '<td>' . esc_html(!empty($record['locked_until']) ? gmdate('Y-m-d H:i:s', (int) $record['locked_until']) . ' UTC' : __('Not locked', 'freesiem-sentinel')) . '</td>';
+				echo '<td>' . esc_html(match ($status) {
+					'permanent_ban' => __('Permanent ban', 'freesiem-sentinel'),
+					'active_lockout' => __('Active lockout', 'freesiem-sentinel'),
+					default => __('Expired', 'freesiem-sentinel'),
+				}) . '</td>';
+				echo '<td>' . esc_html(!empty($record['last_failure_at']) ? gmdate('Y-m-d H:i:s', (int) $record['last_failure_at']) . ' UTC' : __('Never', 'freesiem-sentinel')) . '</td>';
+				echo '<td>' . esc_html((string) ($record['reason'] ?? '')) . '</td>';
+				echo '<td>';
+				echo '<form method="post" action="' . esc_url(admin_url('admin-post.php')) . '" style="margin:0;">';
+				wp_nonce_field(FREESIEM_SENTINEL_NONCE_ACTION);
+				echo '<input type="hidden" name="action" value="freesiem_sentinel_unblock_login_protection_record" />';
+				echo '<input type="hidden" name="record_key" value="' . esc_attr((string) ($record['key'] ?? '')) . '" />';
+				submit_button(__('Unblock', 'freesiem-sentinel'), 'secondary small', '', false, ['onclick' => "return confirm('" . esc_js(__('Clear this login protection record?', 'freesiem-sentinel')) . "');"]);
+				echo '</form>';
+				echo '</td>';
+				echo '</tr>';
+			}
+			echo '</tbody></table>';
+			echo '</div>';
+		}
 		echo '</div>';
 	}
 
@@ -923,7 +1049,15 @@ class Freesiem_Admin
 	{
 		$this->assert_manage_permissions();
 		$selected_type = isset($_GET['event_type']) ? sanitize_key((string) wp_unslash($_GET['event_type'])) : '';
-		$rows = freesiem_sentinel_get_log_rows($selected_type, 200);
+		$selected_scope = isset($_GET['scope']) ? sanitize_key((string) wp_unslash($_GET['scope'])) : '';
+		$search_username = isset($_GET['username']) ? sanitize_user((string) wp_unslash($_GET['username']), true) : '';
+		$search_ip = isset($_GET['ip_address']) ? sanitize_text_field((string) wp_unslash($_GET['ip_address'])) : '';
+		$rows = freesiem_sentinel_get_filtered_log_rows([
+			'event_type' => $selected_type,
+			'scope' => $selected_scope,
+			'username' => $search_username,
+			'ip_address' => $search_ip,
+		], 200);
 		$types = freesiem_sentinel_get_log_event_types();
 
 		echo '<div class="wrap">';
@@ -937,6 +1071,21 @@ class Freesiem_Admin
 			echo '<option value="' . esc_attr($type) . '" ' . selected($selected_type, $type, false) . '>' . esc_html($type) . '</option>';
 		}
 		echo '</select>';
+		echo '<label for="freesiem-log-scope">' . esc_html__('Group', 'freesiem-sentinel') . '</label>';
+		echo '<select id="freesiem-log-scope" name="scope">';
+		foreach ([
+			'' => __('All groups', 'freesiem-sentinel'),
+			'failures' => __('Failures', 'freesiem-sentinel'),
+			'lockouts' => __('Lockouts', 'freesiem-sentinel'),
+			'bans' => __('Bans', 'freesiem-sentinel'),
+		] as $value => $label) {
+			echo '<option value="' . esc_attr($value) . '" ' . selected($selected_scope, $value, false) . '>' . esc_html($label) . '</option>';
+		}
+		echo '</select>';
+		echo '<label for="freesiem-log-username">' . esc_html__('Username', 'freesiem-sentinel') . '</label>';
+		echo '<input id="freesiem-log-username" type="search" name="username" value="' . esc_attr($search_username) . '" class="regular-text" style="max-width:180px;" />';
+		echo '<label for="freesiem-log-ip">' . esc_html__('IP', 'freesiem-sentinel') . '</label>';
+		echo '<input id="freesiem-log-ip" type="search" name="ip_address" value="' . esc_attr($search_ip) . '" class="regular-text" style="max-width:180px;" />';
 		submit_button(__('Filter', 'freesiem-sentinel'), 'secondary', '', false);
 		echo '</form>';
 		echo '<form method="post" action="' . esc_url(admin_url('admin-post.php')) . '" style="margin:0 0 14px 0;">';
@@ -2757,6 +2906,51 @@ class Freesiem_Admin
 		};
 	}
 
+	private function get_login_protection_failure_context(string $username, ?WP_Error $error = null): array
+	{
+		$raw_username = sanitize_text_field($username);
+		$login_username = sanitize_user($raw_username, true);
+		$user = $login_username !== '' ? get_user_by('login', $login_username) : false;
+
+		if (!$user instanceof WP_User && is_email($raw_username)) {
+			$user = get_user_by('email', sanitize_email($raw_username));
+		}
+
+		$error_code = $error instanceof WP_Error ? (string) $error->get_error_code() : '';
+		$reason = $user instanceof WP_User ? 'invalid_password' : 'invalid_username';
+
+		if ($error_code === 'invalid_email') {
+			$reason = 'invalid_username';
+		} elseif ($error_code === 'incorrect_password') {
+			$reason = 'invalid_password';
+		} elseif ($error_code === 'invalid_username') {
+			$reason = 'invalid_username';
+		}
+
+		return [
+			'known_user' => $user instanceof WP_User,
+			'user' => $user instanceof WP_User ? $user : null,
+			'normalized_username' => $user instanceof WP_User ? (string) $user->user_login : $login_username,
+			'reason' => $reason,
+		];
+	}
+
+	private function maybe_apply_failed_login_delay(?WP_Error $error = null): void
+	{
+		$script_name = isset($_SERVER['SCRIPT_NAME']) ? (string) $_SERVER['SCRIPT_NAME'] : '';
+		$is_login_request = str_ends_with($script_name, 'wp-login.php');
+		$error_code = $error instanceof WP_Error ? (string) $error->get_error_code() : '';
+
+		if (!$is_login_request || wp_doing_ajax() || in_array($error_code, ['freesiem_login_locked', 'freesiem_login_banned'], true)) {
+			return;
+		}
+
+		$delay_ms = freesiem_sentinel_get_login_protection_failed_login_delay_ms();
+		if ($delay_ms > 0) {
+			usleep($delay_ms * 1000);
+		}
+	}
+
 	public function maybe_enforce_login_lockout($user, string $username, string $password)
 	{
 		$settings = freesiem_sentinel_get_login_protection_settings();
@@ -2764,10 +2958,22 @@ class Freesiem_Admin
 			return $user;
 		}
 
-		$state = freesiem_sentinel_get_login_lockout_state($username);
-		if (!empty($state['locked_until']) && (int) ($state['locked_until'] ?? 0) > time()) {
-			freesiem_sentinel_log_event('lockout_active', __('Login attempt blocked because the username/IP is currently locked out.', 'freesiem-sentinel'), $username, '', [
-				'locked_until' => (int) $state['locked_until'],
+		$record = freesiem_sentinel_get_login_protection_record($username, '', $settings);
+		if (!empty($record['permanently_banned'])) {
+			freesiem_sentinel_log_event('lockout_denied_request', __('Login attempt denied because this key is permanently banned.', 'freesiem-sentinel'), (string) ($record['username'] ?? $username), (string) ($record['ip_address'] ?? ''), [
+				'status' => 'permanent_ban',
+				'key_type' => (string) ($record['key_type'] ?? 'combined'),
+				'reason' => (string) ($record['reason'] ?? 'permanent_ban'),
+			]);
+
+			return new WP_Error('freesiem_login_banned', __('This login source has been blocked. Contact the site administrator.', 'freesiem-sentinel'));
+		}
+
+		if ((int) ($record['locked_until'] ?? 0) > time()) {
+			freesiem_sentinel_log_event('lockout_denied_request', __('Login attempt blocked because the username/IP is currently locked out.', 'freesiem-sentinel'), (string) ($record['username'] ?? $username), (string) ($record['ip_address'] ?? ''), [
+				'locked_until' => (int) ($record['locked_until'] ?? 0),
+				'status' => 'active_lockout',
+				'key_type' => (string) ($record['key_type'] ?? 'combined'),
 			]);
 
 			return new WP_Error('freesiem_login_locked', __('Too many failed login attempts. Please try again later.', 'freesiem-sentinel'));
@@ -2776,43 +2982,92 @@ class Freesiem_Admin
 		return $user;
 	}
 
-	public function handle_login_failed_event(string $username): void
+	public function handle_login_failed_event(string $username, ?WP_Error $error = null): void
 	{
 		$settings = freesiem_sentinel_get_login_protection_settings();
-		if (empty($settings['enabled'])) {
-			if (!empty($settings['log_failed_logins'])) {
-				freesiem_sentinel_log_event('login_failed', __('WordPress login failed.', 'freesiem-sentinel'), $username);
-			}
-
+		$error_code = $error instanceof WP_Error ? (string) $error->get_error_code() : '';
+		if (in_array($error_code, ['freesiem_login_locked', 'freesiem_login_banned'], true)) {
 			return;
 		}
 
-		$state = freesiem_sentinel_get_login_lockout_state($username);
-		$state['count'] = (int) ($state['count'] ?? 0) + 1;
+		$failure = $this->get_login_protection_failure_context($username, $error);
+		$normalized_username = (string) ($failure['normalized_username'] ?? '');
+		$reason = (string) ($failure['reason'] ?? 'invalid_password');
+		$record = freesiem_sentinel_get_login_protection_record($normalized_username !== '' ? $normalized_username : $username, '', $settings);
 
-		if ((int) $state['count'] >= (int) ($settings['max_failed_attempts'] ?? 5)) {
-			$state['locked_until'] = time() + ((int) ($settings['lockout_duration_minutes'] ?? 15) * MINUTE_IN_SECONDS);
-			freesiem_sentinel_log_event('lockout_triggered', __('Login lockout triggered after repeated failed attempts.', 'freesiem-sentinel'), $username, '', [
-				'count' => (int) $state['count'],
-				'locked_until' => (int) $state['locked_until'],
-			]);
+		if (empty($settings['enabled'])) {
+			if (!empty($settings['log_failed_logins'])) {
+				freesiem_sentinel_log_event(
+					$reason === 'invalid_username' ? 'invalid_username_attempt' : 'login_failed',
+					$reason === 'invalid_username' ? __('WordPress login failed for an unknown username or email.', 'freesiem-sentinel') : __('WordPress login failed.', 'freesiem-sentinel'),
+					$normalized_username !== '' ? $normalized_username : $username,
+					(string) ($record['ip_address'] ?? ''),
+					['reason' => $reason]
+				);
+			}
+
+			$this->maybe_apply_failed_login_delay($error);
+			return;
 		}
 
-		freesiem_sentinel_update_login_lockout_state($username, $state, (int) ($settings['lockout_duration_minutes'] ?? 15));
+		$record['attempts'] = (int) ($record['attempts'] ?? 0) + 1;
+		$record['last_failure_at'] = time();
+		$record['reason'] = $reason;
+		$lockout_rule = null;
+		foreach (freesiem_sentinel_get_login_protection_progressive_thresholds($settings) as $rule) {
+			if ((int) $record['attempts'] >= (int) ($rule['threshold'] ?? 0)) {
+				$lockout_rule = $rule;
+			}
+		}
+
+		if (is_array($lockout_rule)) {
+			$record['locked_until'] = time() + (max(1, (int) ($lockout_rule['duration_minutes'] ?? 15)) * MINUTE_IN_SECONDS);
+			$record['total_offenses'] = (int) ($record['total_offenses'] ?? 0) + 1;
+			if (!empty($settings['enable_permanent_ban']) && (int) ($settings['permanent_ban_threshold'] ?? 0) > 0 && (int) $record['total_offenses'] >= (int) ($settings['permanent_ban_threshold'] ?? 0)) {
+				$record['permanently_banned'] = 1;
+				$record['locked_until'] = 0;
+				$record['reason'] = 'permanent_ban_threshold';
+				freesiem_sentinel_log_event('permanent_ban_triggered', __('A permanent login protection ban was triggered after repeated lockouts.', 'freesiem-sentinel'), (string) ($record['username'] ?? $username), (string) ($record['ip_address'] ?? ''), [
+					'attempts' => (int) ($record['attempts'] ?? 0),
+					'total_offenses' => (int) ($record['total_offenses'] ?? 0),
+					'key_type' => (string) ($record['key_type'] ?? 'combined'),
+				]);
+				do_action('freesiem_sentinel_login_ban_triggered', $record, ['source' => 'system']);
+			} else {
+				freesiem_sentinel_log_event('lockout_triggered', __('Login lockout triggered after repeated failed attempts.', 'freesiem-sentinel'), (string) ($record['username'] ?? $username), (string) ($record['ip_address'] ?? ''), [
+					'attempts' => (int) ($record['attempts'] ?? 0),
+					'total_offenses' => (int) ($record['total_offenses'] ?? 0),
+					'locked_until' => (int) ($record['locked_until'] ?? 0),
+					'lockout_duration_minutes' => (int) ($lockout_rule['duration_minutes'] ?? 0),
+					'key_type' => (string) ($record['key_type'] ?? 'combined'),
+				]);
+				do_action('freesiem_sentinel_login_lockout_triggered', $record, ['source' => 'system']);
+			}
+		}
+
+		freesiem_sentinel_upsert_login_protection_record($record);
 		if (!empty($settings['log_failed_logins'])) {
-			freesiem_sentinel_log_event('login_failed', __('WordPress login failed.', 'freesiem-sentinel'), $username, '', [
-				'count' => !empty($settings['track_failed_login_count']) ? (int) $state['count'] : 0,
+			freesiem_sentinel_log_event($reason === 'invalid_username' ? 'invalid_username_attempt' : 'login_failed', $reason === 'invalid_username' ? __('WordPress login failed for an unknown username or email.', 'freesiem-sentinel') : __('WordPress login failed.', 'freesiem-sentinel'), (string) ($record['username'] !== '' ? $record['username'] : $username), (string) ($record['ip_address'] ?? ''), [
+				'attempts' => !empty($settings['track_failed_login_count']) ? (int) ($record['attempts'] ?? 0) : 0,
+				'total_offenses' => (int) ($record['total_offenses'] ?? 0),
+				'reason' => $reason,
+				'key_type' => (string) ($record['key_type'] ?? 'combined'),
 			]);
 		}
+
+		$this->maybe_apply_failed_login_delay($error);
 	}
 
 	public function handle_login_success_event(string $user_login, WP_User $user): void
 	{
 		$settings = freesiem_sentinel_get_login_protection_settings();
-		freesiem_sentinel_clear_login_lockout_state($user_login);
+		$record = freesiem_sentinel_get_login_protection_record($user_login, '', $settings);
+		if (!empty($record['key'])) {
+			freesiem_sentinel_delete_login_protection_record((string) $record['key']);
+		}
 
 		if (!empty($settings['log_successful_logins'])) {
-			freesiem_sentinel_log_event('login_success', __('WordPress login succeeded.', 'freesiem-sentinel'), $user_login, '', [
+			freesiem_sentinel_log_event('login_success', __('WordPress login succeeded.', 'freesiem-sentinel'), $user_login, (string) ($record['ip_address'] ?? ''), [
 				'user_id' => (int) $user->ID,
 			]);
 		}
@@ -2902,7 +3157,8 @@ class Freesiem_Admin
 	public function filter_stealth_login_error_message(string $message): string
 	{
 		$settings = freesiem_sentinel_get_stealth_mode_settings();
-		if (!freesiem_sentinel_is_stealth_mode_effectively_active($settings) || $message === '') {
+		$login_protection_settings = freesiem_sentinel_get_login_protection_settings();
+		if ($message === '') {
 			return $message;
 		}
 
@@ -2915,7 +3171,14 @@ class Freesiem_Admin
 			return $message;
 		}
 
-		return __('Login failed. Check your credentials and try again.', 'freesiem-sentinel');
+		if (
+			freesiem_sentinel_is_stealth_mode_effectively_active($settings) ||
+			!empty($login_protection_settings['enabled'])
+		) {
+			return __('Login failed. Check your credentials and try again.', 'freesiem-sentinel');
+		}
+
+		return $message;
 	}
 
 	public function filter_login_url(string $login_url, string $redirect, bool $force_reauth): string
