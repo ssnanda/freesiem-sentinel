@@ -481,13 +481,19 @@ class Freesiem_Admin
 		freesiem_sentinel_add_ssl_log($this->ssl_result_log_level((string) ($result['status'] ?? 'failed')), (string) ($result['summary'] ?? __('Certificate issuance completed.', 'freesiem-sentinel')), 'issue', [
 			'status' => (string) ($result['status'] ?? 'failed'),
 			'action_type' => (string) ($result['action_type'] ?? 'issue'),
+			'result_code' => (string) ($result['result_code'] ?? ''),
+			'force_reissue' => !empty($result['force_reissue']) ? 'yes' : 'no',
 		]);
 
 		if (!empty($result['verification']['status']) && in_array((string) $result['verification']['status'], ['warning', 'failed'], true)) {
 			freesiem_sentinel_add_ssl_log($this->ssl_result_log_level((string) $result['verification']['status']), (string) ($result['verification']['summary'] ?? __('Certificate verification returned a warning.', 'freesiem-sentinel')), 'verification');
 		}
 
-		freesiem_sentinel_set_notice(!empty($result['success']) ? 'success' : ((string) ($result['status'] ?? '') === 'warning' ? 'warning' : 'error'), (string) ($result['summary'] ?? __('Certificate issuance completed.', 'freesiem-sentinel')));
+		$notice_level = !empty($result['success']) ? 'success' : ((string) ($result['status'] ?? '') === 'warning' ? 'warning' : 'error');
+		if ((string) ($result['status'] ?? '') === 'no_action_needed') {
+			$notice_level = 'warning';
+		}
+		freesiem_sentinel_set_notice($notice_level, (string) ($result['summary'] ?? __('Certificate issuance completed.', 'freesiem-sentinel')));
 		$this->redirect_to_page('freesiem-ssl', ['tab' => 'overview']);
 	}
 
@@ -501,13 +507,18 @@ class Freesiem_Admin
 		freesiem_sentinel_add_ssl_log($this->ssl_result_log_level((string) ($result['status'] ?? 'failed')), (string) ($result['summary'] ?? __('Certificate renewal completed.', 'freesiem-sentinel')), 'renew', [
 			'status' => (string) ($result['status'] ?? 'failed'),
 			'action_type' => (string) ($result['action_type'] ?? 'renew'),
+			'result_code' => (string) ($result['result_code'] ?? ''),
 		]);
 
 		if (!empty($result['verification']['status']) && in_array((string) $result['verification']['status'], ['warning', 'failed'], true)) {
 			freesiem_sentinel_add_ssl_log($this->ssl_result_log_level((string) $result['verification']['status']), (string) ($result['verification']['summary'] ?? __('Certificate verification returned a warning.', 'freesiem-sentinel')), 'verification');
 		}
 
-		freesiem_sentinel_set_notice(!empty($result['success']) ? 'success' : ((string) ($result['status'] ?? '') === 'warning' ? 'warning' : 'error'), (string) ($result['summary'] ?? __('Certificate renewal completed.', 'freesiem-sentinel')));
+		$notice_level = !empty($result['success']) ? 'success' : ((string) ($result['status'] ?? '') === 'warning' ? 'warning' : 'error');
+		if ((string) ($result['status'] ?? '') === 'no_action_needed') {
+			$notice_level = 'warning';
+		}
+		freesiem_sentinel_set_notice($notice_level, (string) ($result['summary'] ?? __('Certificate renewal completed.', 'freesiem-sentinel')));
 		$this->redirect_to_page('freesiem-ssl', ['tab' => 'overview']);
 	}
 
@@ -1881,6 +1892,7 @@ class Freesiem_Admin
 		$user_space_config = !empty($ssl_state['user_space_config_dir']) ? (string) $ssl_state['user_space_config_dir'] : (string) ($user_space['config_dir'] ?? '');
 		$user_space_work = !empty($ssl_state['user_space_work_dir']) ? (string) $ssl_state['user_space_work_dir'] : (string) ($user_space['work_dir'] ?? '');
 		$user_space_logs = !empty($ssl_state['user_space_logs_dir']) ? (string) $ssl_state['user_space_logs_dir'] : (string) ($user_space['logs_dir'] ?? '');
+		$lineage_exists = freesiem_sentinel_ssl_lineage_exists((string) ($environment['configured_host'] ?? ''), ['user_space' => ['config_dir' => $user_space_config]]);
 		$issue_gate = freesiem_sentinel_can_run_live_ssl_action('issue', $ssl_settings, $environment, $readiness);
 		$renew_gate = freesiem_sentinel_can_run_live_ssl_action('renew', $ssl_settings, $environment, $readiness);
 		$install_gate = freesiem_sentinel_can_install_certbot($install_environment, $environment);
@@ -1908,6 +1920,8 @@ class Freesiem_Admin
 		$this->render_detail_row(__('Last dry-run summary', 'freesiem-sentinel'), (string) ($dry_run['summary'] ?? __('No dry run yet.', 'freesiem-sentinel')));
 		$this->render_detail_row(__('Last issue attempt', 'freesiem-sentinel'), $this->summary_value_or_fallback((string) ($ssl_state['last_issue_at'] ?? ''), true) . ' / ' . (!empty($ssl_state['last_issue_status']) ? (string) $ssl_state['last_issue_status'] : __('none', 'freesiem-sentinel')));
 		$this->render_detail_row(__('Last renew attempt', 'freesiem-sentinel'), $this->summary_value_or_fallback((string) ($ssl_state['last_renew_at'] ?? ''), true) . ' / ' . (!empty($ssl_state['last_renew_status']) ? (string) $ssl_state['last_renew_status'] : __('none', 'freesiem-sentinel')));
+		$this->render_detail_row(__('Last SSL action type', 'freesiem-sentinel'), !empty($ssl_state['last_action_type']) ? (string) $ssl_state['last_action_type'] : __('none', 'freesiem-sentinel'));
+		$this->render_detail_row(__('Last SSL action result', 'freesiem-sentinel'), !empty($ssl_state['last_action_result_code']) ? (string) $ssl_state['last_action_result_code'] : __('none', 'freesiem-sentinel'));
 		$this->render_detail_row(__('User-space SSL base', 'freesiem-sentinel'), $user_space_base !== '' ? $user_space_base : __('Unavailable', 'freesiem-sentinel'));
 		$this->render_detail_row(__('Certbot config dir', 'freesiem-sentinel'), $user_space_config !== '' ? $user_space_config : __('Unavailable', 'freesiem-sentinel'));
 		$this->render_detail_row(__('Certbot work dir', 'freesiem-sentinel'), $user_space_work !== '' ? $user_space_work : __('Unavailable', 'freesiem-sentinel'));
@@ -1943,10 +1957,16 @@ class Freesiem_Admin
 
 		echo '<div style="background:#fff;padding:20px;border:1px solid #dcdcde;border-radius:12px;">';
 		echo '<h2 style="margin-top:0;">' . esc_html__('Gated Actions', 'freesiem-sentinel') . '</h2>';
+		if ($lineage_exists) {
+			echo '<p style="margin-top:0;padding:12px;border-radius:8px;background:#fff7ed;border:1px solid #fdba74;"><strong>' . esc_html__('Existing certificate detected.', 'freesiem-sentinel') . '</strong> ' . esc_html__('Issue Certificate will use an explicit certbot certonly command. Use the force reissue option only if you want to add --force-renewal for an existing lineage.', 'freesiem-sentinel') . '</p>';
+		}
 		echo '<div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;">';
-		echo '<form method="post" action="' . esc_url(admin_url('admin-post.php')) . '" style="margin:0;">';
+		echo '<form method="post" action="' . esc_url(admin_url('admin-post.php')) . '" style="margin:0;display:grid;gap:8px;">';
 		wp_nonce_field(FREESIEM_SENTINEL_NONCE_ACTION);
 		echo '<input type="hidden" name="action" value="freesiem_sentinel_issue_ssl_certificate" />';
+		if ($lineage_exists) {
+			echo '<label><input type="checkbox" name="force_reissue_existing_certificate" value="1" /> ' . esc_html__('Force reissue existing certificate', 'freesiem-sentinel') . '</label>';
+		}
 		submit_button(__('Issue Certificate', 'freesiem-sentinel'), 'primary', '', false, $issue_gate['allowed'] ? [] : ['disabled' => 'disabled']);
 		echo '</form>';
 		echo '<form method="post" action="' . esc_url(admin_url('admin-post.php')) . '" style="margin:0;">';
@@ -2286,7 +2306,7 @@ class Freesiem_Admin
 	{
 		return match (sanitize_key($status)) {
 			'success' => 'success',
-			'warning', 'warn', 'blocked' => 'warning',
+			'warning', 'warn', 'blocked', 'no_action_needed' => 'warning',
 			default => 'error',
 		};
 	}
