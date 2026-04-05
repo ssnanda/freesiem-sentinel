@@ -46,6 +46,7 @@ class Freesiem_Admin
 		add_action('admin_post_freesiem_sentinel_run_ssl_dry_run', [$this, 'handle_run_ssl_dry_run']);
 		add_action('admin_post_freesiem_sentinel_issue_ssl_certificate', [$this, 'handle_issue_ssl_certificate']);
 		add_action('admin_post_freesiem_sentinel_renew_ssl_certificate', [$this, 'handle_renew_ssl_certificate']);
+		add_action('admin_post_freesiem_sentinel_install_certbot', [$this, 'handle_install_certbot']);
 	}
 
 	public function register_menu(): void
@@ -507,6 +508,46 @@ class Freesiem_Admin
 		}
 
 		freesiem_sentinel_set_notice(!empty($result['success']) ? 'success' : ((string) ($result['status'] ?? '') === 'warning' ? 'warning' : 'error'), (string) ($result['summary'] ?? __('Certificate renewal completed.', 'freesiem-sentinel')));
+		$this->redirect_to_page('freesiem-ssl', ['tab' => 'overview']);
+	}
+
+	public function handle_install_certbot(): void
+	{
+		$this->assert_manage_permissions();
+		freesiem_sentinel_require_admin_post_nonce();
+
+		if (empty($_POST['confirm_certbot_install'])) {
+			freesiem_sentinel_set_notice('error', __('Confirm that you understand certbot installation requires server-level permissions before continuing.', 'freesiem-sentinel'));
+			$this->redirect_to_page('freesiem-ssl', ['tab' => 'overview']);
+		}
+
+		$environment = freesiem_sentinel_detect_ssl_install_environment();
+		freesiem_sentinel_add_ssl_log('info', __('Certbot install environment was detected.', 'freesiem-sentinel'), 'environment_detected', [
+			'os_family' => (string) ($environment['os_family'] ?? 'unknown'),
+			'install_method' => (string) ($environment['install_method'] ?? ''),
+			'root_status' => (string) ($environment['root_status'] ?? 'unknown'),
+		]);
+		freesiem_sentinel_add_ssl_log('info', __('Certbot install was requested from wp-admin.', 'freesiem-sentinel'), 'install_attempt', [
+			'install_method' => (string) ($environment['install_method'] ?? ''),
+		]);
+
+		$result = freesiem_sentinel_install_certbot();
+		freesiem_sentinel_add_ssl_log(
+			!empty($result['success']) ? 'success' : 'error',
+			(string) ($result['summary'] ?? __('Certbot installation completed.', 'freesiem-sentinel')),
+			!empty($result['success']) ? 'install_success' : 'install_failure',
+			[
+				'install_method' => (string) (($result['install_environment']['install_method'] ?? '')),
+				'root_status' => (string) (($result['install_environment']['root_status'] ?? 'unknown')),
+			]
+		);
+
+		$readiness = freesiem_sentinel_calculate_ssl_readiness();
+		freesiem_sentinel_add_ssl_log('info', sprintf(__('SSL readiness recalculated: %s.', 'freesiem-sentinel'), $readiness['label']), 'readiness', [
+			'readiness_state' => (string) ($readiness['state'] ?? 'not_configured'),
+		]);
+
+		freesiem_sentinel_set_notice(!empty($result['success']) ? 'success' : 'error', (string) ($result['summary'] ?? __('Certbot installation completed.', 'freesiem-sentinel')));
 		$this->redirect_to_page('freesiem-ssl', ['tab' => 'overview']);
 	}
 
@@ -1073,6 +1114,7 @@ class Freesiem_Admin
 		$environment = freesiem_sentinel_get_ssl_environment_snapshot($ssl_settings);
 		$readiness = freesiem_sentinel_calculate_ssl_readiness($ssl_settings, $environment, $preflight);
 		$ssl_state = freesiem_sentinel_get_ssl_state();
+		$install_environment = freesiem_sentinel_detect_ssl_install_environment();
 		$logs = array_reverse(freesiem_sentinel_get_ssl_logs());
 
 		echo '<div class="wrap">';
@@ -1093,11 +1135,11 @@ class Freesiem_Admin
 		echo '</nav>';
 
 		if ($tab === 'overview') {
-			$this->render_ssl_overview_tab($ssl_settings, $preflight, $dry_run, $readiness, $environment, $ssl_state);
+			$this->render_ssl_overview_tab($ssl_settings, $preflight, $dry_run, $readiness, $environment, $ssl_state, $install_environment);
 		} elseif ($tab === 'preflight') {
 			$this->render_ssl_preflight_tab($preflight);
 		} elseif ($tab === 'settings') {
-			$this->render_ssl_settings_tab($ssl_settings, $readiness);
+			$this->render_ssl_settings_tab($ssl_settings, $readiness, $environment, $install_environment);
 		} elseif ($tab === 'dry-run') {
 			$this->render_ssl_dry_run_tab($ssl_settings, $dry_run, $readiness, $environment, $ssl_state);
 		} else {
@@ -1829,13 +1871,14 @@ class Freesiem_Admin
 			: 'display:inline-block;padding:4px 10px;border-radius:999px;background:#ecfccb;color:#3f6212;font-weight:600;';
 	}
 
-	private function render_ssl_overview_tab(array $ssl_settings, array $preflight, array $dry_run, array $readiness, array $environment, array $ssl_state): void
+	private function render_ssl_overview_tab(array $ssl_settings, array $preflight, array $dry_run, array $readiness, array $environment, array $ssl_state, array $install_environment): void
 	{
 		$port_check_summary = (!empty($ssl_settings['check_port_80']) || !empty($ssl_settings['check_port_443']))
 			? sprintf(__('Configured (80: %1$s, 443: %2$s)', 'freesiem-sentinel'), !empty($ssl_settings['check_port_80']) ? __('on', 'freesiem-sentinel') : __('off', 'freesiem-sentinel'), !empty($ssl_settings['check_port_443']) ? __('on', 'freesiem-sentinel') : __('off', 'freesiem-sentinel'))
 			: __('Not configured', 'freesiem-sentinel');
 		$issue_gate = freesiem_sentinel_can_run_live_ssl_action('issue', $ssl_settings, $environment, $readiness);
 		$renew_gate = freesiem_sentinel_can_run_live_ssl_action('renew', $ssl_settings, $environment, $readiness);
+		$install_gate = freesiem_sentinel_can_install_certbot($install_environment, $environment);
 
 		echo '<div style="display:grid;grid-template-columns:minmax(0,1fr) minmax(280px,.9fr);gap:20px;">';
 		echo '<div style="background:#fff;padding:20px;border:1px solid #dcdcde;border-radius:12px;">';
@@ -1871,7 +1914,22 @@ class Freesiem_Admin
 		echo '<h2 style="margin-top:0;">' . esc_html__('Execution Readiness', 'freesiem-sentinel') . '</h2>';
 		echo '<p><span style="' . esc_attr($this->ssl_readiness_badge_style((string) ($readiness['state'] ?? 'not_configured'))) . '">' . esc_html(strtoupper((string) ($readiness['state'] ?? 'not_configured'))) . '</span></p>';
 		echo '<p><strong>' . esc_html((string) ($readiness['label'] ?? __('Not configured', 'freesiem-sentinel'))) . '</strong></p>';
-		echo '<p style="margin-bottom:0;color:#646970;">' . esc_html((string) ($readiness['description'] ?? '')) . '</p>';
+		echo '<p style="color:#646970;">' . esc_html((string) ($readiness['description'] ?? '')) . '</p>';
+		if (!empty($readiness['blocker_messages'])) {
+			echo '<p><strong>' . esc_html__('Blockers', 'freesiem-sentinel') . '</strong></p><ul style="margin-top:0;">';
+			foreach ((array) $readiness['blocker_messages'] as $message) {
+				echo '<li>' . esc_html((string) $message) . '</li>';
+			}
+			echo '</ul>';
+		}
+		if (!empty($readiness['warning_messages'])) {
+			echo '<p><strong>' . esc_html__('Warnings', 'freesiem-sentinel') . '</strong></p><ul style="margin-top:0;margin-bottom:0;">';
+			foreach ((array) $readiness['warning_messages'] as $message) {
+				echo '<li>' . esc_html((string) $message) . '</li>';
+			}
+			echo '</ul>';
+		}
+		$this->render_ssl_readiness_details($ssl_settings, $environment, $readiness);
 		echo '</div>';
 
 		echo '<div style="background:#fff;padding:20px;border:1px solid #dcdcde;border-radius:12px;">';
@@ -1896,6 +1954,14 @@ class Freesiem_Admin
 		}
 		echo '<p style="margin-bottom:0;color:#646970;">' . esc_html__('Force HTTPS and HSTS remain stored-only and inactive in this version. Apache/nginx configs are not modified automatically.', 'freesiem-sentinel') . '</p>';
 		echo '</div>';
+
+		echo '<div style="background:#fff;padding:20px;border:1px solid #dcdcde;border-radius:12px;">';
+		echo '<h2 style="margin-top:0;">' . esc_html__('Certbot Installation', 'freesiem-sentinel') . '</h2>';
+		echo '<p><strong>' . esc_html__('Status', 'freesiem-sentinel') . ':</strong> ' . esc_html(!empty($environment['certbot']['available']) ? __('Installed', 'freesiem-sentinel') : __('Missing', 'freesiem-sentinel')) . '</p>';
+		echo '<p><strong>' . esc_html__('Detected environment', 'freesiem-sentinel') . ':</strong> ' . esc_html($this->format_ssl_install_environment($install_environment)) . '</p>';
+		echo '<p><strong>' . esc_html__('Available install method', 'freesiem-sentinel') . ':</strong> ' . esc_html(!empty($install_environment['install_method']) ? strtoupper((string) $install_environment['install_method']) : __('Unsupported / manual only', 'freesiem-sentinel')) . '</p>';
+		$this->render_ssl_install_section($environment, $install_environment, $install_gate);
+		echo '</div>';
 		echo '</div>';
 		echo '</div>';
 	}
@@ -1914,7 +1980,7 @@ class Freesiem_Admin
 		$this->render_ssl_results_table($preflight, __('Latest Results', 'freesiem-sentinel'));
 	}
 
-	private function render_ssl_settings_tab(array $ssl_settings, array $readiness): void
+	private function render_ssl_settings_tab(array $ssl_settings, array $readiness, array $environment, array $install_environment): void
 	{
 		echo '<form method="post" action="' . esc_url(admin_url('admin-post.php')) . '">';
 		wp_nonce_field(FREESIEM_SENTINEL_NONCE_ACTION);
@@ -1954,6 +2020,11 @@ class Freesiem_Admin
 		echo '</table>';
 		submit_button(__('Save SSL Settings', 'freesiem-sentinel'));
 		echo '</form>';
+
+		echo '<div style="background:#fff;padding:20px;border:1px solid #dcdcde;border-radius:12px;margin-top:20px;">';
+		echo '<h2 style="margin-top:0;">' . esc_html__('Certbot Installation', 'freesiem-sentinel') . '</h2>';
+		$this->render_ssl_install_section($environment, $install_environment, freesiem_sentinel_can_install_certbot($install_environment, $environment));
+		echo '</div>';
 	}
 
 	private function render_ssl_dry_run_tab(array $ssl_settings, array $dry_run, array $readiness, array $environment, array $ssl_state): void
@@ -2072,6 +2143,73 @@ class Freesiem_Admin
 			echo '</tbody></table>';
 		}
 		echo '</div>';
+	}
+
+	private function render_ssl_install_section(array $environment, array $install_environment, array $install_gate): void
+	{
+		$preview = freesiem_sentinel_get_certbot_install_preview($install_environment);
+		$manual = freesiem_sentinel_get_certbot_manual_install_instructions();
+		$show_button = empty($environment['certbot']['available']) && !empty($environment['execution_support']);
+
+		if ($show_button) {
+			if (!$install_gate['allowed']) {
+				echo '<p><strong>' . esc_html__('Install gate', 'freesiem-sentinel') . ':</strong> ' . esc_html((string) $install_gate['reason']) . '</p>';
+			}
+
+			if (!empty($preview['preview'])) {
+				echo '<p><strong>' . esc_html__('Install preview', 'freesiem-sentinel') . ':</strong></p>';
+				echo '<pre style="white-space:pre-wrap;overflow:auto;">' . esc_html((string) $preview['preview']) . '</pre>';
+			}
+
+			echo '<form method="post" action="' . esc_url(admin_url('admin-post.php')) . '">';
+			wp_nonce_field(FREESIEM_SENTINEL_NONCE_ACTION);
+			echo '<input type="hidden" name="action" value="freesiem_sentinel_install_certbot" />';
+			echo '<p><label><input type="checkbox" name="confirm_certbot_install" value="1" /> ' . esc_html__('I understand this requires server-level permissions', 'freesiem-sentinel') . '</label></p>';
+			submit_button(__('Install Certbot', 'freesiem-sentinel'), 'secondary', '', false, $install_gate['allowed'] ? [] : ['disabled' => 'disabled']);
+			echo '</form>';
+		}
+
+		echo '<p><strong>' . esc_html__('Manual fallback', 'freesiem-sentinel') . ':</strong></p>';
+		echo '<p style="margin-bottom:6px;"><strong>' . esc_html__('Ubuntu / Debian', 'freesiem-sentinel') . '</strong></p>';
+		echo '<pre style="white-space:pre-wrap;overflow:auto;">' . esc_html((string) $manual['ubuntu']) . '</pre>';
+		echo '<p style="margin-bottom:6px;"><strong>' . esc_html__('CentOS / RHEL', 'freesiem-sentinel') . '</strong></p>';
+		echo '<pre style="white-space:pre-wrap;overflow:auto;">' . esc_html((string) $manual['centos']) . '</pre>';
+		echo '<p style="margin-bottom:6px;"><strong>' . esc_html__('Snap', 'freesiem-sentinel') . '</strong></p>';
+		echo '<pre style="white-space:pre-wrap;overflow:auto;margin-bottom:0;">' . esc_html((string) $manual['snap']) . '</pre>';
+	}
+
+	private function render_ssl_readiness_details(array $ssl_settings, array $environment, array $readiness): void
+	{
+		$details = [
+			['status' => is_email((string) ($ssl_settings['acme_contact_email'] ?? '')) ? 'PASS' : 'FAIL', 'message' => __('ACME contact email is configured.', 'freesiem-sentinel')],
+			['status' => $environment['configured_host'] !== '' ? 'PASS' : 'FAIL', 'message' => __('Hostname/domain is configured.', 'freesiem-sentinel')],
+			['status' => !empty($environment['certbot']['available']) ? 'PASS' : 'FAIL', 'message' => !empty($environment['certbot']['available']) ? __('Certbot is installed and detectable.', 'freesiem-sentinel') : __('Certbot is not installed or not detectable on this server.', 'freesiem-sentinel')],
+			['status' => $environment['execution_support'] ? 'PASS' : 'FAIL', 'message' => $environment['execution_support'] ? __('Command execution capability is available.', 'freesiem-sentinel') : __('Command execution capability is not available.', 'freesiem-sentinel')],
+			['status' => empty($readiness['warning_messages']) ? 'PASS' : 'WARN', 'message' => empty($readiness['warning_messages']) ? __('No readiness warnings remain.', 'freesiem-sentinel') : __('One or more readiness warnings still need review.', 'freesiem-sentinel')],
+		];
+
+		echo '<p><strong>' . esc_html__('Readiness Details', 'freesiem-sentinel') . '</strong></p>';
+		echo '<ul style="margin-top:0;margin-bottom:0;">';
+		foreach ($details as $detail) {
+			echo '<li><span style="' . esc_attr($this->ssl_preflight_badge_style((string) $detail['status'])) . '">' . esc_html((string) $detail['status']) . '</span> ' . esc_html((string) $detail['message']) . '</li>';
+		}
+		echo '</ul>';
+	}
+
+	private function format_ssl_install_environment(array $install_environment): string
+	{
+		$parts = [];
+		if (!empty($install_environment['os_family'])) {
+			$parts[] = str_replace('_', '/', (string) $install_environment['os_family']);
+		}
+		if (!empty($install_environment['root_status'])) {
+			$parts[] = 'privileges: ' . (string) $install_environment['root_status'];
+		}
+		if (!empty($install_environment['install_method'])) {
+			$parts[] = 'installer: ' . (string) $install_environment['install_method'];
+		}
+
+		return $parts !== [] ? implode(' | ', $parts) : __('Unknown', 'freesiem-sentinel');
 	}
 
 	private function render_ssl_checkbox_field(string $name, string $label, bool $checked, string $description): void

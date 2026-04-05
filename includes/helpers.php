@@ -898,6 +898,7 @@ function freesiem_sentinel_get_ssl_environment_snapshot(?array $ssl_settings = n
 	$ssl_settings = is_array($ssl_settings) ? $ssl_settings : freesiem_sentinel_get_ssl_settings();
 	$ssl_state = freesiem_sentinel_get_ssl_state();
 	$certbot = freesiem_sentinel_detect_certbot();
+	$install_environment = freesiem_sentinel_detect_ssl_install_environment();
 	$site_url = site_url('/');
 	$home_url = home_url('/');
 	$site_scheme = strtolower((string) wp_parse_url($site_url, PHP_URL_SCHEME));
@@ -937,6 +938,7 @@ function freesiem_sentinel_get_ssl_environment_snapshot(?array $ssl_settings = n
 		'is_admin_request_https' => is_ssl(),
 		'host_alignment' => $configured_host !== '' && ($configured_host === $home_host || $configured_host === $site_host),
 		'certbot' => $certbot,
+		'install_environment' => $install_environment,
 		'ssl_state' => $ssl_state,
 	];
 }
@@ -951,25 +953,103 @@ function freesiem_sentinel_calculate_ssl_readiness(?array $ssl_settings = null, 
 	$has_method = in_array((string) ($ssl_settings['challenge_method'] ?? ''), ['webroot-http-01', 'standalone-http-01', 'manual-dns-01'], true);
 	$method_ready = freesiem_sentinel_ssl_challenge_ready($ssl_settings, $environment);
 	$required_core = $has_email && $has_host && $has_method;
-	$blocked = (!$required_core && !$has_email && !$has_host)
-		? false
-		: (
-			($environment['is_local_host'] || $environment['is_ip']) && empty($ssl_settings['allow_local_override'])
-			|| (!$environment['dns_result']['ok'] && !$environment['is_local_host'] && $environment['configured_host'] !== '')
-			|| !$environment['option_probe']
-			|| empty($environment['certbot']['available'])
-		);
+	$blocker_codes = [];
+	$blocker_messages = [];
+	$warning_codes = [];
+	$warning_messages = [];
+
+	if (!$has_email) {
+		$blocker_codes[] = 'missing_email';
+		$blocker_messages[] = __('A valid ACME contact email is required.', 'freesiem-sentinel');
+	}
+
+	if ($environment['configured_host'] === '') {
+		$blocker_codes[] = 'missing_host';
+		$blocker_messages[] = __('A hostname or domain is required.', 'freesiem-sentinel');
+	}
+
+	if ($environment['configured_host'] !== '' && $environment['is_local_host'] && empty($ssl_settings['allow_local_override'])) {
+		$blocker_codes[] = 'localhost_host';
+		$blocker_messages[] = __('Blocked: The configured host is local-only and cannot be used for public certificate issuance.', 'freesiem-sentinel');
+	}
+
+	if ($environment['configured_host'] !== '' && $environment['is_ip'] && empty($ssl_settings['allow_local_override'])) {
+		$blocker_codes[] = 'raw_ip_host';
+		$blocker_messages[] = __('Blocked: The configured host is a raw IP address and not a supported certificate hostname.', 'freesiem-sentinel');
+	}
+
+	if (!$environment['option_probe']) {
+		$blocker_codes[] = 'storage_unavailable';
+		$blocker_messages[] = __('Blocked: WordPress option storage could not be confirmed for SSL state updates.', 'freesiem-sentinel');
+	}
+
+	if (!$environment['execution_support']) {
+		$blocker_codes[] = 'command_execution_unavailable';
+		$blocker_messages[] = __('Blocked: No supported PHP command execution function is available on this server.', 'freesiem-sentinel');
+	}
+
+	if (empty($environment['certbot']['available'])) {
+		$blocker_codes[] = 'certbot_missing';
+		$blocker_messages[] = __('Blocked: Certbot is not installed or not detectable on this server.', 'freesiem-sentinel');
+	}
+
+	if ((string) ($ssl_settings['challenge_method'] ?? '') === 'webroot-http-01') {
+		$webroot = (string) ($ssl_settings['webroot_path'] ?? '');
+
+		if ($webroot === '' || !file_exists($webroot) || !is_readable($webroot)) {
+			$blocker_codes[] = 'invalid_webroot';
+			$blocker_messages[] = __('Blocked: Webroot HTTP-01 requires a readable existing webroot path.', 'freesiem-sentinel');
+		}
+	}
+
+	if (!$has_method) {
+		$warning_codes[] = 'missing_challenge_method';
+		$warning_messages[] = __('Select a supported challenge method.', 'freesiem-sentinel');
+	}
+
+	if (!$environment['wp_cron_enabled']) {
+		$warning_codes[] = 'wp_cron_disabled';
+		$warning_messages[] = __('WP-Cron appears disabled. Manual renewal remains available, but background scheduling is not ready.', 'freesiem-sentinel');
+	}
+
+	if (!$environment['abspath_writable'] || !$environment['wp_content_writable']) {
+		$warning_codes[] = 'storage_paths_limited';
+		$warning_messages[] = __('Some storage paths are not writable, which may limit future logging or challenge file workflows.', 'freesiem-sentinel');
+	}
+
+	if (!$environment['dns_result']['ok'] && !$environment['is_local_host'] && $environment['configured_host'] !== '') {
+		$warning_codes[] = 'dns_lookup_failed';
+		$warning_messages[] = __('Warning: DNS lookup could not be confirmed for the configured host.', 'freesiem-sentinel');
+	} elseif ($environment['configured_host'] !== '' && !$environment['dns_result']['ok']) {
+		$warning_codes[] = 'dns_lookup_uncertain';
+		$warning_messages[] = __('Warning: DNS validation is uncertain for the configured host in this environment.', 'freesiem-sentinel');
+	}
+
+	if (!$environment['host_alignment'] && $environment['configured_host'] !== '') {
+		$warning_codes[] = 'host_alignment_warn';
+		$warning_messages[] = __('The selected hostname does not match the current WordPress site host.', 'freesiem-sentinel');
+	}
+
+	if (!$environment['is_https_configured']) {
+		$warning_codes[] = 'https_not_enabled';
+		$warning_messages[] = __('WordPress is still configured for HTTP. This does not block issuance, but HTTPS is not active yet.', 'freesiem-sentinel');
+	}
+
+	if (!$method_ready['ok']) {
+		$warning_codes[] = 'method_requirements_pending';
+		$warning_messages[] = (string) ($method_ready['message'] ?? __('Method-specific requirements are not complete yet.', 'freesiem-sentinel'));
+	}
 
 	if (!$has_email && !$has_host) {
 		$state = 'not_configured';
 		$label = __('Not configured', 'freesiem-sentinel');
-	} elseif ($blocked) {
+	} elseif ($blocker_codes !== []) {
 		$state = 'blocked';
 		$label = __('Blocked', 'freesiem-sentinel');
 	} elseif (!$required_core || !$method_ready['ok']) {
 		$state = 'partially_configured';
 		$label = __('Partially configured', 'freesiem-sentinel');
-	} elseif ((int) ($preflight['counts']['fail'] ?? 0) > 0 || (int) ($preflight['counts']['warn'] ?? 0) > 0) {
+	} elseif ((int) ($preflight['counts']['fail'] ?? 0) > 0 || (int) ($preflight['counts']['warn'] ?? 0) > 0 || $warning_codes !== []) {
 		$state = 'ready_for_dry_run';
 		$label = __('Ready for dry run', 'freesiem-sentinel');
 	} else {
@@ -977,16 +1057,23 @@ function freesiem_sentinel_calculate_ssl_readiness(?array $ssl_settings = null, 
 		$label = __('Future ready', 'freesiem-sentinel');
 	}
 
+	$description = match ($state) {
+		'not_configured' => __('Add the hostname, contact email, and challenge details before SSL execution planning can proceed.', 'freesiem-sentinel'),
+		'partially_configured' => __('The SSL setup has some required values, but it still needs more challenge-specific configuration.', 'freesiem-sentinel'),
+		'ready_for_dry_run' => __('The SSL setup is complete enough for safe simulation, but the warnings below should be reviewed.', 'freesiem-sentinel'),
+		'blocked' => $blocker_messages !== [] ? $blocker_messages[0] : __('Blocked by one or more explicit SSL execution requirements.', 'freesiem-sentinel'),
+		default => __('The configuration is fully modeled and has certbot available for explicit admin-triggered actions.', 'freesiem-sentinel'),
+	};
+
 	return [
+		'readiness_state' => $state,
 		'state' => $state,
 		'label' => $label,
-		'description' => match ($state) {
-			'not_configured' => __('Add the hostname, contact email, and challenge details before SSL execution planning can proceed.', 'freesiem-sentinel'),
-			'partially_configured' => __('The SSL setup has some required values, but it still needs more challenge-specific configuration.', 'freesiem-sentinel'),
-			'ready_for_dry_run' => __('The SSL setup is complete enough for safe simulation, but environment warnings should still be reviewed.', 'freesiem-sentinel'),
-			'blocked' => __('A blocking condition exists, such as a local-only host, unresolved DNS, or missing storage capability.', 'freesiem-sentinel'),
-			default => __('The configuration is fully modeled and has certbot available for explicit admin-triggered actions.', 'freesiem-sentinel'),
-		},
+		'description' => $description,
+		'blocker_codes' => array_values(array_unique($blocker_codes)),
+		'blocker_messages' => array_values(array_unique($blocker_messages)),
+		'warning_codes' => array_values(array_unique($warning_codes)),
+		'warning_messages' => array_values(array_unique($warning_messages)),
 	];
 }
 
@@ -1118,11 +1205,11 @@ function freesiem_sentinel_get_ssl_method_validation_items(?array $ssl_settings 
 	return $items;
 }
 
-function freesiem_sentinel_detect_certbot(): array
+function freesiem_sentinel_detect_certbot(bool $force = false): array
 {
 	static $cached = null;
 
-	if (is_array($cached)) {
+	if (!$force && is_array($cached)) {
 		return $cached;
 	}
 
@@ -1146,6 +1233,184 @@ function freesiem_sentinel_detect_certbot(): array
 
 	return $cached;
 }
+
+function freesiem_sentinel_detect_ssl_install_environment(): array
+{
+	static $cached = null;
+
+	if (is_array($cached)) {
+		return $cached;
+	}
+
+	$os_name = php_uname('s');
+	$os_release = is_readable('/etc/os-release') ? (string) file_get_contents('/etc/os-release') : '';
+	$os_family = 'unknown';
+	$package_managers = [
+		'apt' => freesiem_sentinel_detect_binary('apt'),
+		'yum' => freesiem_sentinel_detect_binary('yum'),
+		'dnf' => freesiem_sentinel_detect_binary('dnf'),
+		'snap' => freesiem_sentinel_detect_binary('snap'),
+	];
+
+	if (str_contains(strtolower($os_release), 'ubuntu') || str_contains(strtolower($os_release), 'debian')) {
+		$os_family = 'ubuntu_debian';
+	} elseif (str_contains(strtolower($os_release), 'rhel') || str_contains(strtolower($os_release), 'centos') || str_contains(strtolower($os_release), 'fedora') || str_contains(strtolower($os_release), 'rocky') || str_contains(strtolower($os_release), 'alma')) {
+		$os_family = 'centos_rhel';
+	} elseif (strtolower($os_name) === 'linux') {
+		$os_family = 'linux_unknown';
+	}
+
+	$root_status = function_exists('posix_geteuid') && posix_geteuid() === 0 ? 'root' : 'unknown';
+	if ($root_status !== 'root' && (function_exists('proc_open') || function_exists('exec') || function_exists('shell_exec'))) {
+		$sudo_check = freesiem_sentinel_run_ssl_shell_command('sudo -n true', 'detect_sudo', 10, 'sudo -n true');
+		if ($sudo_check['success']) {
+			$root_status = 'sudo';
+		}
+	}
+
+	$install_method = '';
+	if (!empty($package_managers['snap']['available'])) {
+		$install_method = 'snap';
+	} elseif (!empty($package_managers['apt']['available'])) {
+		$install_method = 'apt';
+	} elseif (!empty($package_managers['dnf']['available'])) {
+		$install_method = 'dnf';
+	} elseif (!empty($package_managers['yum']['available'])) {
+		$install_method = 'yum';
+	}
+
+	$cached = [
+		'os_name' => sanitize_text_field((string) $os_name),
+		'os_family' => $os_family,
+		'root_status' => $root_status,
+		'package_managers' => $package_managers,
+		'install_method' => $install_method,
+		'install_supported' => $install_method !== '',
+	];
+
+	return $cached;
+}
+
+function freesiem_sentinel_detect_binary(string $binary): array
+{
+	$result = freesiem_sentinel_run_ssl_shell_command('command -v ' . escapeshellarg($binary), 'detect_binary_' . sanitize_key($binary), 15, 'command -v ' . $binary);
+	$path = trim((string) ($result['stdout_summary'] ?? ''));
+
+	return [
+		'available' => $path !== '',
+		'path' => $path,
+	];
+}
+
+function freesiem_sentinel_get_certbot_install_preview(?array $environment = null): array
+{
+	$environment = is_array($environment) ? $environment : freesiem_sentinel_detect_ssl_install_environment();
+	$prefix = $environment['root_status'] === 'sudo' ? 'sudo ' : '';
+
+	$commands = match ((string) ($environment['install_method'] ?? '')) {
+		'snap' => [
+			$prefix . 'snap install core',
+			$prefix . 'snap refresh core',
+			$prefix . 'snap install --classic certbot',
+			$prefix . 'ln -s /snap/bin/certbot /usr/bin/certbot',
+		],
+		'apt' => [
+			$prefix . 'apt update',
+			$prefix . 'apt install -y certbot',
+		],
+		'dnf' => [
+			$prefix . 'dnf install -y certbot',
+		],
+		'yum' => [
+			$prefix . 'yum install -y certbot',
+		],
+		default => [],
+	};
+
+	return [
+		'method' => (string) ($environment['install_method'] ?? ''),
+		'commands' => $commands,
+		'preview' => implode("\n", $commands),
+	];
+}
+
+function freesiem_sentinel_get_certbot_manual_install_instructions(): array
+{
+	return [
+		'ubuntu' => "sudo apt update\nsudo apt install -y certbot",
+		'centos' => "sudo dnf install -y certbot\n# or\nsudo yum install -y certbot",
+		'snap' => "sudo snap install core\nsudo snap refresh core\nsudo snap install --classic certbot\nsudo ln -s /snap/bin/certbot /usr/bin/certbot",
+	];
+}
+
+function freesiem_sentinel_can_install_certbot(?array $environment = null, ?array $ssl_environment = null): array
+{
+	$environment = is_array($environment) ? $environment : freesiem_sentinel_detect_ssl_install_environment();
+	$ssl_environment = is_array($ssl_environment) ? $ssl_environment : freesiem_sentinel_get_ssl_environment_snapshot();
+
+	if (!empty($ssl_environment['certbot']['available'])) {
+		return ['allowed' => false, 'reason' => __('Certbot is already installed.', 'freesiem-sentinel')];
+	}
+
+	if (empty($ssl_environment['execution_support'])) {
+		return ['allowed' => false, 'reason' => __('Command execution is not available on this server.', 'freesiem-sentinel')];
+	}
+
+	if (empty($environment['install_supported'])) {
+		return ['allowed' => false, 'reason' => __('No supported package manager was detected for automatic certbot installation.', 'freesiem-sentinel')];
+	}
+
+	if (!in_array((string) ($environment['root_status'] ?? 'unknown'), ['root', 'sudo'], true)) {
+		return ['allowed' => false, 'reason' => __('Root or passwordless sudo capability could not be confirmed.', 'freesiem-sentinel')];
+	}
+
+	return ['allowed' => true, 'reason' => ''];
+}
+
+function freesiem_sentinel_install_certbot(): array
+{
+	$ssl_environment = freesiem_sentinel_get_ssl_environment_snapshot();
+	$install_environment = freesiem_sentinel_detect_ssl_install_environment();
+	$gate = freesiem_sentinel_can_install_certbot($install_environment, $ssl_environment);
+	$preview = freesiem_sentinel_get_certbot_install_preview($install_environment);
+	$executed_at = freesiem_sentinel_get_iso8601_time();
+
+	if (empty($gate['allowed'])) {
+		return [
+			'success' => false,
+			'status' => 'blocked',
+			'summary' => (string) $gate['reason'],
+			'preview' => (string) ($preview['preview'] ?? ''),
+			'execution' => null,
+			'executed_at' => $executed_at,
+			'install_environment' => $install_environment,
+		];
+	}
+
+	$command = implode(' && ', (array) ($preview['commands'] ?? []));
+	$execution = freesiem_sentinel_run_ssl_shell_command($command, 'install_certbot', 900, (string) ($preview['preview'] ?? ''));
+	$certbot = freesiem_sentinel_detect_certbot(true);
+	$success = $execution['success'] && !empty($certbot['available']);
+
+	freesiem_sentinel_update_ssl_state([
+		'certbot_available' => !empty($certbot['available']) ? 1 : 0,
+		'certbot_path' => (string) ($certbot['path'] ?? ''),
+		'certbot_version' => (string) ($certbot['version'] ?? ''),
+	]);
+
+	return [
+		'success' => $success,
+		'status' => $success ? 'success' : 'failed',
+		'summary' => $success
+			? __('Certbot installation completed successfully and detection has been refreshed.', 'freesiem-sentinel')
+			: (!empty($execution['stderr_summary']) ? (string) $execution['stderr_summary'] : __('Certbot installation failed. Review the manual commands below.', 'freesiem-sentinel')),
+		'preview' => (string) ($preview['preview'] ?? ''),
+		'execution' => $execution,
+		'executed_at' => $executed_at,
+		'install_environment' => $install_environment,
+	];
+}
+
 
 function freesiem_sentinel_run_ssl_shell_command(string $command, string $action, int $timeout = 120, ?string $redacted_command = null): array
 {
