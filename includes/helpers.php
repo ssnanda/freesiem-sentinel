@@ -1243,7 +1243,8 @@ function freesiem_sentinel_detect_permission_denied_message(string $stdout, stri
 
 	return str_contains($combined, 'errno 13')
 		|| str_contains($combined, 'permission denied')
-		|| str_contains($combined, 'eacces');
+		|| str_contains($combined, 'eacces')
+		|| str_contains($combined, 'operation not permitted');
 }
 
 function freesiem_sentinel_get_nginx_backup_directory(?array $ssl_settings = null): string
@@ -2799,6 +2800,7 @@ function freesiem_sentinel_apply_ssl_to_nginx(bool $enable_redirect = false): ar
 
 	$test = freesiem_sentinel_run_ssl_shell_command(escapeshellarg((string) ($integration['nginx_binary']['path'] ?: 'nginx')) . ' -t', 'nginx_test', 60, (string) ($integration['test_command'] ?? 'nginx -t'));
 	if (empty($test['success'])) {
+		$test_permission_denied = freesiem_sentinel_detect_permission_denied_message((string) ($test['stdout_summary'] ?? ''), (string) ($test['stderr_summary'] ?? ''));
 		if ($had_existing_file && $backup_path !== '') {
 			@copy($backup_path, $target_path);
 		} elseif (!$had_existing_file && file_exists($target_path)) {
@@ -2811,27 +2813,31 @@ function freesiem_sentinel_apply_ssl_to_nginx(bool $enable_redirect = false): ar
 		}
 
 		$state_updates['nginx_backup_path'] = $backup_path;
-		$state_updates['nginx_integration_mode'] = 'failed_rolled_back';
-		$state_updates['nginx_last_apply_status'] = 'failed';
-		$state_updates['nginx_last_apply_result'] = __('Nginx syntax test failed, so Sentinel restored the prior config.', 'freesiem-sentinel');
+		$state_updates['nginx_integration_mode'] = $test_permission_denied ? 'manual_required' : 'failed_rolled_back';
+		$state_updates['nginx_last_apply_status'] = $test_permission_denied ? 'manual_required' : 'failed';
+		$state_updates['nginx_last_apply_result'] = $test_permission_denied
+			? __('Sentinel restored the prior config because nginx validation from the PHP/web-user context was blocked. Run nginx -t and reload nginx manually as root after reviewing the preview.', 'freesiem-sentinel')
+			: __('Nginx syntax test failed, so Sentinel restored the prior config.', 'freesiem-sentinel');
 		$state_updates['nginx_last_test_result'] = !empty($test['stderr_summary']) ? (string) $test['stderr_summary'] : (string) ($test['stdout_summary'] ?? '');
 		freesiem_sentinel_update_ssl_state($state_updates);
 
 		return [
 			'success' => false,
-			'status' => 'failed_rolled_back',
+			'status' => $test_permission_denied ? 'manual_required' : 'failed_rolled_back',
 			'summary' => (string) $state_updates['nginx_last_apply_result'],
 			'preview' => $preview,
 			'integration' => $integration,
 			'backup_path' => $backup_path,
 			'test' => $test,
 			'reload' => null,
+			'manual_commands' => [(string) ($integration['test_command'] ?? 'nginx -t'), (string) ($integration['reload_command'] ?? 'nginx -s reload')],
 			'executed_at' => $executed_at,
 		];
 	}
 
 	$reload = freesiem_sentinel_run_ssl_shell_command(escapeshellarg((string) ($integration['nginx_binary']['path'] ?: 'nginx')) . ' -s reload', 'nginx_reload', 60, (string) ($integration['reload_command'] ?? 'nginx -s reload'));
 	if (empty($reload['success'])) {
+		$reload_permission_denied = freesiem_sentinel_detect_permission_denied_message((string) ($reload['stdout_summary'] ?? ''), (string) ($reload['stderr_summary'] ?? ''));
 		if ($had_existing_file && $backup_path !== '') {
 			@copy($backup_path, $target_path);
 		} elseif (!$had_existing_file && file_exists($target_path)) {
@@ -2846,22 +2852,25 @@ function freesiem_sentinel_apply_ssl_to_nginx(bool $enable_redirect = false): ar
 		@freesiem_sentinel_run_ssl_shell_command(escapeshellarg((string) ($integration['nginx_binary']['path'] ?: 'nginx')) . ' -s reload', 'nginx_reload_after_restore', 60, (string) ($integration['reload_command'] ?? 'nginx -s reload'));
 
 		$state_updates['nginx_backup_path'] = $backup_path;
-		$state_updates['nginx_integration_mode'] = 'failed_rolled_back';
-		$state_updates['nginx_last_apply_status'] = 'failed';
-		$state_updates['nginx_last_apply_result'] = __('Nginx reload failed, so Sentinel restored the prior config.', 'freesiem-sentinel');
+		$state_updates['nginx_integration_mode'] = $reload_permission_denied ? 'manual_required' : 'failed_rolled_back';
+		$state_updates['nginx_last_apply_status'] = $reload_permission_denied ? 'manual_required' : 'failed';
+		$state_updates['nginx_last_apply_result'] = $reload_permission_denied
+			? __('Sentinel restored the prior config because nginx reload from the PHP/web-user context was blocked. Run nginx -t and reload nginx manually as root after reviewing the preview.', 'freesiem-sentinel')
+			: __('Nginx reload failed, so Sentinel restored the prior config.', 'freesiem-sentinel');
 		$state_updates['nginx_last_test_result'] = !empty($test['stderr_summary']) ? (string) $test['stderr_summary'] : (string) ($test['stdout_summary'] ?? '');
 		$state_updates['nginx_last_reload_result'] = !empty($reload['stderr_summary']) ? (string) $reload['stderr_summary'] : (string) ($reload['stdout_summary'] ?? '');
 		freesiem_sentinel_update_ssl_state($state_updates);
 
 		return [
 			'success' => false,
-			'status' => 'failed_rolled_back',
+			'status' => $reload_permission_denied ? 'manual_required' : 'failed_rolled_back',
 			'summary' => (string) $state_updates['nginx_last_apply_result'],
 			'preview' => $preview,
 			'integration' => $integration,
 			'backup_path' => $backup_path,
 			'test' => $test,
 			'reload' => $reload,
+			'manual_commands' => [(string) ($integration['test_command'] ?? 'nginx -t'), (string) ($integration['reload_command'] ?? 'nginx -s reload')],
 			'executed_at' => $executed_at,
 		];
 	}
