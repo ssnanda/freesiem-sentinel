@@ -2801,22 +2801,24 @@ function freesiem_sentinel_apply_ssl_to_nginx(bool $enable_redirect = false): ar
 	$test = freesiem_sentinel_run_ssl_shell_command(escapeshellarg((string) ($integration['nginx_binary']['path'] ?: 'nginx')) . ' -t', 'nginx_test', 60, (string) ($integration['test_command'] ?? 'nginx -t'));
 	if (empty($test['success'])) {
 		$test_permission_denied = freesiem_sentinel_detect_permission_denied_message((string) ($test['stdout_summary'] ?? ''), (string) ($test['stderr_summary'] ?? ''));
-		if ($had_existing_file && $backup_path !== '') {
-			@copy($backup_path, $target_path);
-		} elseif (!$had_existing_file && file_exists($target_path)) {
-			@unlink($target_path);
-		}
-		if ($snippet_exists && $snippet_backup_path !== '' && file_exists($snippet_backup_path)) {
-			@copy($snippet_backup_path, $snippet_path);
-		} elseif (!$snippet_exists && file_exists($snippet_path)) {
-			@unlink($snippet_path);
+		if (!$test_permission_denied) {
+			if ($had_existing_file && $backup_path !== '') {
+				@copy($backup_path, $target_path);
+			} elseif (!$had_existing_file && file_exists($target_path)) {
+				@unlink($target_path);
+			}
+			if ($snippet_exists && $snippet_backup_path !== '' && file_exists($snippet_backup_path)) {
+				@copy($snippet_backup_path, $snippet_path);
+			} elseif (!$snippet_exists && file_exists($snippet_path)) {
+				@unlink($snippet_path);
+			}
 		}
 
 		$state_updates['nginx_backup_path'] = $backup_path;
-		$state_updates['nginx_integration_mode'] = $test_permission_denied ? 'manual_required' : 'failed_rolled_back';
+		$state_updates['nginx_integration_mode'] = $test_permission_denied ? 'pending_root_finalize' : 'failed_rolled_back';
 		$state_updates['nginx_last_apply_status'] = $test_permission_denied ? 'manual_required' : 'failed';
 		$state_updates['nginx_last_apply_result'] = $test_permission_denied
-			? __('Sentinel restored the prior config because nginx validation from the PHP/web-user context was blocked. Run nginx -t and reload nginx manually as root after reviewing the preview.', 'freesiem-sentinel')
+			? __('Sentinel wrote the nginx SSL config, but nginx validation from the PHP/web-user context was blocked. Run nginx -t and reload nginx manually as root to finalize the change.', 'freesiem-sentinel')
 			: __('Nginx syntax test failed, so Sentinel restored the prior config.', 'freesiem-sentinel');
 		$state_updates['nginx_last_test_result'] = !empty($test['stderr_summary']) ? (string) $test['stderr_summary'] : (string) ($test['stdout_summary'] ?? '');
 		freesiem_sentinel_update_ssl_state($state_updates);
@@ -2838,24 +2840,26 @@ function freesiem_sentinel_apply_ssl_to_nginx(bool $enable_redirect = false): ar
 	$reload = freesiem_sentinel_run_ssl_shell_command(escapeshellarg((string) ($integration['nginx_binary']['path'] ?: 'nginx')) . ' -s reload', 'nginx_reload', 60, (string) ($integration['reload_command'] ?? 'nginx -s reload'));
 	if (empty($reload['success'])) {
 		$reload_permission_denied = freesiem_sentinel_detect_permission_denied_message((string) ($reload['stdout_summary'] ?? ''), (string) ($reload['stderr_summary'] ?? ''));
-		if ($had_existing_file && $backup_path !== '') {
-			@copy($backup_path, $target_path);
-		} elseif (!$had_existing_file && file_exists($target_path)) {
-			@unlink($target_path);
+		if (!$reload_permission_denied) {
+			if ($had_existing_file && $backup_path !== '') {
+				@copy($backup_path, $target_path);
+			} elseif (!$had_existing_file && file_exists($target_path)) {
+				@unlink($target_path);
+			}
+			if ($snippet_exists && $snippet_backup_path !== '' && file_exists($snippet_backup_path)) {
+				@copy($snippet_backup_path, $snippet_path);
+			} elseif (!$snippet_exists && file_exists($snippet_path)) {
+				@unlink($snippet_path);
+			}
+			@freesiem_sentinel_run_ssl_shell_command(escapeshellarg((string) ($integration['nginx_binary']['path'] ?: 'nginx')) . ' -t', 'nginx_test_after_restore', 60, (string) ($integration['test_command'] ?? 'nginx -t'));
+			@freesiem_sentinel_run_ssl_shell_command(escapeshellarg((string) ($integration['nginx_binary']['path'] ?: 'nginx')) . ' -s reload', 'nginx_reload_after_restore', 60, (string) ($integration['reload_command'] ?? 'nginx -s reload'));
 		}
-		if ($snippet_exists && $snippet_backup_path !== '' && file_exists($snippet_backup_path)) {
-			@copy($snippet_backup_path, $snippet_path);
-		} elseif (!$snippet_exists && file_exists($snippet_path)) {
-			@unlink($snippet_path);
-		}
-		@freesiem_sentinel_run_ssl_shell_command(escapeshellarg((string) ($integration['nginx_binary']['path'] ?: 'nginx')) . ' -t', 'nginx_test_after_restore', 60, (string) ($integration['test_command'] ?? 'nginx -t'));
-		@freesiem_sentinel_run_ssl_shell_command(escapeshellarg((string) ($integration['nginx_binary']['path'] ?: 'nginx')) . ' -s reload', 'nginx_reload_after_restore', 60, (string) ($integration['reload_command'] ?? 'nginx -s reload'));
 
 		$state_updates['nginx_backup_path'] = $backup_path;
-		$state_updates['nginx_integration_mode'] = $reload_permission_denied ? 'manual_required' : 'failed_rolled_back';
+		$state_updates['nginx_integration_mode'] = $reload_permission_denied ? 'pending_root_finalize' : 'failed_rolled_back';
 		$state_updates['nginx_last_apply_status'] = $reload_permission_denied ? 'manual_required' : 'failed';
 		$state_updates['nginx_last_apply_result'] = $reload_permission_denied
-			? __('Sentinel restored the prior config because nginx reload from the PHP/web-user context was blocked. Run nginx -t and reload nginx manually as root after reviewing the preview.', 'freesiem-sentinel')
+			? __('Sentinel wrote the nginx SSL config, but nginx reload from the PHP/web-user context was blocked. Run nginx -t and reload nginx manually as root to finalize the change.', 'freesiem-sentinel')
 			: __('Nginx reload failed, so Sentinel restored the prior config.', 'freesiem-sentinel');
 		$state_updates['nginx_last_test_result'] = !empty($test['stderr_summary']) ? (string) $test['stderr_summary'] : (string) ($test['stdout_summary'] ?? '');
 		$state_updates['nginx_last_reload_result'] = !empty($reload['stderr_summary']) ? (string) $reload['stderr_summary'] : (string) ($reload['stdout_summary'] ?? '');

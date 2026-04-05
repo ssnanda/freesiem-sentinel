@@ -558,6 +558,13 @@ class Freesiem_Admin
 		}
 
 		$notice = (string) ($result['summary'] ?? __('Nginx SSL apply completed.', 'freesiem-sentinel'));
+		if ((string) ($result['status'] ?? '') === 'manual_required' && !empty($result['manual_commands']) && is_array($result['manual_commands'])) {
+			$notice .= ' ' . sprintf(
+				__('Run as root: %1$s ; %2$s', 'freesiem-sentinel'),
+				(string) ($result['manual_commands'][0] ?? 'nginx -t'),
+				(string) ($result['manual_commands'][1] ?? 'nginx -s reload')
+			);
+		}
 		if (!empty($result['success']) && !is_ssl() && strtolower((string) wp_parse_url(home_url('/'), PHP_URL_SCHEME)) !== 'https') {
 			$notice .= ' ' . __('SSL is active at nginx, but WordPress URLs still need to be switched to HTTPS manually or in a later phase.', 'freesiem-sentinel');
 		}
