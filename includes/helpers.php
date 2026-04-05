@@ -303,7 +303,7 @@ function freesiem_sentinel_get_default_ssl_settings(): array
 		'force_https' => 0,
 		'hsts_enabled' => 0,
 		'auto_renew' => 0,
-		'use_staging' => 1,
+		'use_staging' => 0,
 		'detailed_logs' => 0,
 	];
 }
@@ -1741,6 +1741,7 @@ function freesiem_sentinel_can_run_live_ssl_action(string $action, ?array $ssl_s
 	$readiness = is_array($readiness) ? $readiness : freesiem_sentinel_calculate_ssl_readiness($ssl_settings, $environment);
 	$method = (string) ($ssl_settings['challenge_method'] ?? 'webroot-http-01');
 	$state = freesiem_sentinel_get_ssl_state();
+	$certificate = freesiem_sentinel_get_certificate_view_data($state);
 
 	if (empty($environment['certbot']['available'])) {
 		return ['allowed' => false, 'reason' => __('Certbot is not available on this server.', 'freesiem-sentinel')];
@@ -1756,6 +1757,10 @@ function freesiem_sentinel_can_run_live_ssl_action(string $action, ?array $ssl_s
 
 	if ($action === 'renew' && empty($state['domain']) && ($environment['configured_host'] === '')) {
 		return ['allowed' => false, 'reason' => __('No certificate domain is available for renewal.', 'freesiem-sentinel')];
+	}
+
+	if ($action === 'renew' && empty($ssl_settings['use_staging']) && !empty($certificate['is_staging_certificate'])) {
+		return ['allowed' => false, 'reason' => __('This site is still using a staging certificate. Use Issue Certificate to replace it with a production certificate.', 'freesiem-sentinel')];
 	}
 
 	return ['allowed' => true, 'reason' => ''];
