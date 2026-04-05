@@ -2603,6 +2603,7 @@ function freesiem_sentinel_get_certificate_view_data(?array $ssl_state = null): 
 		'cert_path' => $cert_path,
 		'key_path' => $privkey_path,
 		'staging' => str_contains(strtolower((string) ($ssl_state['certbot_path'] ?? '')), 'staging'),
+		'is_staging_certificate' => false,
 		'raw_certificate' => '',
 		'raw_text' => '',
 	];
@@ -2640,12 +2641,47 @@ function freesiem_sentinel_get_certificate_view_data(?array $ssl_state = null): 
 		$result['sans'] = array_values(array_unique(array_filter($sans)));
 	}
 
+	if (str_contains(strtolower((string) $result['issuer']), 'staging')) {
+		$result['staging'] = true;
+		$result['is_staging_certificate'] = true;
+	}
+
 	if (function_exists('shell_exec') || function_exists('exec') || function_exists('proc_open') || function_exists('system') || function_exists('passthru')) {
 		$openssl = freesiem_sentinel_detect_binary('openssl');
 		if (!empty($openssl['available'])) {
 			$raw = freesiem_sentinel_run_ssl_shell_command(escapeshellarg((string) $openssl['path']) . ' x509 -in ' . escapeshellarg($cert_path) . ' -noout -text', 'view_certificate', 30, 'openssl x509 -in ' . $cert_path . ' -noout -text');
 			$result['raw_text'] = !empty($raw['stdout_summary']) ? (string) $raw['stdout_summary'] : (string) ($raw['stderr_summary'] ?? '');
 		}
+	}
+
+	return $result;
+}
+
+function freesiem_sentinel_get_ssl_endpoint_status(?array $environment = null): array
+{
+	$environment = is_array($environment) ? $environment : freesiem_sentinel_get_ssl_environment_snapshot();
+	$host = trim((string) ($environment['configured_host'] ?? ''));
+	$result = [
+		'http' => __('Unavailable', 'freesiem-sentinel'),
+		'https' => __('Unavailable', 'freesiem-sentinel'),
+	];
+
+	if ($host === '' || !function_exists('wp_remote_get')) {
+		return $result;
+	}
+
+	$http = wp_remote_get('http://' . $host, ['timeout' => 8, 'redirection' => 0, 'sslverify' => false]);
+	if (is_wp_error($http)) {
+		$result['http'] = __('Error', 'freesiem-sentinel');
+	} else {
+		$result['http'] = 'HTTP ' . (string) wp_remote_retrieve_response_code($http);
+	}
+
+	$https = wp_remote_get('https://' . $host, ['timeout' => 8, 'redirection' => 0, 'sslverify' => false]);
+	if (is_wp_error($https)) {
+		$result['https'] = __('Error', 'freesiem-sentinel');
+	} else {
+		$result['https'] = 'HTTPS ' . (string) wp_remote_retrieve_response_code($https);
 	}
 
 	return $result;

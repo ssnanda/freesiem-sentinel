@@ -1980,6 +1980,7 @@ class Freesiem_Admin
 	private function render_ssl_overview_tab(array $ssl_settings, array $preflight, array $dry_run, array $readiness, array $environment, array $ssl_state, array $install_environment): void
 	{
 		$certificate = freesiem_sentinel_get_certificate_view_data($ssl_state);
+		$endpoint_status = freesiem_sentinel_get_ssl_endpoint_status($environment);
 		$integration = freesiem_sentinel_detect_nginx_integration($ssl_settings, $environment, $ssl_state);
 		$permission_guidance = freesiem_sentinel_get_nginx_permission_guidance($integration, $environment);
 		$user_space = freesiem_sentinel_get_ssl_user_space_paths($ssl_settings);
@@ -1992,9 +1993,9 @@ class Freesiem_Admin
 
 		echo '<div style="display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px;margin-bottom:20px;">';
 		$this->render_summary_stat(__('Domain', 'freesiem-sentinel'), $environment['configured_host'] !== '' ? $environment['configured_host'] : __('Unavailable', 'freesiem-sentinel'));
-		$this->render_summary_stat(__('HTTP / HTTPS', 'freesiem-sentinel'), strtoupper($environment['home_scheme'] !== '' ? $environment['home_scheme'] : $environment['site_scheme']), __('WordPress HTTPS', 'freesiem-sentinel'), $environment['is_https_configured'] ? __('Yes', 'freesiem-sentinel') : __('No', 'freesiem-sentinel'));
+		$this->render_summary_stat(__('HTTP / HTTPS', 'freesiem-sentinel'), ($endpoint_status['http'] ?? __('Unavailable', 'freesiem-sentinel')) . ' / ' . ($endpoint_status['https'] ?? __('Unavailable', 'freesiem-sentinel')), __('WordPress HTTPS', 'freesiem-sentinel'), $environment['is_https_configured'] ? __('Yes', 'freesiem-sentinel') : __('No', 'freesiem-sentinel'));
 		$this->render_summary_stat(__('Certbot', 'freesiem-sentinel'), !empty($environment['certbot']['available']) ? __('Installed', 'freesiem-sentinel') : __('Missing', 'freesiem-sentinel'), __('Version', 'freesiem-sentinel'), !empty($environment['certbot']['version']) ? (string) $environment['certbot']['version'] : __('Unavailable', 'freesiem-sentinel'));
-		$this->render_summary_stat(__('Certificate', 'freesiem-sentinel'), !empty($certificate['exists']) ? __('Present', 'freesiem-sentinel') : __('Not found', 'freesiem-sentinel'), __('Expiry', 'freesiem-sentinel'), !empty($certificate['expires_at']) ? (string) $certificate['expires_at'] : __('Unavailable', 'freesiem-sentinel'));
+		$this->render_summary_stat(__('Certificate', 'freesiem-sentinel'), !empty($certificate['exists']) ? (!empty($certificate['is_staging_certificate']) ? __('Staging cert', 'freesiem-sentinel') : __('Present', 'freesiem-sentinel')) : __('Not found', 'freesiem-sentinel'), __('Expiry', 'freesiem-sentinel'), !empty($certificate['expires_at']) ? (string) $certificate['expires_at'] : __('Unavailable', 'freesiem-sentinel'));
 		echo '</div>';
 
 		echo '<div style="display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:20px;">';
@@ -2010,6 +2011,9 @@ class Freesiem_Admin
 
 		echo '<div style="background:#fff;padding:20px;border:1px solid #dcdcde;border-radius:12px;">';
 		echo '<h2 style="margin-top:0;">' . esc_html__('Certificate', 'freesiem-sentinel') . '</h2>';
+		if (!empty($certificate['is_staging_certificate'])) {
+			echo '<p style="margin-top:0;padding:12px;border-radius:8px;background:#fee2e2;border:1px solid #fca5a5;"><strong>' . esc_html__('Browser warning expected.', 'freesiem-sentinel') . '</strong> ' . esc_html__('This site is currently serving a Let’s Encrypt staging certificate, which browsers do not trust. Disable staging and reissue the certificate for production use.', 'freesiem-sentinel') . '</p>';
+		}
 		if ($lineage_exists) {
 			echo '<p style="margin-top:0;padding:12px;border-radius:8px;background:#fff7ed;border:1px solid #fdba74;"><strong>' . esc_html__('Existing certificate detected.', 'freesiem-sentinel') . '</strong> ' . esc_html__('Issue Certificate will use an explicit certbot certonly command. Use the force reissue option only if you want to add --force-renewal for an existing lineage.', 'freesiem-sentinel') . '</p>';
 			echo '<form method="post" action="' . esc_url(admin_url('admin-post.php')) . '" style="margin:0 0 12px 0;display:flex;gap:10px;align-items:center;flex-wrap:wrap;">';
