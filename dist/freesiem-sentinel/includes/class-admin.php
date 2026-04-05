@@ -43,6 +43,7 @@ class Freesiem_Admin
 		add_action('admin_post_freesiem_sentinel_tfa_change_password', [$this, 'handle_tfa_change_password']);
 		add_action('admin_post_freesiem_sentinel_save_ssl_settings', [$this, 'handle_save_ssl_settings']);
 		add_action('admin_post_freesiem_sentinel_run_ssl_preflight', [$this, 'handle_run_ssl_preflight']);
+		add_action('admin_post_freesiem_sentinel_run_ssl_dry_run', [$this, 'handle_run_ssl_dry_run']);
 	}
 
 	public function register_menu(): void
@@ -418,7 +419,22 @@ class Freesiem_Admin
 			'detailed_logs' => empty($_POST['detailed_logs']) ? 0 : 1,
 		]);
 
-		freesiem_sentinel_add_ssl_log('info', __('SSL settings were saved. Future-only runtime flags remain inactive in this version.', 'freesiem-sentinel'));
+		$readiness = freesiem_sentinel_calculate_ssl_readiness($settings);
+		freesiem_sentinel_add_ssl_log(
+			'info',
+			__('SSL settings were saved. Future-only runtime flags remain inactive in this version.', 'freesiem-sentinel'),
+			'settings',
+			[
+				'readiness_state' => $readiness['state'],
+				'challenge_method' => (string) ($settings['challenge_method'] ?? 'webroot-http-01'),
+			]
+		);
+		freesiem_sentinel_add_ssl_log(
+			'info',
+			sprintf(__('SSL readiness recalculated: %s.', 'freesiem-sentinel'), $readiness['label']),
+			'readiness',
+			['readiness_state' => $readiness['state']]
+		);
 		freesiem_sentinel_set_notice('success', __('SSL settings saved. Future-only SSL actions remain inactive in this version.', 'freesiem-sentinel'));
 		$this->redirect_to_page('freesiem-ssl', ['tab' => 'settings']);
 	}
@@ -429,9 +445,27 @@ class Freesiem_Admin
 		freesiem_sentinel_require_admin_post_nonce();
 
 		$preflight = freesiem_sentinel_run_ssl_preflight();
-		freesiem_sentinel_add_ssl_log('info', $preflight['summary'] ?? __('SSL preflight was run.', 'freesiem-sentinel'));
+		$readiness = freesiem_sentinel_calculate_ssl_readiness();
+		freesiem_sentinel_add_ssl_log('info', $preflight['summary'] ?? __('SSL preflight was run.', 'freesiem-sentinel'), 'preflight', [
+			'readiness_state' => $readiness['state'],
+			'fail_count' => (string) ((int) ($preflight['counts']['fail'] ?? 0)),
+		]);
 		freesiem_sentinel_set_notice('success', $preflight['summary'] ?? __('SSL preflight completed.', 'freesiem-sentinel'));
 		$this->redirect_to_page('freesiem-ssl', ['tab' => 'preflight']);
+	}
+
+	public function handle_run_ssl_dry_run(): void
+	{
+		$this->assert_manage_permissions();
+		freesiem_sentinel_require_admin_post_nonce();
+
+		$dry_run = freesiem_sentinel_run_ssl_dry_run();
+		freesiem_sentinel_add_ssl_log('info', $dry_run['summary'] ?? __('SSL dry run validation completed.', 'freesiem-sentinel'), 'dry_run', [
+			'readiness_state' => (string) ($dry_run['readiness_state'] ?? 'not_configured'),
+			'would_attempt_status' => (string) (($dry_run['context']['would_attempt_status'] ?? 'warn')),
+		]);
+		freesiem_sentinel_set_notice('success', $dry_run['summary'] ?? __('SSL dry run validation completed.', 'freesiem-sentinel'));
+		$this->redirect_to_page('freesiem-ssl', ['tab' => 'dry-run']);
 	}
 
 	public function render_dashboard_page(): void
@@ -987,22 +1021,26 @@ class Freesiem_Admin
 		$this->assert_manage_permissions();
 
 		$tab = isset($_GET['tab']) ? sanitize_key((string) wp_unslash($_GET['tab'])) : 'overview';
-		if (!in_array($tab, ['overview', 'preflight', 'settings', 'logs'], true)) {
+		if (!in_array($tab, ['overview', 'preflight', 'settings', 'dry-run', 'logs'], true)) {
 			$tab = 'overview';
 		}
 
 		$ssl_settings = freesiem_sentinel_get_ssl_settings();
 		$preflight = freesiem_sentinel_get_ssl_preflight();
+		$dry_run = freesiem_sentinel_get_ssl_dry_run();
+		$environment = freesiem_sentinel_get_ssl_environment_snapshot($ssl_settings);
+		$readiness = freesiem_sentinel_calculate_ssl_readiness($ssl_settings, $environment, $preflight);
 		$logs = array_reverse(freesiem_sentinel_get_ssl_logs());
 
 		echo '<div class="wrap">';
 		echo '<h1>' . esc_html__('SSL / HTTPS', 'freesiem-sentinel') . '</h1>';
-		echo '<div class="notice notice-warning inline"><p>' . esc_html__('Phase 1 only: this version shows SSL status, preflight checks, and future settings storage. It does not issue certificates, run certbot, change server config, force redirects, or enable HSTS.', 'freesiem-sentinel') . '</p></div>';
+		echo '<div class="notice notice-warning inline"><p>' . esc_html__('Phase 2 only: this version adds readiness modeling, dry-run validation, and simulated command previews. It still does not issue certificates, run live certbot on production, change server config, force redirects, or enable HSTS.', 'freesiem-sentinel') . '</p></div>';
 		echo '<nav class="nav-tab-wrapper" style="margin-bottom:20px;">';
 		foreach ([
 			'overview' => __('Overview', 'freesiem-sentinel'),
 			'preflight' => __('Preflight', 'freesiem-sentinel'),
 			'settings' => __('Settings', 'freesiem-sentinel'),
+			'dry-run' => __('Dry Run', 'freesiem-sentinel'),
 			'logs' => __('Logs', 'freesiem-sentinel'),
 		] as $slug => $label) {
 			$url = freesiem_sentinel_admin_page_url('freesiem-ssl', ['tab' => $slug]);
@@ -1012,13 +1050,15 @@ class Freesiem_Admin
 		echo '</nav>';
 
 		if ($tab === 'overview') {
-			$this->render_ssl_overview_tab($ssl_settings, $preflight);
+			$this->render_ssl_overview_tab($ssl_settings, $preflight, $dry_run, $readiness, $environment);
 		} elseif ($tab === 'preflight') {
 			$this->render_ssl_preflight_tab($preflight);
 		} elseif ($tab === 'settings') {
-			$this->render_ssl_settings_tab($ssl_settings);
+			$this->render_ssl_settings_tab($ssl_settings, $readiness);
+		} elseif ($tab === 'dry-run') {
+			$this->render_ssl_dry_run_tab($ssl_settings, $dry_run, $readiness, $environment);
 		} else {
-			$this->render_ssl_logs_tab($logs, $preflight);
+			$this->render_ssl_logs_tab($logs, $preflight, $dry_run);
 		}
 
 		echo '</div>';
@@ -1746,15 +1786,8 @@ class Freesiem_Admin
 			: 'display:inline-block;padding:4px 10px;border-radius:999px;background:#ecfccb;color:#3f6212;font-weight:600;';
 	}
 
-	private function render_ssl_overview_tab(array $ssl_settings, array $preflight): void
+	private function render_ssl_overview_tab(array $ssl_settings, array $preflight, array $dry_run, array $readiness, array $environment): void
 	{
-		$site_url = site_url('/');
-		$home_url = home_url('/');
-		$site_scheme = strtolower((string) wp_parse_url($site_url, PHP_URL_SCHEME));
-		$home_scheme = strtolower((string) wp_parse_url($home_url, PHP_URL_SCHEME));
-		$host = $ssl_settings['hostname_override'] !== ''
-			? (string) $ssl_settings['hostname_override']
-			: strtolower((string) wp_parse_url($home_url, PHP_URL_HOST));
 		$port_check_summary = (!empty($ssl_settings['check_port_80']) || !empty($ssl_settings['check_port_443']))
 			? sprintf(__('Configured (80: %1$s, 443: %2$s)', 'freesiem-sentinel'), !empty($ssl_settings['check_port_80']) ? __('on', 'freesiem-sentinel') : __('off', 'freesiem-sentinel'), !empty($ssl_settings['check_port_443']) ? __('on', 'freesiem-sentinel') : __('off', 'freesiem-sentinel'))
 			: __('Not configured', 'freesiem-sentinel');
@@ -1763,38 +1796,36 @@ class Freesiem_Admin
 		echo '<div style="background:#fff;padding:20px;border:1px solid #dcdcde;border-radius:12px;">';
 		echo '<h2 style="margin-top:0;">' . esc_html__('Current SSL Status', 'freesiem-sentinel') . '</h2>';
 		echo '<table class="widefat striped"><tbody>';
-		$this->render_detail_row(__('Site URL', 'freesiem-sentinel'), $site_url);
-		$this->render_detail_row(__('Home URL', 'freesiem-sentinel'), $home_url);
-		$this->render_detail_row(__('Current scheme', 'freesiem-sentinel'), strtoupper($home_scheme !== '' ? $home_scheme : $site_scheme));
-		$this->render_detail_row(__('Is WordPress configured for HTTPS', 'freesiem-sentinel'), ($site_scheme === 'https' || $home_scheme === 'https') ? __('Yes', 'freesiem-sentinel') : __('No', 'freesiem-sentinel'));
-		$this->render_detail_row(__('Is current admin request HTTPS', 'freesiem-sentinel'), is_ssl() ? __('Yes', 'freesiem-sentinel') : __('No', 'freesiem-sentinel'));
-		$this->render_detail_row(__('Detected domain/host', 'freesiem-sentinel'), $host);
+		$this->render_detail_row(__('Site URL', 'freesiem-sentinel'), $environment['site_url']);
+		$this->render_detail_row(__('Home URL', 'freesiem-sentinel'), $environment['home_url']);
+		$this->render_detail_row(__('Current scheme', 'freesiem-sentinel'), strtoupper($environment['home_scheme'] !== '' ? $environment['home_scheme'] : $environment['site_scheme']));
+		$this->render_detail_row(__('Is WordPress configured for HTTPS', 'freesiem-sentinel'), $environment['is_https_configured'] ? __('Yes', 'freesiem-sentinel') : __('No', 'freesiem-sentinel'));
+		$this->render_detail_row(__('Is current admin request HTTPS', 'freesiem-sentinel'), $environment['is_admin_request_https'] ? __('Yes', 'freesiem-sentinel') : __('No', 'freesiem-sentinel'));
+		$this->render_detail_row(__('Detected domain/host', 'freesiem-sentinel'), $environment['configured_host']);
 		$this->render_detail_row(__('Server software', 'freesiem-sentinel'), isset($_SERVER['SERVER_SOFTWARE']) ? sanitize_text_field(wp_unslash((string) $_SERVER['SERVER_SOFTWARE'])) : __('Unavailable', 'freesiem-sentinel'));
 		$this->render_detail_row(__('Port/host checks configured', 'freesiem-sentinel'), $port_check_summary);
 		$this->render_detail_row(__('Provider', 'freesiem-sentinel'), __('certbot (not connected)', 'freesiem-sentinel'));
 		$this->render_detail_row(__('Last preflight run', 'freesiem-sentinel'), $this->summary_value_or_fallback($preflight['ran_at'] ?? '', true));
 		$this->render_detail_row(__('Last preflight result', 'freesiem-sentinel'), (string) ($preflight['summary'] ?? __('No preflight run yet.', 'freesiem-sentinel')));
-		$this->render_detail_row(__('SSL feature mode', 'freesiem-sentinel'), __('status-only', 'freesiem-sentinel'));
+		$this->render_detail_row(__('Last dry run', 'freesiem-sentinel'), $this->summary_value_or_fallback($dry_run['ran_at'] ?? '', true));
+		$this->render_detail_row(__('Last dry-run summary', 'freesiem-sentinel'), (string) ($dry_run['summary'] ?? __('No dry run yet.', 'freesiem-sentinel')));
+		$this->render_detail_row(__('SSL feature mode', 'freesiem-sentinel'), __('execution-prep only', 'freesiem-sentinel'));
 		echo '</tbody></table>';
 		echo '</div>';
 
 		echo '<div style="display:grid;gap:20px;">';
 		echo '<div style="background:#fff;padding:20px;border:1px solid #dcdcde;border-radius:12px;">';
-		echo '<h2 style="margin-top:0;">' . esc_html__('Preflight Snapshot', 'freesiem-sentinel') . '</h2>';
-		echo '<p><strong>' . esc_html__('Pass', 'freesiem-sentinel') . ':</strong> ' . esc_html((string) ((int) ($preflight['counts']['pass'] ?? 0))) . '</p>';
-		echo '<p><strong>' . esc_html__('Warn', 'freesiem-sentinel') . ':</strong> ' . esc_html((string) ((int) ($preflight['counts']['warn'] ?? 0))) . '</p>';
-		echo '<p><strong>' . esc_html__('Fail', 'freesiem-sentinel') . ':</strong> ' . esc_html((string) ((int) ($preflight['counts']['fail'] ?? 0))) . '</p>';
-		echo '<p>' . esc_html((string) ($preflight['summary'] ?? __('No preflight run yet.', 'freesiem-sentinel'))) . '</p>';
-		echo '<p><a class="button button-primary" href="' . esc_url(freesiem_sentinel_admin_page_url('freesiem-ssl', ['tab' => 'preflight'])) . '">' . esc_html__('Open Preflight', 'freesiem-sentinel') . '</a></p>';
+		echo '<h2 style="margin-top:0;">' . esc_html__('Execution Readiness', 'freesiem-sentinel') . '</h2>';
+		echo '<p><span style="' . esc_attr($this->ssl_readiness_badge_style((string) ($readiness['state'] ?? 'not_configured'))) . '">' . esc_html(strtoupper((string) ($readiness['state'] ?? 'not_configured'))) . '</span></p>';
+		echo '<p><strong>' . esc_html((string) ($readiness['label'] ?? __('Not configured', 'freesiem-sentinel'))) . '</strong></p>';
+		echo '<p style="margin-bottom:0;color:#646970;">' . esc_html((string) ($readiness['description'] ?? '')) . '</p>';
 		echo '</div>';
 
 		echo '<div style="background:#fff;padding:20px;border:1px solid #dcdcde;border-radius:12px;">';
-		echo '<h2 style="margin-top:0;">' . esc_html__('Future Settings Status', 'freesiem-sentinel') . '</h2>';
-		echo '<p><strong>' . esc_html__('Management UI', 'freesiem-sentinel') . ':</strong> ' . esc_html(!empty($ssl_settings['enable_management_ui']) ? __('Enabled', 'freesiem-sentinel') : __('Disabled', 'freesiem-sentinel')) . '</p>';
-		echo '<p><strong>' . esc_html__('Challenge method', 'freesiem-sentinel') . ':</strong> ' . esc_html($this->format_ssl_challenge_method((string) ($ssl_settings['challenge_method'] ?? 'webroot-http-01'))) . '</p>';
-		echo '<p><strong>' . esc_html__('Staging mode', 'freesiem-sentinel') . ':</strong> ' . esc_html(!empty($ssl_settings['use_staging']) ? __('Enabled', 'freesiem-sentinel') : __('Disabled', 'freesiem-sentinel')) . '</p>';
-		echo '<p><strong>' . esc_html__('Detailed logs', 'freesiem-sentinel') . ':</strong> ' . esc_html(!empty($ssl_settings['detailed_logs']) ? __('Enabled', 'freesiem-sentinel') : __('Disabled', 'freesiem-sentinel')) . '</p>';
-		echo '<p style="margin-bottom:0;color:#646970;">' . esc_html__('Future-only toggles are stored for later phases and do not change runtime behavior in this release.', 'freesiem-sentinel') . '</p>';
+		echo '<h2 style="margin-top:0;">' . esc_html__('Gated Actions', 'freesiem-sentinel') . '</h2>';
+		echo '<p><button type="button" class="button button-secondary" disabled="disabled">' . esc_html__('Issue Certificate', 'freesiem-sentinel') . '</button> ';
+		echo '<button type="button" class="button button-secondary" disabled="disabled">' . esc_html__('Renew Now', 'freesiem-sentinel') . '</button></p>';
+		echo '<p style="margin-bottom:0;color:#646970;">' . esc_html__('Not active in this version. Preview only. No certificate will be issued.', 'freesiem-sentinel') . '</p>';
 		echo '</div>';
 		echo '</div>';
 		echo '</div>';
@@ -1811,38 +1842,10 @@ class Freesiem_Admin
 		submit_button(__('Run Preflight', 'freesiem-sentinel'), 'primary', '', false);
 		echo '</form>';
 		echo '</div>';
-
-		echo '<div style="background:#fff;padding:20px;border:1px solid #dcdcde;border-radius:12px;">';
-		echo '<div style="display:flex;justify-content:space-between;gap:12px;align-items:flex-start;flex-wrap:wrap;">';
-		echo '<div>';
-		echo '<h2 style="margin:0 0 6px 0;">' . esc_html__('Latest Results', 'freesiem-sentinel') . '</h2>';
-		echo '<p style="margin:0;color:#646970;">' . esc_html($this->summary_value_or_fallback((string) ($preflight['ran_at'] ?? ''), true)) . '</p>';
-		echo '</div>';
-		echo '<p style="margin:0;"><strong>' . esc_html((string) ($preflight['summary'] ?? __('No preflight run yet.', 'freesiem-sentinel'))) . '</strong></p>';
-		echo '</div>';
-
-		if (empty($preflight['items'])) {
-			echo '<div style="margin-top:20px;">';
-			$this->render_empty_state(__('No preflight results yet.', 'freesiem-sentinel'), __('Run the safe preflight to populate SSL readiness checks.', 'freesiem-sentinel'));
-			echo '</div>';
-		} else {
-			echo '<table class="widefat striped" style="margin-top:20px;"><thead><tr><th>' . esc_html__('Check', 'freesiem-sentinel') . '</th><th>' . esc_html__('Status', 'freesiem-sentinel') . '</th><th>' . esc_html__('Details', 'freesiem-sentinel') . '</th></tr></thead><tbody>';
-			foreach ((array) $preflight['items'] as $item) {
-				if (!is_array($item)) {
-					continue;
-				}
-				echo '<tr>';
-				echo '<td><strong>' . esc_html((string) ($item['label'] ?? '')) . '</strong></td>';
-				echo '<td><span style="' . esc_attr($this->ssl_preflight_badge_style((string) ($item['status'] ?? 'WARN'))) . '">' . esc_html((string) ($item['status'] ?? 'WARN')) . '</span></td>';
-				echo '<td>' . esc_html((string) ($item['message'] ?? '')) . '</td>';
-				echo '</tr>';
-			}
-			echo '</tbody></table>';
-		}
-		echo '</div>';
+		$this->render_ssl_results_table($preflight, __('Latest Results', 'freesiem-sentinel'));
 	}
 
-	private function render_ssl_settings_tab(array $ssl_settings): void
+	private function render_ssl_settings_tab(array $ssl_settings, array $readiness): void
 	{
 		echo '<form method="post" action="' . esc_url(admin_url('admin-post.php')) . '">';
 		wp_nonce_field(FREESIEM_SENTINEL_NONCE_ACTION);
@@ -1850,15 +1853,15 @@ class Freesiem_Admin
 
 		echo '<div style="background:#fff;padding:20px;border:1px solid #dcdcde;border-radius:12px;margin-bottom:20px;">';
 		echo '<h2 style="margin-top:0;">' . esc_html__('Future SSL Settings', 'freesiem-sentinel') . '</h2>';
+		echo '<p><span style="' . esc_attr($this->ssl_readiness_badge_style((string) ($readiness['state'] ?? 'not_configured'))) . '">' . esc_html(strtoupper((string) ($readiness['state'] ?? 'not_configured'))) . '</span></p>';
 		echo '<p style="margin-bottom:0;color:#646970;"><strong>' . esc_html__('Stored only for future implementation; not active in this version.', 'freesiem-sentinel') . '</strong></p>';
 		echo '</div>';
 
 		echo '<table class="form-table" role="presentation">';
 		$this->render_ssl_checkbox_field('enable_management_ui', __('Enable SSL management UI', 'freesiem-sentinel'), !empty($ssl_settings['enable_management_ui']), __('Keeps this SSL/HTTPS admin area available without turning on live SSL management.', 'freesiem-sentinel'));
 		$this->render_ssl_text_field('acme_contact_email', __('ACME contact email', 'freesiem-sentinel'), (string) ($ssl_settings['acme_contact_email'] ?? ''), __('Stored for future certificate registration only.', 'freesiem-sentinel'), 'email');
-		$this->render_ssl_text_field('hostname_override', __('Preferred domain / hostname override', 'freesiem-sentinel'), (string) ($ssl_settings['hostname_override'] ?? ''), __('Optional override used by preflight and future certificate planning.', 'freesiem-sentinel'));
-		$this->render_ssl_checkbox_field('allow_local_override', __('Allow localhost / IP override', 'freesiem-sentinel'), !empty($ssl_settings['allow_local_override']), __('Use only if you intentionally want preflight to accept a local or IP-based hostname.', 'freesiem-sentinel'));
-
+		$this->render_ssl_text_field('hostname_override', __('Preferred domain / hostname override', 'freesiem-sentinel'), (string) ($ssl_settings['hostname_override'] ?? ''), __('Optional override used by preflight, dry run, and future certificate planning.', 'freesiem-sentinel'));
+		$this->render_ssl_checkbox_field('allow_local_override', __('Allow localhost / IP override', 'freesiem-sentinel'), !empty($ssl_settings['allow_local_override']), __('Use only if you intentionally want validation to accept a local or IP-based hostname.', 'freesiem-sentinel'));
 		echo '<tr><th scope="row"><label for="freesiem-challenge-method">' . esc_html__('Preferred challenge method', 'freesiem-sentinel') . '</label></th><td>';
 		echo '<select id="freesiem-challenge-method" name="challenge_method">';
 		foreach ([
@@ -1871,43 +1874,120 @@ class Freesiem_Admin
 		echo '</select>';
 		echo '<p class="description">' . esc_html__('Selection is stored now for future implementation only.', 'freesiem-sentinel') . '</p>';
 		echo '</td></tr>';
-
-		$this->render_ssl_text_field('webroot_path', __('Webroot path', 'freesiem-sentinel'), (string) ($ssl_settings['webroot_path'] ?? ''), __('Required later if you plan to use webroot HTTP-01.', 'freesiem-sentinel'));
-		$this->render_ssl_checkbox_field('check_port_80', __('Intent to use port 80', 'freesiem-sentinel'), !empty($ssl_settings['check_port_80']), __('Used only for safe readiness reporting right now.', 'freesiem-sentinel'));
-		$this->render_ssl_checkbox_field('check_port_443', __('Intent to use port 443', 'freesiem-sentinel'), !empty($ssl_settings['check_port_443']), __('Used only for safe readiness reporting right now.', 'freesiem-sentinel'));
+		$this->render_ssl_text_field('webroot_path', __('Webroot path', 'freesiem-sentinel'), (string) ($ssl_settings['webroot_path'] ?? ''), __('Required for webroot HTTP-01 dry-run validation and future planning.', 'freesiem-sentinel'));
+		$this->render_ssl_checkbox_field('check_port_80', __('Intent to use port 80', 'freesiem-sentinel'), !empty($ssl_settings['check_port_80']), __('Used for readiness reporting only right now.', 'freesiem-sentinel'));
+		$this->render_ssl_checkbox_field('check_port_443', __('Intent to use port 443', 'freesiem-sentinel'), !empty($ssl_settings['check_port_443']), __('Used for readiness reporting only right now.', 'freesiem-sentinel'));
 		$this->render_ssl_checkbox_field('force_https', __('Force HTTPS', 'freesiem-sentinel'), !empty($ssl_settings['force_https']), __('Stored only for future implementation; no redirects are added in this version.', 'freesiem-sentinel'));
 		$this->render_ssl_checkbox_field('hsts_enabled', __('HSTS', 'freesiem-sentinel'), !empty($ssl_settings['hsts_enabled']), __('Stored only for future implementation; no headers are sent in this version.', 'freesiem-sentinel'));
 		$this->render_ssl_checkbox_field('auto_renew', __('Auto-renew', 'freesiem-sentinel'), !empty($ssl_settings['auto_renew']), __('Stored only for future implementation; no renewal jobs are scheduled in this version.', 'freesiem-sentinel'));
-		$this->render_ssl_checkbox_field('use_staging', __('Use Let’s Encrypt staging', 'freesiem-sentinel'), !empty($ssl_settings['use_staging']), __('Recommended for future safe testing before production issuance exists.', 'freesiem-sentinel'));
-		$this->render_ssl_checkbox_field('detailed_logs', __('Enable detailed SSL logs', 'freesiem-sentinel'), !empty($ssl_settings['detailed_logs']), __('Keeps more admin-side SSL event entries in the lightweight log store.', 'freesiem-sentinel'));
+		$this->render_ssl_checkbox_field('use_staging', __('Use Let’s Encrypt staging', 'freesiem-sentinel'), !empty($ssl_settings['use_staging']), __('Recommended for safe simulated execution planning.', 'freesiem-sentinel'));
+		$this->render_ssl_checkbox_field('detailed_logs', __('Enable detailed SSL logs', 'freesiem-sentinel'), !empty($ssl_settings['detailed_logs']), __('Adds category and context details to the lightweight SSL log store.', 'freesiem-sentinel'));
 		echo '</table>';
-
 		submit_button(__('Save SSL Settings', 'freesiem-sentinel'));
 		echo '</form>';
 	}
 
-	private function render_ssl_logs_tab(array $logs, array $preflight): void
+	private function render_ssl_dry_run_tab(array $ssl_settings, array $dry_run, array $readiness, array $environment): void
+	{
+		$preview = freesiem_sentinel_get_ssl_command_preview($ssl_settings, $environment);
+
+		echo '<div style="background:#fff;padding:20px;border:1px solid #dcdcde;border-radius:12px;margin-bottom:20px;">';
+		echo '<h2 style="margin-top:0;">' . esc_html__('Dry Run Validation', 'freesiem-sentinel') . '</h2>';
+		echo '<p>' . esc_html__('This dry run re-checks configuration completeness, re-runs safe preflight, builds a simulated command preview, and records whether the site would be ready for a future issuance attempt. No certificate will be issued.', 'freesiem-sentinel') . '</p>';
+		echo '<form method="post" action="' . esc_url(admin_url('admin-post.php')) . '">';
+		wp_nonce_field(FREESIEM_SENTINEL_NONCE_ACTION);
+		echo '<input type="hidden" name="action" value="freesiem_sentinel_run_ssl_dry_run" />';
+		submit_button(__('Run Dry Run Validation', 'freesiem-sentinel'), 'primary', '', false);
+		echo '</form>';
+		echo '</div>';
+
+		echo '<div style="display:grid;grid-template-columns:minmax(0,1fr) minmax(280px,.9fr);gap:20px;margin-bottom:20px;">';
+		echo '<div style="background:#fff;padding:20px;border:1px solid #dcdcde;border-radius:12px;">';
+		echo '<h2 style="margin-top:0;">' . esc_html__('Simulated Command Preview', 'freesiem-sentinel') . '</h2>';
+		echo '<p><strong>' . esc_html((string) ($preview['label'] ?? __('Preview only', 'freesiem-sentinel'))) . '</strong></p>';
+		echo '<pre style="white-space:pre-wrap;overflow:auto;">' . esc_html((string) ($preview['command'] ?? '')) . '</pre>';
+		echo '<p style="margin-bottom:0;color:#646970;">' . esc_html__('Preview only. No shell execution occurs in this version.', 'freesiem-sentinel') . '</p>';
+		echo '</div>';
+		echo '<div style="background:#fff;padding:20px;border:1px solid #dcdcde;border-radius:12px;">';
+		echo '<h2 style="margin-top:0;">' . esc_html__('Readiness Snapshot', 'freesiem-sentinel') . '</h2>';
+		echo '<p><span style="' . esc_attr($this->ssl_readiness_badge_style((string) ($readiness['state'] ?? 'not_configured'))) . '">' . esc_html(strtoupper((string) ($readiness['state'] ?? 'not_configured'))) . '</span></p>';
+		echo '<p><strong>' . esc_html((string) ($readiness['label'] ?? '')) . '</strong></p>';
+		echo '<p style="margin-bottom:0;color:#646970;">' . esc_html((string) ($readiness['description'] ?? '')) . '</p>';
+		echo '</div>';
+		echo '</div>';
+
+		$this->render_ssl_results_table($dry_run, __('Latest Dry Run', 'freesiem-sentinel'));
+
+		if (!empty($dry_run['plan'])) {
+			echo '<div style="background:#fff;padding:20px;border:1px solid #dcdcde;border-radius:12px;margin-top:20px;">';
+			echo '<h2 style="margin-top:0;">' . esc_html__('Execution Plan Summary', 'freesiem-sentinel') . '</h2>';
+			echo '<ol style="margin:0;padding-left:18px;">';
+			foreach ((array) $dry_run['plan'] as $step) {
+				echo '<li style="margin-bottom:8px;">' . esc_html((string) $step) . '</li>';
+			}
+			echo '</ol>';
+			echo '</div>';
+		}
+	}
+
+	private function render_ssl_logs_tab(array $logs, array $preflight, array $dry_run): void
 	{
 		echo '<div style="background:#fff;padding:20px;border:1px solid #dcdcde;border-radius:12px;margin-bottom:20px;">';
 		echo '<h2 style="margin-top:0;">' . esc_html__('Latest Summary', 'freesiem-sentinel') . '</h2>';
 		echo '<p><strong>' . esc_html__('Last preflight', 'freesiem-sentinel') . ':</strong> ' . esc_html($this->summary_value_or_fallback((string) ($preflight['ran_at'] ?? ''), true)) . '</p>';
-		echo '<p style="margin-bottom:0;"><strong>' . esc_html__('Summary', 'freesiem-sentinel') . ':</strong> ' . esc_html((string) ($preflight['summary'] ?? __('No preflight run yet.', 'freesiem-sentinel'))) . '</p>';
+		echo '<p><strong>' . esc_html__('Preflight summary', 'freesiem-sentinel') . ':</strong> ' . esc_html((string) ($preflight['summary'] ?? __('No preflight run yet.', 'freesiem-sentinel'))) . '</p>';
+		echo '<p><strong>' . esc_html__('Last dry run', 'freesiem-sentinel') . ':</strong> ' . esc_html($this->summary_value_or_fallback((string) ($dry_run['ran_at'] ?? ''), true)) . '</p>';
+		echo '<p style="margin-bottom:0;"><strong>' . esc_html__('Dry-run summary', 'freesiem-sentinel') . ':</strong> ' . esc_html((string) ($dry_run['summary'] ?? __('No dry run yet.', 'freesiem-sentinel'))) . '</p>';
 		echo '</div>';
 
 		echo '<div style="background:#fff;padding:20px;border:1px solid #dcdcde;border-radius:12px;">';
 		echo '<h2 style="margin-top:0;">' . esc_html__('Event Log', 'freesiem-sentinel') . '</h2>';
 		if ($logs === []) {
-			$this->render_empty_state(__('No SSL events logged yet.', 'freesiem-sentinel'), __('Saving SSL settings or running preflight will add lightweight event entries here.', 'freesiem-sentinel'));
+			$this->render_empty_state(__('No SSL events logged yet.', 'freesiem-sentinel'), __('Saving SSL settings, running preflight, or running a dry run will add lightweight event entries here.', 'freesiem-sentinel'));
 		} else {
-			echo '<table class="widefat striped"><thead><tr><th>' . esc_html__('Timestamp', 'freesiem-sentinel') . '</th><th>' . esc_html__('Level', 'freesiem-sentinel') . '</th><th>' . esc_html__('Message', 'freesiem-sentinel') . '</th></tr></thead><tbody>';
+			echo '<table class="widefat striped"><thead><tr><th>' . esc_html__('Timestamp', 'freesiem-sentinel') . '</th><th>' . esc_html__('Category', 'freesiem-sentinel') . '</th><th>' . esc_html__('Level', 'freesiem-sentinel') . '</th><th>' . esc_html__('Message', 'freesiem-sentinel') . '</th><th>' . esc_html__('Context', 'freesiem-sentinel') . '</th></tr></thead><tbody>';
 			foreach ($logs as $entry) {
 				if (!is_array($entry)) {
 					continue;
 				}
 				echo '<tr>';
 				echo '<td>' . esc_html($this->summary_value_or_fallback((string) ($entry['timestamp'] ?? ''), true)) . '</td>';
+				echo '<td>' . esc_html(ucwords(str_replace('_', ' ', (string) ($entry['category'] ?? 'general')))) . '</td>';
 				echo '<td><span style="' . esc_attr($this->ssl_log_badge_style((string) ($entry['level'] ?? 'info'))) . '">' . esc_html(strtoupper((string) ($entry['level'] ?? 'info'))) . '</span></td>';
 				echo '<td>' . esc_html((string) ($entry['message'] ?? '')) . '</td>';
+				echo '<td><code>' . esc_html(wp_json_encode((array) ($entry['context'] ?? []))) . '</code></td>';
+				echo '</tr>';
+			}
+			echo '</tbody></table>';
+		}
+		echo '</div>';
+	}
+
+	private function render_ssl_results_table(array $result, string $title): void
+	{
+		echo '<div style="background:#fff;padding:20px;border:1px solid #dcdcde;border-radius:12px;">';
+		echo '<div style="display:flex;justify-content:space-between;gap:12px;align-items:flex-start;flex-wrap:wrap;">';
+		echo '<div>';
+		echo '<h2 style="margin:0 0 6px 0;">' . esc_html($title) . '</h2>';
+		echo '<p style="margin:0;color:#646970;">' . esc_html($this->summary_value_or_fallback((string) ($result['ran_at'] ?? ''), true)) . '</p>';
+		echo '</div>';
+		echo '<p style="margin:0;"><strong>' . esc_html((string) ($result['summary'] ?? __('No results yet.', 'freesiem-sentinel'))) . '</strong></p>';
+		echo '</div>';
+
+		if (empty($result['items'])) {
+			echo '<div style="margin-top:20px;">';
+			$this->render_empty_state(__('No results yet.', 'freesiem-sentinel'), __('Run the relevant SSL validation action to populate results here.', 'freesiem-sentinel'));
+			echo '</div>';
+		} else {
+			echo '<table class="widefat striped" style="margin-top:20px;"><thead><tr><th>' . esc_html__('Check', 'freesiem-sentinel') . '</th><th>' . esc_html__('Status', 'freesiem-sentinel') . '</th><th>' . esc_html__('Details', 'freesiem-sentinel') . '</th></tr></thead><tbody>';
+			foreach ((array) $result['items'] as $item) {
+				if (!is_array($item)) {
+					continue;
+				}
+				echo '<tr>';
+				echo '<td><strong>' . esc_html((string) ($item['label'] ?? '')) . '</strong></td>';
+				echo '<td><span style="' . esc_attr($this->ssl_preflight_badge_style((string) ($item['status'] ?? 'WARN'))) . '">' . esc_html((string) ($item['status'] ?? 'WARN')) . '</span></td>';
+				echo '<td>' . esc_html((string) ($item['message'] ?? '')) . '</td>';
 				echo '</tr>';
 			}
 			echo '</tbody></table>';
@@ -1947,6 +2027,17 @@ class Freesiem_Admin
 			'PASS' => 'display:inline-block;padding:4px 10px;border-radius:999px;background:#dcfce7;color:#166534;font-weight:700;',
 			'FAIL' => 'display:inline-block;padding:4px 10px;border-radius:999px;background:#fee2e2;color:#991b1b;font-weight:700;',
 			default => 'display:inline-block;padding:4px 10px;border-radius:999px;background:#fef3c7;color:#92400e;font-weight:700;',
+		};
+	}
+
+	private function ssl_readiness_badge_style(string $state): string
+	{
+		return match (sanitize_key($state)) {
+			'future_ready' => 'display:inline-block;padding:4px 10px;border-radius:999px;background:#dcfce7;color:#166534;font-weight:700;',
+			'ready_for_dry_run' => 'display:inline-block;padding:4px 10px;border-radius:999px;background:#dbeafe;color:#1d4ed8;font-weight:700;',
+			'blocked' => 'display:inline-block;padding:4px 10px;border-radius:999px;background:#fee2e2;color:#991b1b;font-weight:700;',
+			'partially_configured' => 'display:inline-block;padding:4px 10px;border-radius:999px;background:#fef3c7;color:#92400e;font-weight:700;',
+			default => 'display:inline-block;padding:4px 10px;border-radius:999px;background:#e5e7eb;color:#374151;font-weight:700;',
 		};
 	}
 

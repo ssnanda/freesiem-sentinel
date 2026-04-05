@@ -358,6 +358,26 @@ function freesiem_sentinel_sanitize_ssl_settings(array $settings): array
 	return $settings;
 }
 
+function freesiem_sentinel_get_ssl_dry_run(): array
+{
+	$saved = get_option(FREESIEM_SENTINEL_SSL_DRY_RUN_OPTION, []);
+
+	return freesiem_sentinel_sanitize_ssl_dry_run(is_array($saved) ? $saved : []);
+}
+
+function freesiem_sentinel_update_ssl_dry_run(array $dry_run): array
+{
+	$sanitized = freesiem_sentinel_sanitize_ssl_dry_run($dry_run);
+
+	if (get_option(FREESIEM_SENTINEL_SSL_DRY_RUN_OPTION, null) === null) {
+		add_option(FREESIEM_SENTINEL_SSL_DRY_RUN_OPTION, $sanitized, '', false);
+	} else {
+		update_option(FREESIEM_SENTINEL_SSL_DRY_RUN_OPTION, $sanitized, false);
+	}
+
+	return $sanitized;
+}
+
 function freesiem_sentinel_get_ssl_preflight(): array
 {
 	$saved = get_option(FREESIEM_SENTINEL_SSL_PREFLIGHT_OPTION, []);
@@ -412,6 +432,79 @@ function freesiem_sentinel_sanitize_ssl_preflight(array $preflight): array
 	];
 }
 
+function freesiem_sentinel_sanitize_ssl_dry_run(array $dry_run): array
+{
+	$items = [];
+	$plan = [];
+	$preview = [];
+	$context = [];
+
+	foreach ((array) ($dry_run['items'] ?? []) as $item) {
+		if (!is_array($item)) {
+			continue;
+		}
+
+		$status = strtoupper(sanitize_key((string) ($item['status'] ?? 'WARN')));
+		if (!in_array($status, ['PASS', 'WARN', 'FAIL'], true)) {
+			$status = 'WARN';
+		}
+
+		$items[] = [
+			'key' => sanitize_key((string) ($item['key'] ?? '')),
+			'label' => sanitize_text_field((string) ($item['label'] ?? '')),
+			'status' => $status,
+			'message' => sanitize_text_field((string) ($item['message'] ?? '')),
+		];
+	}
+
+	foreach ((array) ($dry_run['plan'] ?? []) as $step) {
+		$step = sanitize_text_field((string) $step);
+		if ($step !== '') {
+			$plan[] = $step;
+		}
+	}
+
+	foreach ((array) ($dry_run['preview'] ?? []) as $key => $value) {
+		$key = sanitize_key((string) $key);
+		$value = sanitize_text_field((string) $value);
+
+		if ($key !== '' && $value !== '') {
+			$preview[$key] = $value;
+		}
+	}
+
+	foreach ((array) ($dry_run['context'] ?? []) as $key => $value) {
+		$key = sanitize_key((string) $key);
+		if ($key === '') {
+			continue;
+		}
+
+		if (is_array($value)) {
+			$context[$key] = array_values(array_map(static fn($item): string => sanitize_text_field((string) $item), $value));
+			continue;
+		}
+
+		$context[$key] = sanitize_text_field((string) $value);
+	}
+
+	return [
+		'ran_at' => freesiem_sentinel_sanitize_datetime((string) ($dry_run['ran_at'] ?? '')),
+		'summary' => sanitize_text_field((string) ($dry_run['summary'] ?? '')),
+		'readiness_state' => sanitize_key((string) ($dry_run['readiness_state'] ?? 'not_configured')),
+		'readiness_label' => sanitize_text_field((string) ($dry_run['readiness_label'] ?? '')),
+		'preview_mode' => sanitize_text_field((string) ($dry_run['preview_mode'] ?? 'simulated / not executed')),
+		'counts' => [
+			'pass' => max(0, (int) (($dry_run['counts']['pass'] ?? 0))),
+			'warn' => max(0, (int) (($dry_run['counts']['warn'] ?? 0))),
+			'fail' => max(0, (int) (($dry_run['counts']['fail'] ?? 0))),
+		],
+		'items' => $items,
+		'plan' => $plan,
+		'preview' => $preview,
+		'context' => $context,
+	];
+}
+
 function freesiem_sentinel_get_ssl_logs(): array
 {
 	$saved = get_option(FREESIEM_SENTINEL_SSL_LOGS_OPTION, []);
@@ -429,21 +522,25 @@ function freesiem_sentinel_get_ssl_logs(): array
 
 		$logs[] = [
 			'timestamp' => freesiem_sentinel_sanitize_datetime((string) ($entry['timestamp'] ?? '')),
+			'category' => sanitize_key((string) ($entry['category'] ?? 'general')),
 			'level' => sanitize_key((string) ($entry['level'] ?? 'info')),
 			'message' => sanitize_text_field((string) ($entry['message'] ?? '')),
+			'context' => freesiem_sentinel_sanitize_ssl_log_context((array) ($entry['context'] ?? [])),
 		];
 	}
 
 	return $logs;
 }
 
-function freesiem_sentinel_add_ssl_log(string $level, string $message): void
+function freesiem_sentinel_add_ssl_log(string $level, string $message, string $category = 'general', array $context = []): void
 {
 	$logs = freesiem_sentinel_get_ssl_logs();
 	$logs[] = [
 		'timestamp' => freesiem_sentinel_get_iso8601_time(),
+		'category' => sanitize_key($category),
 		'level' => sanitize_key($level),
 		'message' => sanitize_text_field($message),
+		'context' => freesiem_sentinel_sanitize_ssl_log_context($context),
 	];
 
 	if (count($logs) > 50) {
@@ -457,50 +554,62 @@ function freesiem_sentinel_add_ssl_log(string $level, string $message): void
 	}
 }
 
+function freesiem_sentinel_sanitize_ssl_log_context(array $context): array
+{
+	$sanitized = [];
+
+	foreach ($context as $key => $value) {
+		$key = sanitize_key((string) $key);
+
+		if ($key === '') {
+			continue;
+		}
+
+		if (is_array($value)) {
+			$sanitized[$key] = array_values(array_map(static fn($item): string => sanitize_text_field((string) $item), $value));
+			continue;
+		}
+
+		$sanitized[$key] = sanitize_text_field((string) $value);
+	}
+
+	return $sanitized;
+}
+
 function freesiem_sentinel_run_ssl_preflight(?array $ssl_settings = null): array
 {
 	$ssl_settings = is_array($ssl_settings) ? $ssl_settings : freesiem_sentinel_get_ssl_settings();
-	$site_url = site_url('/');
-	$home_url = home_url('/');
-	$site_host = strtolower((string) wp_parse_url($site_url, PHP_URL_HOST));
-	$home_host = strtolower((string) wp_parse_url($home_url, PHP_URL_HOST));
-	$configured_host = $ssl_settings['hostname_override'] !== '' ? $ssl_settings['hostname_override'] : $home_host;
-	$is_local_host = freesiem_sentinel_is_local_host($configured_host);
-	$is_ip = $configured_host !== '' && (bool) filter_var($configured_host, FILTER_VALIDATE_IP);
-	$dns_result = freesiem_sentinel_lookup_host($configured_host);
-	$option_probe = freesiem_sentinel_can_store_ssl_probe_option();
-	$wp_content_dir = defined('WP_CONTENT_DIR') ? WP_CONTENT_DIR : ABSPATH . 'wp-content';
-	$challenge_ready = freesiem_sentinel_ssl_challenge_ready($ssl_settings, $configured_host);
-	$execution_support = function_exists('shell_exec') || function_exists('exec') || function_exists('proc_open') || function_exists('passthru') || function_exists('system');
+	$environment = freesiem_sentinel_get_ssl_environment_snapshot($ssl_settings);
+	$challenge_ready = freesiem_sentinel_ssl_challenge_ready($ssl_settings, $environment);
 	$items = [
 		freesiem_sentinel_make_ssl_preflight_item(
 			'urls_present',
 			__('Site and home URLs exist', 'freesiem-sentinel'),
-			$site_url !== '' && $home_url !== '',
+			$environment['site_url'] !== '' && $environment['home_url'] !== '',
 			__('WordPress returned both `site_url()` and `home_url()` values.', 'freesiem-sentinel'),
 			__('WordPress is missing one or both configured site URLs.', 'freesiem-sentinel')
 		),
 		freesiem_sentinel_make_ssl_preflight_item(
 			'host_parse',
 			__('Host can be parsed', 'freesiem-sentinel'),
-			$configured_host !== '',
-			sprintf(__('Using host `%s` for SSL preflight.', 'freesiem-sentinel'), $configured_host),
+			$environment['configured_host'] !== '',
+			sprintf(__('Using host `%s` for SSL preflight.', 'freesiem-sentinel'), $environment['configured_host']),
 			__('No valid host could be parsed from the configured URLs or override.', 'freesiem-sentinel')
 		),
 		freesiem_sentinel_make_ssl_preflight_item(
 			'public_host',
 			__('Host looks public', 'freesiem-sentinel'),
-			$configured_host !== '' && !$is_local_host && !$is_ip,
-			sprintf(__('Host `%s` looks like a public DNS name.', 'freesiem-sentinel'), $configured_host),
+			$environment['configured_host'] !== '' && !$environment['is_local_host'] && !$environment['is_ip'],
+			sprintf(__('Host `%s` looks like a public DNS name.', 'freesiem-sentinel'), $environment['configured_host']),
 			!empty($ssl_settings['allow_local_override'])
 				? __('A local or IP-based host is configured, but the explicit override is enabled for future testing.', 'freesiem-sentinel')
 				: __('The detected host is localhost, private-only, or a raw IP address. Use a public hostname or enable the explicit override if you are intentionally testing.', 'freesiem-sentinel'),
-			!empty($ssl_settings['allow_local_override']) && ($is_local_host || $is_ip) ? 'WARN' : 'FAIL'
+			!empty($ssl_settings['allow_local_override']) && ($environment['is_local_host'] || $environment['is_ip']) ? 'WARN' : 'FAIL'
 		),
 		freesiem_sentinel_make_ssl_preflight_item(
 			'https_enabled',
 			__('HTTPS currently enabled', 'freesiem-sentinel'),
-			strtolower((string) wp_parse_url($home_url, PHP_URL_SCHEME)) === 'https' || strtolower((string) wp_parse_url($site_url, PHP_URL_SCHEME)) === 'https',
+			$environment['is_https_configured'],
 			__('WordPress is already configured with HTTPS on the site or home URL.', 'freesiem-sentinel'),
 			__('WordPress is still configured with HTTP URLs, which is fine for this status-only phase.', 'freesiem-sentinel'),
 			'WARN'
@@ -508,14 +617,14 @@ function freesiem_sentinel_run_ssl_preflight(?array $ssl_settings = null): array
 		freesiem_sentinel_make_ssl_preflight_item(
 			'execution_functions',
 			__('Future execution functions availability', 'freesiem-sentinel'),
-			$execution_support,
+			$environment['execution_support'],
 			sprintf(
 				__('shell_exec:%1$s, exec:%2$s, proc_open:%3$s, passthru:%4$s, system:%5$s', 'freesiem-sentinel'),
-				freesiem_sentinel_bool_label(function_exists('shell_exec')),
-				freesiem_sentinel_bool_label(function_exists('exec')),
-				freesiem_sentinel_bool_label(function_exists('proc_open')),
-				freesiem_sentinel_bool_label(function_exists('passthru')),
-				freesiem_sentinel_bool_label(function_exists('system'))
+				freesiem_sentinel_bool_label($environment['shell_functions']['shell_exec']),
+				freesiem_sentinel_bool_label($environment['shell_functions']['exec']),
+				freesiem_sentinel_bool_label($environment['shell_functions']['proc_open']),
+				freesiem_sentinel_bool_label($environment['shell_functions']['passthru']),
+				freesiem_sentinel_bool_label($environment['shell_functions']['system'])
 			),
 			'',
 			'WARN'
@@ -523,22 +632,22 @@ function freesiem_sentinel_run_ssl_preflight(?array $ssl_settings = null): array
 		freesiem_sentinel_make_ssl_preflight_item(
 			'writable_paths',
 			__('ABSPATH and wp-content writability', 'freesiem-sentinel'),
-			freesiem_sentinel_path_is_writable(ABSPATH) && freesiem_sentinel_path_is_writable($wp_content_dir),
-			sprintf(__('ABSPATH and `%s` appear writable for future storage needs.', 'freesiem-sentinel'), $wp_content_dir),
-			sprintf(__('One or more expected paths are not writable. ABSPATH: %1$s, wp-content: %2$s.', 'freesiem-sentinel'), freesiem_sentinel_bool_label(freesiem_sentinel_path_is_writable(ABSPATH)), freesiem_sentinel_bool_label(freesiem_sentinel_path_is_writable($wp_content_dir))),
+			$environment['abspath_writable'] && $environment['wp_content_writable'],
+			sprintf(__('ABSPATH and `%s` appear writable for future storage needs.', 'freesiem-sentinel'), $environment['wp_content_dir']),
+			sprintf(__('One or more expected paths are not writable. ABSPATH: %1$s, wp-content: %2$s.', 'freesiem-sentinel'), freesiem_sentinel_bool_label($environment['abspath_writable']), freesiem_sentinel_bool_label($environment['wp_content_writable'])),
 			'WARN'
 		),
 		freesiem_sentinel_make_ssl_preflight_item(
 			'option_storage',
 			__('Plugin can store settings/options', 'freesiem-sentinel'),
-			$option_probe,
+			$environment['option_probe'],
 			__('A temporary SSL probe option was written and removed successfully.', 'freesiem-sentinel'),
 			__('WordPress option storage could not be confirmed by the temporary probe.', 'freesiem-sentinel')
 		),
 		freesiem_sentinel_make_ssl_preflight_item(
 			'wp_cron',
 			__('WP-Cron available', 'freesiem-sentinel'),
-			!defined('DISABLE_WP_CRON') || !DISABLE_WP_CRON,
+			$environment['wp_cron_enabled'],
 			__('WP-Cron appears enabled for future background work.', 'freesiem-sentinel'),
 			__('WP-Cron appears disabled. Future renewals would need another scheduler.', 'freesiem-sentinel'),
 			'WARN'
@@ -546,7 +655,7 @@ function freesiem_sentinel_run_ssl_preflight(?array $ssl_settings = null): array
 		freesiem_sentinel_make_ssl_preflight_item(
 			'http_support',
 			__('Loopback / HTTP request support exists', 'freesiem-sentinel'),
-			function_exists('wp_remote_get') && function_exists('wp_http_supports') && (wp_http_supports(['ssl' => false]) || wp_http_supports(['ssl' => true])),
+			$environment['http_support'],
 			__('WordPress HTTP transport support is available.', 'freesiem-sentinel'),
 			__('WordPress HTTP transports do not appear available for loopback-style checks.', 'freesiem-sentinel'),
 			'WARN'
@@ -554,10 +663,10 @@ function freesiem_sentinel_run_ssl_preflight(?array $ssl_settings = null): array
 		freesiem_sentinel_make_ssl_preflight_item(
 			'dns_lookup',
 			__('DNS lookup succeeds', 'freesiem-sentinel'),
-			$dns_result['ok'],
-			$dns_result['message'],
-			$dns_result['message'],
-			$is_local_host || $configured_host === '' ? 'WARN' : 'FAIL'
+			$environment['dns_result']['ok'],
+			$environment['dns_result']['message'],
+			$environment['dns_result']['message'],
+			$environment['is_local_host'] || $environment['configured_host'] === '' ? 'WARN' : 'FAIL'
 		),
 		freesiem_sentinel_make_ssl_preflight_item(
 			'port_intent',
@@ -593,15 +702,7 @@ function freesiem_sentinel_run_ssl_preflight(?array $ssl_settings = null): array
 		),
 	];
 
-	$counts = ['pass' => 0, 'warn' => 0, 'fail' => 0];
-
-	foreach ($items as $item) {
-		$key = strtolower((string) ($item['status'] ?? 'warn'));
-		if (isset($counts[$key])) {
-			$counts[$key]++;
-		}
-	}
-
+	$counts = freesiem_sentinel_count_ssl_status_items($items);
 	$summary = sprintf(
 		__('Preflight completed: %1$d pass, %2$d warn, %3$d fail.', 'freesiem-sentinel'),
 		$counts['pass'],
@@ -614,6 +715,76 @@ function freesiem_sentinel_run_ssl_preflight(?array $ssl_settings = null): array
 		'summary' => $summary,
 		'counts' => $counts,
 		'items' => $items,
+	]);
+}
+
+function freesiem_sentinel_run_ssl_dry_run(?array $ssl_settings = null): array
+{
+	$ssl_settings = is_array($ssl_settings) ? $ssl_settings : freesiem_sentinel_get_ssl_settings();
+	$preflight = freesiem_sentinel_run_ssl_preflight($ssl_settings);
+	$environment = freesiem_sentinel_get_ssl_environment_snapshot($ssl_settings);
+	$readiness = freesiem_sentinel_calculate_ssl_readiness($ssl_settings, $environment, $preflight);
+	$preview = freesiem_sentinel_get_ssl_command_preview($ssl_settings, $environment);
+	$method_items = freesiem_sentinel_get_ssl_method_validation_items($ssl_settings, $environment);
+	$dry_run_items = array_merge(
+		[
+			freesiem_sentinel_make_ssl_preflight_item(
+				'readiness_state',
+				__('Execution readiness state calculated', 'freesiem-sentinel'),
+				in_array($readiness['state'], ['ready_for_dry_run', 'future_ready'], true),
+				sprintf(__('Readiness is `%s`.', 'freesiem-sentinel'), $readiness['label']),
+				sprintf(__('Readiness is `%s`.', 'freesiem-sentinel'), $readiness['label']),
+				$readiness['state'] === 'blocked' ? 'FAIL' : 'WARN'
+			),
+			freesiem_sentinel_make_ssl_preflight_item(
+				'preflight_recheck',
+				__('Preflight re-ran successfully', 'freesiem-sentinel'),
+				!empty($preflight['ran_at']),
+				$preflight['summary'],
+				__('Preflight could not be re-run for dry-run validation.', 'freesiem-sentinel')
+			),
+			freesiem_sentinel_make_ssl_preflight_item(
+				'preview_generated',
+				__('Simulated command preview generated', 'freesiem-sentinel'),
+				!empty($preview['command']),
+				__('A simulated certbot command preview was generated and not executed.', 'freesiem-sentinel'),
+				__('A simulated command preview could not be built from the current settings.', 'freesiem-sentinel'),
+				'WARN'
+			),
+		],
+		$method_items
+	);
+	$counts = freesiem_sentinel_count_ssl_status_items($dry_run_items);
+	$would_attempt = $counts['fail'] === 0 && in_array($readiness['state'], ['ready_for_dry_run', 'future_ready'], true);
+	$summary = sprintf(
+		__('Dry run completed: %1$d pass, %2$d warn, %3$d fail. Would be ready to attempt issuance: %4$s.', 'freesiem-sentinel'),
+		$counts['pass'],
+		$counts['warn'],
+		$counts['fail'],
+		$would_attempt ? __('PASS', 'freesiem-sentinel') : ($counts['fail'] > 0 ? __('FAIL', 'freesiem-sentinel') : __('WARN', 'freesiem-sentinel'))
+	);
+
+	return freesiem_sentinel_update_ssl_dry_run([
+		'ran_at' => freesiem_sentinel_get_iso8601_time(),
+		'summary' => $summary,
+		'readiness_state' => $readiness['state'],
+		'readiness_label' => $readiness['label'],
+		'preview_mode' => __('simulated / not executed', 'freesiem-sentinel'),
+		'counts' => $counts,
+		'items' => $dry_run_items,
+		'plan' => [
+			__('Validate stored SSL settings and recompute readiness.', 'freesiem-sentinel'),
+			__('Re-run safe preflight checks for the selected challenge method.', 'freesiem-sentinel'),
+			__('Generate a simulated certbot command preview only.', 'freesiem-sentinel'),
+			__('Record the dry-run summary without issuing a certificate.', 'freesiem-sentinel'),
+		],
+		'preview' => $preview,
+		'context' => [
+			'configured_host' => $environment['configured_host'],
+			'challenge_method' => (string) ($ssl_settings['challenge_method'] ?? 'webroot-http-01'),
+			'would_attempt_status' => $would_attempt ? 'pass' : ($counts['fail'] > 0 ? 'fail' : 'warn'),
+			'https_state' => $environment['is_https_configured'] ? 'https' : 'http',
+		],
 	]);
 }
 
@@ -631,6 +802,240 @@ function freesiem_sentinel_make_ssl_preflight_item(
 		'status' => $condition ? 'PASS' : strtoupper($non_pass_status),
 		'message' => $condition ? $pass_message : $non_pass_message,
 	];
+}
+
+function freesiem_sentinel_get_ssl_environment_snapshot(?array $ssl_settings = null): array
+{
+	$ssl_settings = is_array($ssl_settings) ? $ssl_settings : freesiem_sentinel_get_ssl_settings();
+	$site_url = site_url('/');
+	$home_url = home_url('/');
+	$site_scheme = strtolower((string) wp_parse_url($site_url, PHP_URL_SCHEME));
+	$home_scheme = strtolower((string) wp_parse_url($home_url, PHP_URL_SCHEME));
+	$site_host = strtolower((string) wp_parse_url($site_url, PHP_URL_HOST));
+	$home_host = strtolower((string) wp_parse_url($home_url, PHP_URL_HOST));
+	$configured_host = $ssl_settings['hostname_override'] !== '' ? strtolower((string) $ssl_settings['hostname_override']) : $home_host;
+	$wp_content_dir = defined('WP_CONTENT_DIR') ? WP_CONTENT_DIR : ABSPATH . 'wp-content';
+	$shell_functions = [
+		'shell_exec' => function_exists('shell_exec'),
+		'exec' => function_exists('exec'),
+		'proc_open' => function_exists('proc_open'),
+		'passthru' => function_exists('passthru'),
+		'system' => function_exists('system'),
+	];
+
+	return [
+		'site_url' => $site_url,
+		'home_url' => $home_url,
+		'site_scheme' => $site_scheme,
+		'home_scheme' => $home_scheme,
+		'site_host' => $site_host,
+		'home_host' => $home_host,
+		'configured_host' => $configured_host,
+		'is_local_host' => freesiem_sentinel_is_local_host($configured_host),
+		'is_ip' => $configured_host !== '' && (bool) filter_var($configured_host, FILTER_VALIDATE_IP),
+		'dns_result' => freesiem_sentinel_lookup_host($configured_host),
+		'option_probe' => freesiem_sentinel_can_store_ssl_probe_option(),
+		'wp_content_dir' => $wp_content_dir,
+		'abspath_writable' => freesiem_sentinel_path_is_writable(ABSPATH),
+		'wp_content_writable' => freesiem_sentinel_path_is_writable($wp_content_dir),
+		'wp_cron_enabled' => !defined('DISABLE_WP_CRON') || !DISABLE_WP_CRON,
+		'http_support' => function_exists('wp_remote_get') && function_exists('wp_http_supports') && (wp_http_supports(['ssl' => false]) || wp_http_supports(['ssl' => true])),
+		'shell_functions' => $shell_functions,
+		'execution_support' => in_array(true, $shell_functions, true),
+		'is_https_configured' => $site_scheme === 'https' || $home_scheme === 'https',
+		'is_admin_request_https' => is_ssl(),
+		'host_alignment' => $configured_host !== '' && ($configured_host === $home_host || $configured_host === $site_host),
+	];
+}
+
+function freesiem_sentinel_calculate_ssl_readiness(?array $ssl_settings = null, ?array $environment = null, ?array $preflight = null): array
+{
+	$ssl_settings = is_array($ssl_settings) ? $ssl_settings : freesiem_sentinel_get_ssl_settings();
+	$environment = is_array($environment) ? $environment : freesiem_sentinel_get_ssl_environment_snapshot($ssl_settings);
+	$preflight = is_array($preflight) ? $preflight : freesiem_sentinel_get_ssl_preflight();
+	$has_email = is_email((string) ($ssl_settings['acme_contact_email'] ?? ''));
+	$has_host = $environment['configured_host'] !== '';
+	$has_method = in_array((string) ($ssl_settings['challenge_method'] ?? ''), ['webroot-http-01', 'standalone-http-01', 'manual-dns-01'], true);
+	$method_ready = freesiem_sentinel_ssl_challenge_ready($ssl_settings, $environment);
+	$required_core = $has_email && $has_host && $has_method;
+	$blocked = (!$required_core && !$has_email && !$has_host)
+		? false
+		: (
+			($environment['is_local_host'] || $environment['is_ip']) && empty($ssl_settings['allow_local_override'])
+			|| (!$environment['dns_result']['ok'] && !$environment['is_local_host'] && $environment['configured_host'] !== '')
+			|| !$environment['option_probe']
+		);
+
+	if (!$has_email && !$has_host) {
+		$state = 'not_configured';
+		$label = __('Not configured', 'freesiem-sentinel');
+	} elseif ($blocked) {
+		$state = 'blocked';
+		$label = __('Blocked', 'freesiem-sentinel');
+	} elseif (!$required_core || !$method_ready['ok']) {
+		$state = 'partially_configured';
+		$label = __('Partially configured', 'freesiem-sentinel');
+	} elseif ((int) ($preflight['counts']['fail'] ?? 0) > 0 || (int) ($preflight['counts']['warn'] ?? 0) > 0) {
+		$state = 'ready_for_dry_run';
+		$label = __('Ready for dry run', 'freesiem-sentinel');
+	} else {
+		$state = 'future_ready';
+		$label = __('Future ready', 'freesiem-sentinel');
+	}
+
+	return [
+		'state' => $state,
+		'label' => $label,
+		'description' => match ($state) {
+			'not_configured' => __('Add the hostname, contact email, and challenge details before SSL execution planning can proceed.', 'freesiem-sentinel'),
+			'partially_configured' => __('The SSL setup has some required values, but it still needs more challenge-specific configuration.', 'freesiem-sentinel'),
+			'ready_for_dry_run' => __('The SSL setup is complete enough for safe simulation, but environment warnings should still be reviewed.', 'freesiem-sentinel'),
+			'blocked' => __('A blocking condition exists, such as a local-only host, unresolved DNS, or missing storage capability.', 'freesiem-sentinel'),
+			default => __('The configuration is fully modeled for a future execution phase, but issuance remains disabled in this version.', 'freesiem-sentinel'),
+		},
+	];
+}
+
+function freesiem_sentinel_get_ssl_command_preview(?array $ssl_settings = null, ?array $environment = null): array
+{
+	$ssl_settings = is_array($ssl_settings) ? $ssl_settings : freesiem_sentinel_get_ssl_settings();
+	$environment = is_array($environment) ? $environment : freesiem_sentinel_get_ssl_environment_snapshot($ssl_settings);
+	$method = (string) ($ssl_settings['challenge_method'] ?? 'webroot-http-01');
+	$host = $environment['configured_host'] !== '' ? $environment['configured_host'] : 'example.com';
+	$email = is_email((string) ($ssl_settings['acme_contact_email'] ?? '')) ? (string) $ssl_settings['acme_contact_email'] : 'admin@example.com';
+	$staging_flag = !empty($ssl_settings['use_staging']) ? ' --staging' : '';
+	$base = 'certbot certonly --agree-tos --non-interactive --email ' . escapeshellarg($email) . ' -d ' . escapeshellarg($host);
+
+	$command = match ($method) {
+		'standalone-http-01' => $base . ' --standalone --preferred-challenges http' . $staging_flag,
+		'manual-dns-01' => $base . ' --manual --preferred-challenges dns --manual-public-ip-logging-ok' . $staging_flag,
+		default => $base . ' --webroot -w ' . escapeshellarg((string) ($ssl_settings['webroot_path'] !== '' ? $ssl_settings['webroot_path'] : ABSPATH)) . ' --preferred-challenges http' . $staging_flag,
+	};
+
+	return [
+		'command' => $command,
+		'label' => __('Simulated command preview only. Not executed.', 'freesiem-sentinel'),
+		'method' => $method,
+	];
+}
+
+function freesiem_sentinel_get_ssl_method_validation_items(?array $ssl_settings = null, ?array $environment = null): array
+{
+	$ssl_settings = is_array($ssl_settings) ? $ssl_settings : freesiem_sentinel_get_ssl_settings();
+	$environment = is_array($environment) ? $environment : freesiem_sentinel_get_ssl_environment_snapshot($ssl_settings);
+	$method = (string) ($ssl_settings['challenge_method'] ?? 'webroot-http-01');
+	$items = [
+		freesiem_sentinel_make_ssl_preflight_item(
+			'method_domain',
+			__('Domain / host present', 'freesiem-sentinel'),
+			$environment['configured_host'] !== '',
+			sprintf(__('Host `%s` is available for the selected challenge method.', 'freesiem-sentinel'), $environment['configured_host']),
+			__('Add a hostname before attempting challenge-specific planning.', 'freesiem-sentinel'),
+			'FAIL'
+		),
+		freesiem_sentinel_make_ssl_preflight_item(
+			'method_email',
+			__('Contact email present', 'freesiem-sentinel'),
+			is_email((string) ($ssl_settings['acme_contact_email'] ?? '')),
+			__('The ACME contact email is present.', 'freesiem-sentinel'),
+			__('Add a valid contact email before certificate planning.', 'freesiem-sentinel'),
+			'FAIL'
+		),
+	];
+
+	if ($method === 'webroot-http-01') {
+		$webroot = (string) ($ssl_settings['webroot_path'] ?? '');
+		$items[] = freesiem_sentinel_make_ssl_preflight_item(
+			'webroot_path_present',
+			__('Webroot path present', 'freesiem-sentinel'),
+			$webroot !== '',
+			sprintf(__('Webroot path `%s` is configured.', 'freesiem-sentinel'), $webroot),
+			__('Webroot HTTP-01 requires a webroot path.', 'freesiem-sentinel'),
+			'FAIL'
+		);
+		$items[] = freesiem_sentinel_make_ssl_preflight_item(
+			'webroot_exists',
+			__('Webroot path exists', 'freesiem-sentinel'),
+			$webroot !== '' && file_exists($webroot),
+			__('The configured webroot path exists.', 'freesiem-sentinel'),
+			__('The configured webroot path does not exist.', 'freesiem-sentinel'),
+			'FAIL'
+		);
+		$items[] = freesiem_sentinel_make_ssl_preflight_item(
+			'webroot_readable',
+			__('Webroot path readable', 'freesiem-sentinel'),
+			$webroot !== '' && is_readable($webroot),
+			__('The configured webroot path is readable.', 'freesiem-sentinel'),
+			__('The configured webroot path is not readable.', 'freesiem-sentinel'),
+			'WARN'
+		);
+		$items[] = freesiem_sentinel_make_ssl_preflight_item(
+			'webroot_writable',
+			__('Webroot path writable', 'freesiem-sentinel'),
+			$webroot !== '' && freesiem_sentinel_path_is_writable($webroot),
+			__('The configured webroot path is writable for expected challenge files.', 'freesiem-sentinel'),
+			__('The configured webroot path is not writable, so challenge file placement may fail later.', 'freesiem-sentinel'),
+			'WARN'
+		);
+		$items[] = freesiem_sentinel_make_ssl_preflight_item(
+			'host_alignment',
+			__('Current site host alignment', 'freesiem-sentinel'),
+			$environment['host_alignment'],
+			__('The selected hostname matches the current WordPress site host.', 'freesiem-sentinel'),
+			__('The selected hostname does not match the current WordPress site host.', 'freesiem-sentinel'),
+			'WARN'
+		);
+	} elseif ($method === 'standalone-http-01') {
+		$items[] = freesiem_sentinel_make_ssl_preflight_item(
+			'standalone_execution_support',
+			__('Shell execution capability available', 'freesiem-sentinel'),
+			$environment['execution_support'],
+			__('At least one future execution-related PHP function is available.', 'freesiem-sentinel'),
+			__('No future execution-related PHP functions appear available.', 'freesiem-sentinel'),
+			'WARN'
+		);
+		$items[] = freesiem_sentinel_make_ssl_preflight_item(
+			'standalone_port_binding_live',
+			__('Port binding / server conflicts tested live', 'freesiem-sentinel'),
+			false,
+			'',
+			__('Live port-binding conflict checks are intentionally deferred to a later phase.', 'freesiem-sentinel'),
+			'WARN'
+		);
+		$items[] = freesiem_sentinel_make_ssl_preflight_item(
+			'standalone_runtime_deferred',
+			__('Actual standalone runtime check deferred', 'freesiem-sentinel'),
+			false,
+			'',
+			__('Actual standalone runtime validation is deferred to a future phase.', 'freesiem-sentinel'),
+			'WARN'
+		);
+	} else {
+		$items[] = freesiem_sentinel_make_ssl_preflight_item(
+			'manual_dns_note',
+			__('DNS TXT creation remains manual', 'freesiem-sentinel'),
+			false,
+			'',
+			__('Manual DNS-01 requires manual TXT record creation. Automation is not implemented in the current design.', 'freesiem-sentinel'),
+			'WARN'
+		);
+	}
+
+	return $items;
+}
+
+function freesiem_sentinel_count_ssl_status_items(array $items): array
+{
+	$counts = ['pass' => 0, 'warn' => 0, 'fail' => 0];
+
+	foreach ($items as $item) {
+		$key = strtolower((string) ($item['status'] ?? 'warn'));
+		if (isset($counts[$key])) {
+			$counts[$key]++;
+		}
+	}
+
+	return $counts;
 }
 
 function freesiem_sentinel_bool_label(bool $value): string
@@ -733,16 +1138,19 @@ function freesiem_sentinel_can_store_ssl_probe_option(): bool
 	return $stored === $value && $deleted;
 }
 
-function freesiem_sentinel_ssl_challenge_ready(array $settings, string $host): array
+function freesiem_sentinel_ssl_challenge_ready(array $settings, array|string $environment_or_host): array
 {
 	$method = (string) ($settings['challenge_method'] ?? 'webroot-http-01');
+	$environment = is_array($environment_or_host) ? $environment_or_host : ['configured_host' => (string) $environment_or_host];
+	$host = (string) ($environment['configured_host'] ?? '');
+	$webroot = (string) ($settings['webroot_path'] ?? '');
 
 	return match ($method) {
-		'webroot-http-01' => $settings['webroot_path'] !== ''
-			? ['ok' => true, 'message' => __('Webroot HTTP-01 has a webroot path configured.', 'freesiem-sentinel')]
-			: ['ok' => false, 'message' => __('Webroot HTTP-01 needs a webroot path before it can be used in a later phase.', 'freesiem-sentinel')],
+		'webroot-http-01' => $webroot !== '' && file_exists($webroot) && is_readable($webroot)
+			? ['ok' => true, 'message' => __('Webroot HTTP-01 has the minimum path requirements configured.', 'freesiem-sentinel')]
+			: ['ok' => false, 'message' => __('Webroot HTTP-01 needs a readable existing webroot path before it can be used in a later phase.', 'freesiem-sentinel')],
 		'standalone-http-01' => !empty($settings['check_port_80'])
-			? ['ok' => true, 'message' => __('Standalone HTTP-01 has port 80 intent configured.', 'freesiem-sentinel')]
+			? ['ok' => true, 'message' => __('Standalone HTTP-01 has port 80 intent configured. Live port testing remains deferred.', 'freesiem-sentinel')]
 			: ['ok' => false, 'message' => __('Standalone HTTP-01 should have port 80 intent enabled.', 'freesiem-sentinel')],
 		'manual-dns-01' => $host !== ''
 			? ['ok' => true, 'message' => __('Manual DNS-01 has a hostname available for future TXT record instructions.', 'freesiem-sentinel')]
