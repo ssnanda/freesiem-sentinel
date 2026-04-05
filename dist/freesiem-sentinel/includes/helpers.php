@@ -319,6 +319,38 @@ function freesiem_sentinel_get_ssl_settings(): array
 	return wp_parse_args($saved, freesiem_sentinel_get_default_ssl_settings());
 }
 
+function freesiem_sentinel_recommend_ssl_webroot_path(?array $ssl_settings = null, ?array $environment = null, ?array $ssl_state = null): string
+{
+	$ssl_settings = is_array($ssl_settings) ? $ssl_settings : freesiem_sentinel_get_ssl_settings();
+	$environment = is_array($environment) ? $environment : freesiem_sentinel_get_ssl_environment_snapshot($ssl_settings);
+	$ssl_state = is_array($ssl_state) ? $ssl_state : freesiem_sentinel_get_ssl_state();
+	$configured = trim((string) ($ssl_settings['webroot_path'] ?? ''));
+
+	if ($configured !== '') {
+		return $configured;
+	}
+
+	$detection = freesiem_sentinel_detect_active_nginx_config($ssl_settings, $environment, $ssl_state, false);
+	$block_root = trim((string) (($detection['block']['root'] ?? '') ?: ''));
+	if ($block_root !== '') {
+		return $block_root;
+	}
+
+	$file_path = trim((string) ($detection['file_path'] ?? ''));
+	if ($file_path !== '' && is_readable($file_path)) {
+		$file_root = freesiem_sentinel_extract_nginx_root_from_content((string) file_get_contents($file_path));
+		if ($file_root !== '') {
+			return $file_root;
+		}
+	}
+
+	if (defined('ABSPATH') && trim((string) ABSPATH) !== '') {
+		return untrailingslashit((string) ABSPATH);
+	}
+
+	return defined('ABSPATH') ? dirname(untrailingslashit((string) ABSPATH)) : '';
+}
+
 function freesiem_sentinel_update_ssl_settings(array $updates): array
 {
 	$current = freesiem_sentinel_get_ssl_settings();
@@ -1055,7 +1087,7 @@ function freesiem_sentinel_calculate_ssl_readiness(?array $ssl_settings = null, 
 	}
 
 	if ((string) ($ssl_settings['challenge_method'] ?? '') === 'webroot-http-01') {
-		$webroot = (string) ($ssl_settings['webroot_path'] ?? '');
+		$webroot = freesiem_sentinel_recommend_ssl_webroot_path($ssl_settings, $environment);
 
 		if ($webroot === '' || !file_exists($webroot) || !is_readable($webroot)) {
 			$blocker_codes[] = 'invalid_webroot';
@@ -1145,6 +1177,7 @@ function freesiem_sentinel_get_ssl_command_preview(?array $ssl_settings = null, 
 	$method = (string) ($ssl_settings['challenge_method'] ?? 'webroot-http-01');
 	$host = $environment['configured_host'] !== '' ? $environment['configured_host'] : 'example.com';
 	$email = is_email((string) ($ssl_settings['acme_contact_email'] ?? '')) ? (string) $ssl_settings['acme_contact_email'] : 'admin@example.com';
+	$webroot = freesiem_sentinel_recommend_ssl_webroot_path($ssl_settings, $environment);
 	$staging_flag = !empty($ssl_settings['use_staging']) ? ' --staging' : '';
 	$user_space = freesiem_sentinel_get_ssl_user_space_paths($ssl_settings);
 	$dir_flags = ' --config-dir ' . escapeshellarg((string) $user_space['config_dir']) . ' --work-dir ' . escapeshellarg((string) $user_space['work_dir']) . ' --logs-dir ' . escapeshellarg((string) $user_space['logs_dir']);
@@ -1153,7 +1186,7 @@ function freesiem_sentinel_get_ssl_command_preview(?array $ssl_settings = null, 
 	$command = match ($method) {
 		'standalone-http-01' => $base . ' --standalone --preferred-challenges http' . $staging_flag,
 		'manual-dns-01' => $base . ' --manual --preferred-challenges dns --manual-public-ip-logging-ok' . $staging_flag,
-		default => $base . ' --webroot -w ' . escapeshellarg((string) ($ssl_settings['webroot_path'] !== '' ? $ssl_settings['webroot_path'] : ABSPATH)) . ' --preferred-challenges http' . $staging_flag,
+		default => $base . ' --webroot -w ' . escapeshellarg($webroot) . ' --preferred-challenges http' . $staging_flag,
 	};
 
 	return [
@@ -1309,7 +1342,7 @@ function freesiem_sentinel_get_ssl_method_validation_items(?array $ssl_settings 
 	];
 
 	if ($method === 'webroot-http-01') {
-		$webroot = (string) ($ssl_settings['webroot_path'] ?? '');
+		$webroot = freesiem_sentinel_recommend_ssl_webroot_path($ssl_settings, $environment);
 		$items[] = freesiem_sentinel_make_ssl_preflight_item(
 			'webroot_path_present',
 			__('Webroot path present', 'freesiem-sentinel'),
@@ -1965,8 +1998,8 @@ function freesiem_sentinel_build_live_ssl_command(string $action, array $ssl_set
 		],
 		default => [
 			'executable' => true,
-			'command' => $base . ' --webroot -w ' . escapeshellarg((string) ($ssl_settings['webroot_path'] ?? '')) . ' --preferred-challenges http',
-			'preview' => $preview_base . ' --webroot -w ' . escapeshellarg((string) ($ssl_settings['webroot_path'] ?? '')) . ' --preferred-challenges http',
+			'command' => $base . ' --webroot -w ' . escapeshellarg(freesiem_sentinel_recommend_ssl_webroot_path($ssl_settings, $environment)) . ' --preferred-challenges http',
+			'preview' => $preview_base . ' --webroot -w ' . escapeshellarg(freesiem_sentinel_recommend_ssl_webroot_path($ssl_settings, $environment)) . ' --preferred-challenges http',
 			'summary' => '',
 			'user_space' => $user_space,
 			'action_type' => $action,
@@ -2072,6 +2105,7 @@ function freesiem_sentinel_parse_nginx_runtime_config(string $output): array
 	$brace_depth = 0;
 	$server_lines = [];
 	$server_names = [];
+	$server_root = '';
 
 	foreach ($lines as $line) {
 		if (preg_match('/^# configuration file (.+?):\s*$/', trim($line), $matches)) {
@@ -2083,6 +2117,7 @@ function freesiem_sentinel_parse_nginx_runtime_config(string $output): array
 			$server_depth = $brace_depth;
 			$server_lines = [$line];
 			$server_names = [];
+			$server_root = '';
 		} elseif ($in_server) {
 			$server_lines[] = $line;
 		}
@@ -2096,6 +2131,10 @@ function freesiem_sentinel_parse_nginx_runtime_config(string $output): array
 			}
 		}
 
+		if ($in_server && $server_root === '' && preg_match('/^\s*root\s+(.+?);/', trim($line), $matches)) {
+			$server_root = trim((string) $matches[1], " \t\n\r\0\x0B'\"");
+		}
+
 		$open_count = substr_count($line, '{');
 		$close_count = substr_count($line, '}');
 		$brace_depth += $open_count - $close_count;
@@ -2104,15 +2143,26 @@ function freesiem_sentinel_parse_nginx_runtime_config(string $output): array
 			$blocks[] = [
 				'file_path' => $current_file,
 				'server_names' => array_values(array_unique($server_names)),
+				'root' => $server_root,
 				'content' => implode("\n", $server_lines),
 			];
 			$in_server = false;
 			$server_lines = [];
 			$server_names = [];
+			$server_root = '';
 		}
 	}
 
 	return $blocks;
+}
+
+function freesiem_sentinel_extract_nginx_root_from_content(string $content): string
+{
+	if (preg_match('/^\s*root\s+(.+?);/mi', $content, $matches)) {
+		return trim((string) $matches[1], " \t\n\r\0\x0B'\"");
+	}
+
+	return '';
 }
 
 function freesiem_sentinel_select_nginx_server_block(array $blocks, string $host): array
@@ -2337,6 +2387,21 @@ function freesiem_sentinel_get_nginx_preview_config(array $integration, bool $en
 	return implode("\n", $lines);
 }
 
+function freesiem_sentinel_get_nginx_redirect_block(string $host): string
+{
+	$lines = [
+		'# BEGIN freeSIEM Sentinel Nginx HTTPS Redirect',
+		'server {',
+		'    listen 80;',
+		'    server_name ' . $host . ';',
+		'    return 301 https://$host$request_uri;',
+		'}',
+		'# END freeSIEM Sentinel Nginx HTTPS Redirect',
+	];
+
+	return implode("\n", $lines);
+}
+
 function freesiem_sentinel_detect_nginx_integration(?array $ssl_settings = null, ?array $environment = null, ?array $ssl_state = null): array
 {
 	$ssl_settings = is_array($ssl_settings) ? $ssl_settings : freesiem_sentinel_get_ssl_settings();
@@ -2361,6 +2426,7 @@ function freesiem_sentinel_detect_nginx_integration(?array $ssl_settings = null,
 	$matched_server_name = (string) ($detection['matched_server_name'] ?? '');
 	$detection_result = (string) ($detection['result'] ?? '');
 	$detection_checks = (array) ($detection['checks'] ?? []);
+	$detected_webroot = trim((string) (($detection['block']['root'] ?? '') ?: ''));
 
 	if ($target_path !== '' && file_exists($target_path)) {
 		$target_exists = true;
@@ -2408,6 +2474,18 @@ function freesiem_sentinel_detect_nginx_integration(?array $ssl_settings = null,
 			$reason = __('An existing nginx site config was detected, so Sentinel is staying in preview/manual mode for safety.', 'freesiem-sentinel');
 		}
 		break;
+	}
+
+	if ($detected_webroot === '' && $target_path !== '' && is_readable($target_path)) {
+		$detected_webroot = freesiem_sentinel_extract_nginx_root_from_content((string) file_get_contents($target_path));
+	}
+
+	$effective_webroot = trim((string) ($ssl_settings['webroot_path'] ?? ''));
+	if ($effective_webroot === '') {
+		$effective_webroot = $detected_webroot !== '' ? $detected_webroot : (defined('ABSPATH') ? untrailingslashit((string) ABSPATH) : '');
+	}
+	if ($effective_webroot === '' && defined('ABSPATH')) {
+		$effective_webroot = dirname(untrailingslashit((string) ABSPATH));
 	}
 
 	if ($target_path === '') {
@@ -2467,7 +2545,8 @@ function freesiem_sentinel_detect_nginx_integration(?array $ssl_settings = null,
 
 	return [
 		'host' => $host,
-		'webroot' => (string) (($ssl_settings['webroot_path'] ?? '') !== '' ? $ssl_settings['webroot_path'] : ABSPATH),
+		'webroot' => $effective_webroot,
+		'detected_webroot' => $detected_webroot,
 		'fullchain_path' => $fullchain_path,
 		'privkey_path' => $privkey_path,
 		'fullchain_exists' => $fullchain_exists,
@@ -2667,8 +2746,13 @@ function freesiem_sentinel_get_ssl_endpoint_status(?array $environment = null): 
 	$environment = is_array($environment) ? $environment : freesiem_sentinel_get_ssl_environment_snapshot();
 	$host = trim((string) ($environment['configured_host'] ?? ''));
 	$result = [
-		'http' => __('Unavailable', 'freesiem-sentinel'),
 		'https' => __('Unavailable', 'freesiem-sentinel'),
+		'https_ok' => false,
+		'https_code' => null,
+		'redirect' => __('Unavailable', 'freesiem-sentinel'),
+		'redirect_enabled' => false,
+		'http_code' => null,
+		'http_location' => '',
 	];
 
 	if ($host === '' || !function_exists('wp_remote_get')) {
@@ -2677,16 +2761,30 @@ function freesiem_sentinel_get_ssl_endpoint_status(?array $environment = null): 
 
 	$http = wp_remote_get('http://' . $host, ['timeout' => 8, 'redirection' => 0, 'sslverify' => false]);
 	if (is_wp_error($http)) {
-		$result['http'] = __('Error', 'freesiem-sentinel');
+		$result['redirect'] = __('Unavailable', 'freesiem-sentinel');
 	} else {
-		$result['http'] = 'HTTP ' . (string) wp_remote_retrieve_response_code($http);
+		$http_code = (int) wp_remote_retrieve_response_code($http);
+		$location = trim((string) wp_remote_retrieve_header($http, 'location'));
+		$result['http_code'] = $http_code;
+		$result['http_location'] = $location;
+		if (in_array($http_code, [301, 302, 307, 308], true) && str_starts_with(strtolower($location), 'https://')) {
+			$result['redirect'] = __('Redirect Enabled', 'freesiem-sentinel');
+			$result['redirect_enabled'] = true;
+		} elseif ($http_code === 200) {
+			$result['redirect'] = __('Redirect Missing', 'freesiem-sentinel');
+		} else {
+			$result['redirect'] = sprintf(__('HTTP %d', 'freesiem-sentinel'), $http_code);
+		}
 	}
 
 	$https = wp_remote_get('https://' . $host, ['timeout' => 8, 'redirection' => 0, 'sslverify' => false]);
 	if (is_wp_error($https)) {
-		$result['https'] = __('Error', 'freesiem-sentinel');
+		$result['https'] = __('HTTPS Error', 'freesiem-sentinel');
 	} else {
-		$result['https'] = 'HTTPS ' . (string) wp_remote_retrieve_response_code($https);
+		$https_code = (int) wp_remote_retrieve_response_code($https);
+		$result['https_code'] = $https_code;
+		$result['https_ok'] = $https_code >= 200 && $https_code < 400;
+		$result['https'] = $result['https_ok'] ? __('HTTPS OK', 'freesiem-sentinel') : sprintf(__('HTTPS %d', 'freesiem-sentinel'), $https_code);
 	}
 
 	return $result;
@@ -2742,9 +2840,6 @@ function freesiem_sentinel_apply_ssl_to_nginx(bool $enable_redirect = false): ar
 	$snippet_content .= "listen 443 ssl;\n";
 	$snippet_content .= 'ssl_certificate ' . (string) ($integration['fullchain_path'] ?? '') . ";\n";
 	$snippet_content .= 'ssl_certificate_key ' . (string) ($integration['privkey_path'] ?? '') . ";\n";
-	if ($enable_redirect) {
-		$snippet_content .= "if (\$scheme = http) { return 301 https://\$host\$request_uri; }\n";
-	}
 	$snippet_content .= "# END freeSIEM Sentinel Nginx SSL\n";
 
 	$include_line = 'include ' . $snippet_path . ';';
@@ -2761,6 +2856,13 @@ function freesiem_sentinel_apply_ssl_to_nginx(bool $enable_redirect = false): ar
 			$patched_contents = substr($patched_contents, 0, $offset) . "\n    " . $include_line . substr($patched_contents, $offset);
 		} else {
 			$patched_contents .= "\n    " . $include_line . "\n";
+		}
+	}
+
+	if ($enable_redirect) {
+		$redirect_block = freesiem_sentinel_get_nginx_redirect_block((string) ($integration['host'] ?? 'example.com'));
+		if (!str_contains($patched_contents, 'return 301 https://$host$request_uri;')) {
+			$patched_contents = $redirect_block . "\n\n" . ltrim($patched_contents);
 		}
 	}
 
@@ -3178,7 +3280,7 @@ function freesiem_sentinel_ssl_challenge_ready(array $settings, array|string $en
 	$method = (string) ($settings['challenge_method'] ?? 'webroot-http-01');
 	$environment = is_array($environment_or_host) ? $environment_or_host : ['configured_host' => (string) $environment_or_host];
 	$host = (string) ($environment['configured_host'] ?? '');
-	$webroot = (string) ($settings['webroot_path'] ?? '');
+	$webroot = freesiem_sentinel_recommend_ssl_webroot_path($settings, is_array($environment_or_host) ? $environment_or_host : null);
 
 	return match ($method) {
 		'webroot-http-01' => $webroot !== '' && file_exists($webroot) && is_readable($webroot)
