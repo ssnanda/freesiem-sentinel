@@ -3,7 +3,7 @@
  * Plugin Name: freeSIEM Sentinel
  * Plugin URI: https://github.com/ssnanda/freesiem-sentinel
  * Description: Connects a WordPress site to freeSIEM Core for verification, local scanning, secure result uploads, command handling, and summary reporting.
- * Version: 0.3.21
+ * Version: 0.3.22
  * Update URI: https://github.com/ssnanda/freesiem-sentinel
  * Author: freesiem.com
  * Text Domain: freesiem-sentinel
@@ -13,8 +13,9 @@ if (!defined('ABSPATH')) {
 	exit;
 }
 
-define('FREESIEM_SENTINEL_VERSION', '0.3.21');
+define('FREESIEM_SENTINEL_VERSION', '0.3.22');
 define('FREESIEM_SENTINEL_SLUG', 'freesiem-sentinel');
+define('FREESIEM_SENTINEL_SYNCHY_PAGE', 'freesiem-synchy');
 define('FREESIEM_SENTINEL_OPTION', 'freesiem_sentinel_settings');
 define('FREESIEM_SENTINEL_SSL_SETTINGS_OPTION', 'freesiem_sentinel_ssl_settings');
 define('FREESIEM_SENTINEL_SSL_PREFLIGHT_OPTION', 'freesiem_sentinel_ssl_preflight');
@@ -61,6 +62,16 @@ require_once FREESIEM_SENTINEL_PLUGIN_DIR . 'includes/class-cron.php';
 require_once FREESIEM_SENTINEL_PLUGIN_DIR . 'includes/class-updater.php';
 require_once FREESIEM_SENTINEL_PLUGIN_DIR . 'includes/class-admin.php';
 require_once FREESIEM_SENTINEL_PLUGIN_DIR . 'includes/class-plugin.php';
+
+if (!function_exists('synchy_get_pages')) {
+	$active_plugins = (array) get_option('active_plugins', []);
+	$network_plugins = is_multisite() ? array_keys((array) get_site_option('active_sitewide_plugins', [])) : [];
+	$standalone_synchy_active = in_array('synchy/synchy.php', $active_plugins, true) || in_array('synchy/synchy.php', $network_plugins, true);
+
+	if (!$standalone_synchy_active) {
+	require_once FREESIEM_SENTINEL_PLUGIN_DIR . 'includes/synchy/synchy-runtime.php';
+	}
+}
 
 register_activation_hook(__FILE__, ['Freesiem_Plugin', 'activate']);
 register_deactivation_hook(__FILE__, ['Freesiem_Plugin', 'deactivate']);

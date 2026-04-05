@@ -16,7 +16,10 @@ class Freesiem_Admin
 	public function register(): void
 	{
 		add_action('admin_menu', [$this, 'register_menu']);
+		add_action('admin_menu', [$this, 'remove_synchy_top_level_menu'], 999);
 		add_action('admin_init', [$this->plugin, 'maybe_process_pending_task_maintenance']);
+		add_action('admin_init', [$this, 'maybe_redirect_legacy_synchy_pages']);
+		add_action('admin_enqueue_scripts', [$this, 'maybe_enqueue_synchy_assets']);
 		add_action('admin_notices', 'freesiem_sentinel_render_notices');
 		add_action('admin_post_freesiem_sentinel_save_cloud_connect_contact', [$this, 'handle_save_cloud_connect_contact']);
 		add_action('admin_post_freesiem_sentinel_cloud_connect_start', [$this, 'handle_cloud_connect_start']);
@@ -83,10 +86,227 @@ class Freesiem_Admin
 		add_submenu_page('freesiem-portal', __('TFA (2FA)', 'freesiem-sentinel'), __('TFA (2FA)', 'freesiem-sentinel'), 'manage_options', 'freesiem-tfa', [$this, 'render_tfa_page']);
 		add_submenu_page('freesiem-portal', __('Login Protection', 'freesiem-sentinel'), __('Login Protection', 'freesiem-sentinel'), 'manage_options', 'freesiem-login-protection', [$this, 'render_login_protection_page']);
 		add_submenu_page('freesiem-portal', __('Stealth Mode', 'freesiem-sentinel'), __('Stealth Mode', 'freesiem-sentinel'), 'manage_options', 'freesiem-stealth-mode', [$this, 'render_stealth_mode_page']);
+		add_submenu_page('freesiem-portal', __('Synchy', 'freesiem-sentinel'), __('Synchy', 'freesiem-sentinel'), 'manage_options', FREESIEM_SENTINEL_SYNCHY_PAGE, [$this, 'render_synchy_page']);
 		add_submenu_page('freesiem-portal', __('Logs', 'freesiem-sentinel'), __('Logs', 'freesiem-sentinel'), 'manage_options', 'freesiem-logs', [$this, 'render_logs_page']);
 		add_submenu_page('freesiem-portal', __('Pending Tasks', 'freesiem-sentinel'), __('Pending Tasks', 'freesiem-sentinel'), 'read', 'freesiem-pending-tasks', [$this, 'render_pending_tasks_page']);
 		add_submenu_page('freesiem-portal', __('About', 'freesiem-sentinel'), __('About', 'freesiem-sentinel'), 'manage_options', 'freesiem-about', [$this, 'render_about_page']);
 		add_submenu_page('', __('Scan', 'freesiem-sentinel'), __('Scan', 'freesiem-sentinel'), 'manage_options', 'freesiem-scan', [$this, 'render_scan_page']);
+	}
+
+	public function remove_synchy_top_level_menu(): void
+	{
+		if (!function_exists('synchy_get_pages')) {
+			return;
+		}
+
+		remove_menu_page('synchy');
+
+		foreach (synchy_get_pages() as $page) {
+			$slug = sanitize_key((string) ($page['slug'] ?? ''));
+			if ($slug !== '') {
+				remove_submenu_page('synchy', $slug);
+			}
+		}
+	}
+
+	public function maybe_redirect_legacy_synchy_pages(): void
+	{
+		if (!is_admin() || !current_user_can('manage_options')) {
+			return;
+		}
+
+		$page = isset($_GET['page']) ? sanitize_key((string) wp_unslash($_GET['page'])) : '';
+		$tab = $this->get_synchy_tab_for_legacy_page($page);
+
+		if ($tab === '') {
+			return;
+		}
+
+		if ($page === FREESIEM_SENTINEL_SYNCHY_PAGE) {
+			return;
+		}
+
+		wp_safe_redirect(
+			add_query_arg(
+				[
+					'page' => FREESIEM_SENTINEL_SYNCHY_PAGE,
+					'tab' => $tab,
+				],
+				admin_url('admin.php')
+			)
+		);
+		exit;
+	}
+
+	public function maybe_enqueue_synchy_assets(string $hook_suffix): void
+	{
+		$page = isset($_GET['page']) ? sanitize_key((string) wp_unslash($_GET['page'])) : '';
+		if ($page !== FREESIEM_SENTINEL_SYNCHY_PAGE || !function_exists('synchy_get_site_sync_options')) {
+			return;
+		}
+
+		$tab = $this->get_synchy_current_tab();
+		$style_path = $this->get_synchy_asset_path('admin.css');
+		$style_url = $this->get_synchy_asset_url('admin.css');
+
+		if ($style_path !== '' && $style_url !== '' && file_exists($style_path)) {
+			wp_enqueue_style('synchy-admin', $style_url, [], (string) filemtime($style_path));
+		}
+
+		if ($tab === 'upload-live') {
+			$script_path = $this->get_synchy_asset_path('site-sync.js');
+			$script_url = $this->get_synchy_asset_url('site-sync.js');
+
+			if ($script_path !== '' && $script_url !== '' && file_exists($script_path)) {
+				wp_enqueue_script('synchy-site-sync', $script_url, [], (string) filemtime($script_path), true);
+				wp_localize_script(
+					'synchy-site-sync',
+					'synchySiteSyncConfig',
+					[
+						'ajaxUrl' => admin_url('admin-ajax.php'),
+						'nonce' => wp_create_nonce('synchy_site_sync_ajax'),
+						'currentJob' => synchy_build_site_sync_job_response(synchy_get_running_site_sync_job()),
+						'defaultStages' => synchy_get_site_sync_stage_items([]),
+						'strings' => [
+							'uploaded' => __('Uploaded', 'synchy'),
+							'timeSpent' => __('Time spent', 'synchy'),
+							'timeRemaining' => __('Time remaining', 'synchy'),
+							'completedIn' => __('Completed in', 'synchy'),
+							'connectionReady' => __('Connection ready', 'synchy'),
+							'connectionError' => __('Connection failed', 'synchy'),
+							'pushAction' => __('Upload to Live', 'synchy'),
+							'unknownError' => __('Synchy hit an unexpected live push error.', 'synchy'),
+						],
+					]
+				);
+			}
+
+			return;
+		}
+
+		if ($tab === 'sync') {
+			$script_path = $this->get_synchy_asset_path('sync.js');
+			$script_url = $this->get_synchy_asset_url('sync.js');
+
+			if ($script_path !== '' && $script_url !== '' && file_exists($script_path)) {
+				wp_enqueue_script('synchy-sync', $script_url, [], (string) filemtime($script_path), true);
+				wp_localize_script(
+					'synchy-sync',
+					'synchySyncConfig',
+					[
+						'ajaxUrl' => admin_url('admin-ajax.php'),
+						'nonce' => wp_create_nonce('synchy_sync_ajax'),
+						'localPluginVersion' => defined('SYNCHY_VERSION') ? SYNCHY_VERSION : FREESIEM_SENTINEL_VERSION,
+						'currentJob' => synchy_build_sync_job_response(synchy_get_visible_sync_job()),
+						'connectionState' => synchy_get_current_sync_connection_state(synchy_get_site_sync_options()),
+						'defaultStages' => synchy_get_sync_stage_items([]),
+						'scopeStatus' => synchy_get_sync_scope_status(synchy_get_site_sync_options()),
+						'strings' => [
+							'connectionReady' => __('Connection ready', 'synchy'),
+							'connectionError' => __('Connection failed', 'synchy'),
+							'connected' => __('Connected', 'synchy'),
+							'failed' => __('Failed', 'synchy'),
+							'needsRetest' => __('Needs retest', 'synchy'),
+							'notChecked' => __('Not checked', 'synchy'),
+							'incomplete' => __('Incomplete', 'synchy'),
+							'previewReady' => __('Preview ready', 'synchy'),
+							'previewError' => __('Preview failed', 'synchy'),
+							'startBaseline' => __('Start Baseline', 'synchy'),
+							'pushChanges' => __('Push Changes', 'synchy'),
+							'fullSync' => __('Full Sync', 'synchy'),
+							'pauseSync' => __('Pause Sync', 'synchy'),
+							'resumeSync' => __('Resume Sync', 'synchy'),
+							'markManualBaseline' => __('Mark Manual Baseline Complete', 'synchy'),
+							'syncingAction' => __('Syncing...', 'synchy'),
+							'paused' => __('Paused', 'synchy'),
+							'resumeReady' => __('Resume ready', 'synchy'),
+							'success' => __('Success', 'synchy'),
+							'error' => __('Error', 'synchy'),
+							'noChanges' => __('No changes', 'synchy'),
+							'awaitingBaseline' => __('Awaiting baseline', 'synchy'),
+							'baseline' => __('Baseline', 'synchy'),
+							'delta' => __('Delta', 'synchy'),
+							'lastRun' => __('Last run', 'synchy'),
+							'lastSync' => __('Last successful Sync', 'synchy'),
+							'destination' => __('Destination', 'synchy'),
+							'localPluginVersion' => __('Local plugin version', 'synchy'),
+							'files' => __('Files', 'synchy'),
+							'dbRows' => __('DB rows', 'synchy'),
+							'duration' => __('Duration', 'synchy'),
+							'site' => __('Site', 'synchy'),
+							'pluginVersion' => __('Plugin version', 'synchy'),
+							'authenticatedAs' => __('Authenticated as', 'synchy'),
+							'selectedScopes' => __('Selected scopes', 'synchy'),
+							'needsBaseline' => __('Needs baseline', 'synchy'),
+							'pendingBaseline' => __('Still need baseline', 'synchy'),
+							'pendingChanges' => __('Pending changes', 'synchy'),
+							'readyForPreview' => __('Ready for preview', 'synchy'),
+							'noChangesInScope' => __('No changes', 'synchy'),
+							'changedFiles' => __('Changed files', 'synchy'),
+							'dbTables' => __('Database tables', 'synchy'),
+							'previewSelectionTitle' => __('Pending Changes', 'synchy'),
+							'previewSelectionHelp' => __('Review the pending file sections and database tables, then uncheck anything you do not want to send.', 'synchy'),
+							'sampleRowIds' => __('Sample row IDs', 'synchy'),
+							'syncRunning' => __('Sync running', 'synchy'),
+							'selectedChanges' => __('Selected changes', 'synchy'),
+							'tableUpdates' => __('Table updates', 'synchy'),
+							'sampleFiles' => __('Sample files', 'synchy'),
+							'never' => __('Never', 'synchy'),
+							'na' => __('N/A', 'synchy'),
+							'previewDefault' => __('Run Preview Changes to review changed files and database rows before syncing.', 'synchy'),
+							'unknownError' => __('Synchy hit an unexpected Sync error.', 'synchy'),
+							'confirmSync' => __('Sync the previewed changes to the destination site now?', 'synchy'),
+							'confirmFullSync' => __('Run a full Sync for the selected scopes and send all tracked files and rows to the destination site now?', 'synchy'),
+							'confirmResumeSync' => __('Resume the remaining full Sync batches now?', 'synchy'),
+							'confirmBaseline' => __('Mark the selected scopes as already baselined after a successful manual full restore to the destination site?', 'synchy'),
+							'selectAtLeastOneScope' => __('Select at least one file or database scope first.', 'synchy'),
+							'batches' => __('Batches', 'synchy'),
+							'batchesComplete' => __('batches complete', 'synchy'),
+							'currentBatch' => __('Current batch', 'synchy'),
+							'pausePending' => __('Pause requested', 'synchy'),
+							'updateAvailable' => __('Destination update available:', 'synchy'),
+							'destinationUpToDate' => __('Destination Synchy is up to date.', 'synchy'),
+							'updateCheckPending' => __('Run or wait for the connection check to compare Synchy versions.', 'synchy'),
+							'confirmUpdateRemoteSynchy' => __('Update Synchy on the destination site from this local plugin copy now?', 'synchy'),
+							'destinationUpdated' => __('Destination Synchy updated.', 'synchy'),
+						],
+					]
+				);
+			}
+
+			return;
+		}
+
+		if ($tab !== 'export') {
+			return;
+		}
+
+		$script_path = $this->get_synchy_asset_path('export.js');
+		$script_url = $this->get_synchy_asset_url('export.js');
+
+		if ($script_path !== '' && $script_url !== '' && file_exists($script_path)) {
+			wp_enqueue_script('synchy-export', $script_url, [], (string) filemtime($script_path), true);
+			wp_localize_script(
+				'synchy-export',
+				'synchyExportConfig',
+				[
+					'ajaxUrl' => admin_url('admin-ajax.php'),
+					'nonce' => wp_create_nonce('synchy_export_ajax'),
+					'currentJob' => synchy_build_job_response(synchy_get_running_export_job()),
+					'defaultPackageName' => synchy_get_default_package_name(),
+					'defaultStages' => synchy_get_export_stage_items([]),
+					'strings' => [
+						'filesProcessed' => __('Files processed:', 'synchy'),
+						'unknownError' => __('Synchy hit an unexpected error while exporting.', 'synchy'),
+						'preparingLabel' => __('Preparing', 'synchy'),
+						'startingExport' => __('Starting export job...', 'synchy'),
+						'errorPhaseLabel' => __('Error', 'synchy'),
+						'completeTitle' => __('Synchy export complete', 'synchy'),
+						'errorTitle' => __('Synchy export needs attention', 'synchy'),
+					],
+				]
+			);
+		}
 	}
 
 	public function handle_save_cloud_connect_contact(): void
@@ -987,6 +1207,41 @@ class Freesiem_Admin
 		echo '</div>';
 	}
 
+	public function render_synchy_page(): void
+	{
+		$this->assert_manage_permissions();
+
+		if (!function_exists('synchy_render_page')) {
+			echo '<div class="wrap">';
+			echo '<h1>' . esc_html__('Synchy', 'freesiem-sentinel') . '</h1>';
+			echo '<p>' . esc_html__('The bundled Synchy runtime is not available.', 'freesiem-sentinel') . '</p>';
+			echo '</div>';
+			return;
+		}
+
+		$current_tab = $this->get_synchy_current_tab();
+		$tabs = $this->get_synchy_tabs();
+
+		echo '<div class="wrap">';
+		echo '<h1>' . esc_html__('Synchy', 'freesiem-sentinel') . '</h1>';
+		echo '<p>' . esc_html(sprintf(__('Synchy capabilities are included in freeSIEM Sentinel v%s and are managed from this single submenu page.', 'freesiem-sentinel'), FREESIEM_SENTINEL_VERSION)) . '</p>';
+		echo '<h2 class="nav-tab-wrapper" style="margin-bottom:16px;">';
+		foreach ($tabs as $tab => $config) {
+			$url = add_query_arg(
+				[
+					'page' => FREESIEM_SENTINEL_SYNCHY_PAGE,
+					'tab' => $tab,
+				],
+				admin_url('admin.php')
+			);
+			echo '<a class="nav-tab ' . esc_attr($tab === $current_tab ? 'nav-tab-active' : '') . '" href="' . esc_url($url) . '">' . esc_html((string) ($config['label'] ?? $tab)) . '</a>';
+		}
+		echo '</h2>';
+		echo '</div>';
+
+		synchy_render_page($this->get_synchy_legacy_page_slug($current_tab));
+	}
+
 	public function render_stealth_mode_page(): void
 	{
 		$this->assert_manage_permissions();
@@ -1636,6 +1891,12 @@ class Freesiem_Admin
 		if (!empty($release['published_at'])) {
 			echo '<p><strong>' . esc_html__('Release Published:', 'freesiem-sentinel') . '</strong> ' . esc_html(freesiem_sentinel_format_datetime((string) ($release['published_at'] ?? ''))) . '</p>';
 		}
+		echo '</div>';
+
+		echo '<div style="background:#fff;padding:20px;border:1px solid #dcdcde;border-radius:12px;margin-top:20px;">';
+		echo '<h2 style="margin-top:0;">' . esc_html__('Included Capabilities', 'freesiem-sentinel') . '</h2>';
+		echo '<p>' . esc_html__('freeSIEM Sentinel now includes the Synchy backup, import, upload-to-live, sync, and related admin workflows under the single freeSIEM menu.', 'freesiem-sentinel') . '</p>';
+		echo '<p><a class="button button-secondary" href="' . esc_url(freesiem_sentinel_admin_page_url(FREESIEM_SENTINEL_SYNCHY_PAGE)) . '">' . esc_html__('Open Synchy', 'freesiem-sentinel') . '</a></p>';
 		echo '</div>';
 
 		echo '<div style="background:#fff;padding:20px;border:1px solid #dcdcde;border-radius:12px;margin-top:20px;">';
@@ -3227,6 +3488,94 @@ class Freesiem_Admin
 		}
 
 		return $actions;
+	}
+
+	private function get_synchy_tabs(): array
+	{
+		return [
+			'export' => [
+				'label' => __('Export', 'freesiem-sentinel'),
+				'legacy_slug' => 'synchy-export',
+			],
+			'import' => [
+				'label' => __('Import', 'freesiem-sentinel'),
+				'legacy_slug' => 'synchy-import',
+			],
+			'schedule' => [
+				'label' => __('Schedule', 'freesiem-sentinel'),
+				'legacy_slug' => 'synchy-scheduled-backups',
+			],
+			'upload-live' => [
+				'label' => __('Upload to Live', 'freesiem-sentinel'),
+				'legacy_slug' => 'synchy-push-live-site',
+			],
+			'sync' => [
+				'label' => __('Sync', 'freesiem-sentinel'),
+				'legacy_slug' => 'synchy-site-sync',
+			],
+			'about' => [
+				'label' => __('About', 'freesiem-sentinel'),
+				'legacy_slug' => 'synchy-settings',
+			],
+		];
+	}
+
+	private function get_synchy_current_tab(): string
+	{
+		$tab = isset($_GET['tab']) ? sanitize_key((string) wp_unslash($_GET['tab'])) : 'export';
+		$tabs = $this->get_synchy_tabs();
+
+		return isset($tabs[$tab]) ? $tab : 'export';
+	}
+
+	private function get_synchy_legacy_page_slug(string $tab): string
+	{
+		$tabs = $this->get_synchy_tabs();
+
+		return isset($tabs[$tab]['legacy_slug']) ? (string) $tabs[$tab]['legacy_slug'] : 'synchy-export';
+	}
+
+	private function get_synchy_tab_for_legacy_page(string $page): string
+	{
+		if ($page === 'synchy') {
+			return 'export';
+		}
+
+		foreach ($this->get_synchy_tabs() as $tab => $config) {
+			if ((string) ($config['legacy_slug'] ?? '') === $page) {
+				return $tab;
+			}
+		}
+
+		return '';
+	}
+
+	private function get_synchy_asset_path(string $asset): string
+	{
+		$asset = ltrim($asset, '/');
+		$plugin_path = WP_PLUGIN_DIR . '/synchy/assets/' . $asset;
+
+		if (file_exists($plugin_path)) {
+			return $plugin_path;
+		}
+
+		$bundled_path = FREESIEM_SENTINEL_PLUGIN_DIR . 'includes/synchy/assets/' . $asset;
+
+		return file_exists($bundled_path) ? $bundled_path : '';
+	}
+
+	private function get_synchy_asset_url(string $asset): string
+	{
+		$asset = ltrim($asset, '/');
+		$plugin_path = WP_PLUGIN_DIR . '/synchy/assets/' . $asset;
+
+		if (file_exists($plugin_path)) {
+			return plugins_url('synchy/assets/' . $asset);
+		}
+
+		$bundled_path = FREESIEM_SENTINEL_PLUGIN_DIR . 'includes/synchy/assets/' . $asset;
+
+		return file_exists($bundled_path) ? plugins_url('includes/synchy/assets/' . $asset, FREESIEM_SENTINEL_PLUGIN_FILE) : '';
 	}
 
 	private function assert_manage_permissions(): void
