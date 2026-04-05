@@ -387,6 +387,10 @@ function freesiem_sentinel_get_default_ssl_state(): array
 		'cert_path' => '',
 		'fullchain_path' => '',
 		'privkey_path' => '',
+		'user_space_base' => '',
+		'user_space_config_dir' => '',
+		'user_space_work_dir' => '',
+		'user_space_logs_dir' => '',
 		'issued_at' => '',
 		'expires_at' => '',
 		'last_issue_status' => '',
@@ -441,6 +445,10 @@ function freesiem_sentinel_sanitize_ssl_state(array $state): array
 	$state['cert_path'] = trim((string) ($state['cert_path'] ?? ''));
 	$state['fullchain_path'] = trim((string) ($state['fullchain_path'] ?? ''));
 	$state['privkey_path'] = trim((string) ($state['privkey_path'] ?? ''));
+	$state['user_space_base'] = trim((string) ($state['user_space_base'] ?? ''));
+	$state['user_space_config_dir'] = trim((string) ($state['user_space_config_dir'] ?? ''));
+	$state['user_space_work_dir'] = trim((string) ($state['user_space_work_dir'] ?? ''));
+	$state['user_space_logs_dir'] = trim((string) ($state['user_space_logs_dir'] ?? ''));
 	$state['issued_at'] = freesiem_sentinel_sanitize_datetime((string) ($state['issued_at'] ?? ''));
 	$state['expires_at'] = freesiem_sentinel_sanitize_datetime((string) ($state['expires_at'] ?? ''));
 	$state['last_issue_status'] = sanitize_key((string) ($state['last_issue_status'] ?? ''));
@@ -1085,7 +1093,9 @@ function freesiem_sentinel_get_ssl_command_preview(?array $ssl_settings = null, 
 	$host = $environment['configured_host'] !== '' ? $environment['configured_host'] : 'example.com';
 	$email = is_email((string) ($ssl_settings['acme_contact_email'] ?? '')) ? (string) $ssl_settings['acme_contact_email'] : 'admin@example.com';
 	$staging_flag = !empty($ssl_settings['use_staging']) ? ' --staging' : '';
-	$base = 'certbot certonly --agree-tos --non-interactive --email ' . escapeshellarg($email) . ' -d ' . escapeshellarg($host);
+	$user_space = freesiem_sentinel_get_ssl_user_space_paths($ssl_settings);
+	$dir_flags = ' --config-dir ' . escapeshellarg((string) $user_space['config_dir']) . ' --work-dir ' . escapeshellarg((string) $user_space['work_dir']) . ' --logs-dir ' . escapeshellarg((string) $user_space['logs_dir']);
+	$base = 'certbot certonly --agree-tos --non-interactive --email ' . escapeshellarg($email) . ' -d ' . escapeshellarg($host) . $dir_flags;
 
 	$command = match ($method) {
 		'standalone-http-01' => $base . ' --standalone --preferred-challenges http' . $staging_flag,
@@ -1097,7 +1107,90 @@ function freesiem_sentinel_get_ssl_command_preview(?array $ssl_settings = null, 
 		'command' => $command,
 		'label' => __('Simulated command preview only. Not executed.', 'freesiem-sentinel'),
 		'method' => $method,
+		'user_space' => $user_space,
 	];
+}
+
+function freesiem_sentinel_get_ssl_user_space_paths(?array $ssl_settings = null): array
+{
+	$ssl_settings = is_array($ssl_settings) ? $ssl_settings : freesiem_sentinel_get_ssl_settings();
+	$base_candidates = [];
+	$webroot_path = trim((string) ($ssl_settings['webroot_path'] ?? ''));
+
+	if ($webroot_path !== '') {
+		$base_candidates[] = $webroot_path;
+	}
+
+	if (defined('ABSPATH')) {
+		$base_candidates[] = dirname(untrailingslashit((string) ABSPATH));
+	}
+
+	if (defined('WP_CONTENT_DIR')) {
+		$base_candidates[] = (string) WP_CONTENT_DIR;
+	} elseif (defined('ABSPATH')) {
+		$base_candidates[] = trailingslashit((string) ABSPATH) . 'wp-content';
+	}
+
+	$selected_base = '';
+	foreach ($base_candidates as $candidate) {
+		$candidate = rtrim((string) $candidate, '/\\');
+		if ($candidate !== '') {
+			$selected_base = $candidate;
+			break;
+		}
+	}
+
+	if ($selected_base === '' && defined('ABSPATH')) {
+		$selected_base = rtrim((string) ABSPATH, '/\\');
+	}
+
+	$root_dir = $selected_base !== '' ? $selected_base . '/.freesiem-letsencrypt' : '';
+	$config_dir = $root_dir !== '' ? $root_dir . '/config' : '';
+	$work_dir = $root_dir !== '' ? $root_dir . '/work' : '';
+	$logs_dir = $root_dir !== '' ? $root_dir . '/logs' : '';
+	$created = [];
+
+	foreach ([$root_dir, $config_dir, $work_dir, $logs_dir] as $directory) {
+		if ($directory === '') {
+			continue;
+		}
+
+		if (!file_exists($directory) && wp_mkdir_p($directory)) {
+			$created[] = $directory;
+		}
+
+		if (file_exists($directory) && function_exists('chmod')) {
+			@chmod($directory, 0755);
+		}
+	}
+
+	return [
+		'base_path' => $selected_base,
+		'root_dir' => $root_dir,
+		'config_dir' => $config_dir,
+		'work_dir' => $work_dir,
+		'logs_dir' => $logs_dir,
+		'created' => $created,
+		'writable' => [
+			'root_dir' => $root_dir !== '' && freesiem_sentinel_path_is_writable($root_dir),
+			'config_dir' => $config_dir !== '' && freesiem_sentinel_path_is_writable($config_dir),
+			'work_dir' => $work_dir !== '' && freesiem_sentinel_path_is_writable($work_dir),
+			'logs_dir' => $logs_dir !== '' && freesiem_sentinel_path_is_writable($logs_dir),
+		],
+	];
+}
+
+function freesiem_sentinel_detect_permission_denied_message(string $stdout, string $stderr): bool
+{
+	$combined = strtolower(trim($stdout . ' ' . $stderr));
+
+	if ($combined === '') {
+		return false;
+	}
+
+	return str_contains($combined, 'errno 13')
+		|| str_contains($combined, 'permission denied')
+		|| str_contains($combined, 'eacces');
 }
 
 function freesiem_sentinel_get_ssl_method_validation_items(?array $ssl_settings = null, ?array $environment = null): array
@@ -1261,12 +1354,6 @@ function freesiem_sentinel_detect_ssl_install_environment(): array
 	}
 
 	$root_status = function_exists('posix_geteuid') && posix_geteuid() === 0 ? 'root' : 'unknown';
-	if ($root_status !== 'root' && (function_exists('proc_open') || function_exists('exec') || function_exists('shell_exec'))) {
-		$sudo_check = freesiem_sentinel_run_ssl_shell_command('sudo -n true', 'detect_sudo', 10, 'sudo -n true');
-		if ($sudo_check['success']) {
-			$root_status = 'sudo';
-		}
-	}
 
 	$install_method = '';
 	if (!empty($package_managers['snap']['available'])) {
@@ -1305,24 +1392,23 @@ function freesiem_sentinel_detect_binary(string $binary): array
 function freesiem_sentinel_get_certbot_install_preview(?array $environment = null): array
 {
 	$environment = is_array($environment) ? $environment : freesiem_sentinel_detect_ssl_install_environment();
-	$prefix = $environment['root_status'] === 'sudo' ? 'sudo ' : '';
 
 	$commands = match ((string) ($environment['install_method'] ?? '')) {
 		'snap' => [
-			$prefix . 'snap install core',
-			$prefix . 'snap refresh core',
-			$prefix . 'snap install --classic certbot',
-			$prefix . 'ln -s /snap/bin/certbot /usr/bin/certbot',
+			'snap install core',
+			'snap refresh core',
+			'snap install --classic certbot',
+			'ln -s /snap/bin/certbot /usr/bin/certbot',
 		],
 		'apt' => [
-			$prefix . 'apt update',
-			$prefix . 'apt install -y certbot',
+			'apt update',
+			'apt install -y certbot',
 		],
 		'dnf' => [
-			$prefix . 'dnf install -y certbot',
+			'dnf install -y certbot',
 		],
 		'yum' => [
-			$prefix . 'yum install -y certbot',
+			'yum install -y certbot',
 		],
 		default => [],
 	};
@@ -1337,9 +1423,9 @@ function freesiem_sentinel_get_certbot_install_preview(?array $environment = nul
 function freesiem_sentinel_get_certbot_manual_install_instructions(): array
 {
 	return [
-		'ubuntu' => "sudo apt update\nsudo apt install -y certbot",
-		'centos' => "sudo dnf install -y certbot\n# or\nsudo yum install -y certbot",
-		'snap' => "sudo snap install core\nsudo snap refresh core\nsudo snap install --classic certbot\nsudo ln -s /snap/bin/certbot /usr/bin/certbot",
+		'ubuntu' => "apt update\napt install -y certbot",
+		'centos' => "dnf install -y certbot\n# or\nyum install -y certbot",
+		'snap' => "snap install core\nsnap refresh core\nsnap install --classic certbot\nln -s /snap/bin/certbot /usr/bin/certbot",
 	];
 }
 
@@ -1360,8 +1446,8 @@ function freesiem_sentinel_can_install_certbot(?array $environment = null, ?arra
 		return ['allowed' => false, 'reason' => __('No supported package manager was detected for automatic certbot installation.', 'freesiem-sentinel')];
 	}
 
-	if (!in_array((string) ($environment['root_status'] ?? 'unknown'), ['root', 'sudo'], true)) {
-		return ['allowed' => false, 'reason' => __('Root or passwordless sudo capability could not be confirmed.', 'freesiem-sentinel')];
+	if ((string) ($environment['root_status'] ?? 'unknown') !== 'root') {
+		return ['allowed' => false, 'reason' => __('Root execution could not be confirmed, so automatic certbot installation is unavailable from this UI.', 'freesiem-sentinel')];
 	}
 
 	return ['allowed' => true, 'reason' => ''];
@@ -1651,8 +1737,9 @@ function freesiem_sentinel_execute_ssl_certbot_action(string $action, ?array $ss
 	}
 
 	$execution = freesiem_sentinel_run_ssl_shell_command((string) $command_data['command'], 'ssl_' . $action, 600, (string) $command_data['preview']);
+	$permission_denied = freesiem_sentinel_detect_permission_denied_message((string) ($execution['stdout_summary'] ?? ''), (string) ($execution['stderr_summary'] ?? ''));
 	$verification = $execution['success']
-		? freesiem_sentinel_verify_ssl_certificate((string) ($environment['configured_host'] ?: $state['domain']))
+		? freesiem_sentinel_verify_ssl_certificate((string) ($environment['configured_host'] ?: $state['domain']), $command_data)
 		: ['success' => false, 'status' => 'failed', 'summary' => __('Certificate verification was skipped because certbot did not succeed.', 'freesiem-sentinel')];
 	$status = $execution['success']
 		? ($verification['success'] ? 'success' : 'warning')
@@ -1660,6 +1747,9 @@ function freesiem_sentinel_execute_ssl_certbot_action(string $action, ?array $ss
 	$summary = $execution['success']
 		? ($verification['summary'] ?? __('Certbot finished successfully.', 'freesiem-sentinel'))
 		: (!empty($execution['stderr_summary']) ? (string) $execution['stderr_summary'] : (string) ($execution['stdout_summary'] ?? __('Certbot failed.', 'freesiem-sentinel')));
+	if ($permission_denied) {
+		$summary = __('Certbot requires root directories. Sentinel is switching to user-space mode.', 'freesiem-sentinel');
+	}
 	$state_updates = [
 		'provider' => 'certbot',
 		'domain' => (string) ($environment['configured_host'] ?: $state['domain']),
@@ -1668,6 +1758,10 @@ function freesiem_sentinel_execute_ssl_certbot_action(string $action, ?array $ss
 		'certbot_path' => (string) ($environment['certbot']['path'] ?? ''),
 		'certbot_version' => (string) ($environment['certbot']['version'] ?? ''),
 		'current_ssl_mode' => 'manual-live-actions',
+		'user_space_base' => (string) ($command_data['user_space']['root_dir'] ?? ''),
+		'user_space_config_dir' => (string) ($command_data['user_space']['config_dir'] ?? ''),
+		'user_space_work_dir' => (string) ($command_data['user_space']['work_dir'] ?? ''),
+		'user_space_logs_dir' => (string) ($command_data['user_space']['logs_dir'] ?? ''),
 		'last_verification_status' => sanitize_key((string) ($verification['status'] ?? '')),
 		'last_verification_result' => sanitize_text_field((string) ($verification['summary'] ?? '')),
 	];
@@ -1710,27 +1804,34 @@ function freesiem_sentinel_build_live_ssl_command(string $action, array $ssl_set
 	$email = (string) ($ssl_settings['acme_contact_email'] ?? '');
 	$certbot_path = (string) ($environment['certbot']['path'] ?? 'certbot');
 	$staging_flag = !empty($ssl_settings['use_staging']) ? ' --staging' : '';
-	$renewal_flag = $action === 'renew' ? ' --force-renewal --cert-name ' . escapeshellarg($host) : '';
-	$base = escapeshellarg($certbot_path) . ' certonly --agree-tos --non-interactive --email ' . escapeshellarg($email) . ' -d ' . escapeshellarg($host) . $renewal_flag . $staging_flag;
+	$user_space = freesiem_sentinel_get_ssl_user_space_paths($ssl_settings);
+	$target_host = $host !== '' ? $host : (string) ($state['domain'] ?? '');
+	$renewal_flag = $action === 'renew' ? ' renew --cert-name ' . escapeshellarg($target_host) : ' certonly --agree-tos --non-interactive --email ' . escapeshellarg($email) . ' -d ' . escapeshellarg($target_host);
+	$dir_flags = ' --config-dir ' . escapeshellarg((string) $user_space['config_dir']) . ' --work-dir ' . escapeshellarg((string) $user_space['work_dir']) . ' --logs-dir ' . escapeshellarg((string) $user_space['logs_dir']);
+	$base = escapeshellarg($certbot_path) . $renewal_flag . $staging_flag . $dir_flags;
+	$preview_base = 'certbot' . $renewal_flag . $staging_flag . $dir_flags;
 
 	return match ($method) {
 		'standalone-http-01' => [
 			'executable' => true,
 			'command' => $base . ' --standalone --preferred-challenges http',
-			'preview' => 'certbot certonly --agree-tos --non-interactive --email ' . escapeshellarg($email) . ' -d ' . escapeshellarg($host) . $renewal_flag . $staging_flag . ' --standalone --preferred-challenges http',
+			'preview' => $preview_base . ' --standalone --preferred-challenges http',
 			'summary' => '',
+			'user_space' => $user_space,
 		],
 		'manual-dns-01' => [
 			'executable' => false,
 			'command' => '',
-			'preview' => 'certbot certonly --agree-tos --non-interactive --email ' . escapeshellarg($email) . ' -d ' . escapeshellarg($host) . $renewal_flag . $staging_flag . ' --manual --preferred-challenges dns --manual-public-ip-logging-ok',
+			'preview' => $preview_base . ' --manual --preferred-challenges dns --manual-public-ip-logging-ok',
 			'summary' => __('Manual DNS-01 remains instruction-only in this version and was not executed.', 'freesiem-sentinel'),
+			'user_space' => $user_space,
 		],
 		default => [
 			'executable' => true,
 			'command' => $base . ' --webroot -w ' . escapeshellarg((string) ($ssl_settings['webroot_path'] ?? '')) . ' --preferred-challenges http',
-			'preview' => 'certbot certonly --agree-tos --non-interactive --email ' . escapeshellarg($email) . ' -d ' . escapeshellarg($host) . $renewal_flag . $staging_flag . ' --webroot -w ' . escapeshellarg((string) ($ssl_settings['webroot_path'] ?? '')) . ' --preferred-challenges http',
+			'preview' => $preview_base . ' --webroot -w ' . escapeshellarg((string) ($ssl_settings['webroot_path'] ?? '')) . ' --preferred-challenges http',
 			'summary' => '',
+			'user_space' => $user_space,
 		],
 	};
 }
@@ -1756,10 +1857,32 @@ function freesiem_sentinel_detect_local_port_listener(int $port): array
 	];
 }
 
-function freesiem_sentinel_verify_ssl_certificate(string $host): array
+function freesiem_sentinel_verify_ssl_certificate(string $host, ?array $command_data = null): array
 {
 	$host = strtolower(trim($host));
-	$base_path = '/etc/letsencrypt/live/' . $host;
+	$user_space_config = '';
+	if (is_array($command_data) && !empty($command_data['user_space']['config_dir'])) {
+		$user_space_config = rtrim((string) $command_data['user_space']['config_dir'], '/\\');
+	}
+
+	$candidate_bases = [];
+	if ($user_space_config !== '') {
+		$candidate_bases[] = $user_space_config . '/live/' . $host;
+	}
+	$candidate_bases[] = '/etc/letsencrypt/live/' . $host;
+
+	$base_path = '';
+	foreach ($candidate_bases as $candidate_base) {
+		if (file_exists($candidate_base . '/cert.pem') || file_exists($candidate_base . '/fullchain.pem') || file_exists($candidate_base . '/privkey.pem')) {
+			$base_path = $candidate_base;
+			break;
+		}
+	}
+
+	if ($base_path === '') {
+		$base_path = $candidate_bases[0];
+	}
+
 	$metadata = [
 		'domain' => $host,
 		'cert_path' => $base_path . '/cert.pem',

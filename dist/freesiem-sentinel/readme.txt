@@ -3,7 +3,7 @@ Contributors: freesiem
 Requires at least: 6.4
 Tested up to: 6.8
 Requires PHP: 8.1
-Stable tag: 0.3.0
+Stable tag: 0.3.1
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -70,6 +70,10 @@ Version bumps should always have matching git tags.
 GitHub Actions publishes the ZIP automatically when a `v*` tag is pushed.
 
 == Changelog ==
+
+= 0.3.1 =
+
+* Force certbot issue, renew, and preview commands into writable user-space directories
 
 = 0.3.0 =
 

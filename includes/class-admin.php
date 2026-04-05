@@ -1876,6 +1876,11 @@ class Freesiem_Admin
 		$port_check_summary = (!empty($ssl_settings['check_port_80']) || !empty($ssl_settings['check_port_443']))
 			? sprintf(__('Configured (80: %1$s, 443: %2$s)', 'freesiem-sentinel'), !empty($ssl_settings['check_port_80']) ? __('on', 'freesiem-sentinel') : __('off', 'freesiem-sentinel'), !empty($ssl_settings['check_port_443']) ? __('on', 'freesiem-sentinel') : __('off', 'freesiem-sentinel'))
 			: __('Not configured', 'freesiem-sentinel');
+		$user_space = freesiem_sentinel_get_ssl_user_space_paths($ssl_settings);
+		$user_space_base = !empty($ssl_state['user_space_base']) ? (string) $ssl_state['user_space_base'] : (string) ($user_space['root_dir'] ?? '');
+		$user_space_config = !empty($ssl_state['user_space_config_dir']) ? (string) $ssl_state['user_space_config_dir'] : (string) ($user_space['config_dir'] ?? '');
+		$user_space_work = !empty($ssl_state['user_space_work_dir']) ? (string) $ssl_state['user_space_work_dir'] : (string) ($user_space['work_dir'] ?? '');
+		$user_space_logs = !empty($ssl_state['user_space_logs_dir']) ? (string) $ssl_state['user_space_logs_dir'] : (string) ($user_space['logs_dir'] ?? '');
 		$issue_gate = freesiem_sentinel_can_run_live_ssl_action('issue', $ssl_settings, $environment, $readiness);
 		$renew_gate = freesiem_sentinel_can_run_live_ssl_action('renew', $ssl_settings, $environment, $readiness);
 		$install_gate = freesiem_sentinel_can_install_certbot($install_environment, $environment);
@@ -1903,6 +1908,10 @@ class Freesiem_Admin
 		$this->render_detail_row(__('Last dry-run summary', 'freesiem-sentinel'), (string) ($dry_run['summary'] ?? __('No dry run yet.', 'freesiem-sentinel')));
 		$this->render_detail_row(__('Last issue attempt', 'freesiem-sentinel'), $this->summary_value_or_fallback((string) ($ssl_state['last_issue_at'] ?? ''), true) . ' / ' . (!empty($ssl_state['last_issue_status']) ? (string) $ssl_state['last_issue_status'] : __('none', 'freesiem-sentinel')));
 		$this->render_detail_row(__('Last renew attempt', 'freesiem-sentinel'), $this->summary_value_or_fallback((string) ($ssl_state['last_renew_at'] ?? ''), true) . ' / ' . (!empty($ssl_state['last_renew_status']) ? (string) $ssl_state['last_renew_status'] : __('none', 'freesiem-sentinel')));
+		$this->render_detail_row(__('User-space SSL base', 'freesiem-sentinel'), $user_space_base !== '' ? $user_space_base : __('Unavailable', 'freesiem-sentinel'));
+		$this->render_detail_row(__('Certbot config dir', 'freesiem-sentinel'), $user_space_config !== '' ? $user_space_config : __('Unavailable', 'freesiem-sentinel'));
+		$this->render_detail_row(__('Certbot work dir', 'freesiem-sentinel'), $user_space_work !== '' ? $user_space_work : __('Unavailable', 'freesiem-sentinel'));
+		$this->render_detail_row(__('Certbot logs dir', 'freesiem-sentinel'), $user_space_logs !== '' ? $user_space_logs : __('Unavailable', 'freesiem-sentinel'));
 		$this->render_detail_row(__('Certificate path summary', 'freesiem-sentinel'), trim(implode(' | ', array_filter([(string) ($ssl_state['cert_path'] ?? ''), (string) ($ssl_state['fullchain_path'] ?? ''), (string) ($ssl_state['privkey_path'] ?? '')]))));
 		$this->render_detail_row(__('Expiry summary', 'freesiem-sentinel'), !empty($ssl_state['expires_at']) ? (string) $ssl_state['expires_at'] : __('Unavailable', 'freesiem-sentinel'));
 		$this->render_detail_row(__('SSL feature mode', 'freesiem-sentinel'), __('manual-live-actions', 'freesiem-sentinel'));
@@ -2048,6 +2057,11 @@ class Freesiem_Admin
 		echo '<h2 style="margin-top:0;">' . esc_html__('Simulated Command Preview', 'freesiem-sentinel') . '</h2>';
 		echo '<p><strong>' . esc_html((string) ($preview['label'] ?? __('Preview only', 'freesiem-sentinel'))) . '</strong></p>';
 		echo '<pre style="white-space:pre-wrap;overflow:auto;">' . esc_html((string) ($preview['command'] ?? '')) . '</pre>';
+		if (!empty($preview['user_space']) && is_array($preview['user_space'])) {
+			echo '<p><strong>' . esc_html__('User-space config dir', 'freesiem-sentinel') . ':</strong> ' . esc_html((string) ($preview['user_space']['config_dir'] ?? '')) . '</p>';
+			echo '<p><strong>' . esc_html__('User-space work dir', 'freesiem-sentinel') . ':</strong> ' . esc_html((string) ($preview['user_space']['work_dir'] ?? '')) . '</p>';
+			echo '<p><strong>' . esc_html__('User-space logs dir', 'freesiem-sentinel') . ':</strong> ' . esc_html((string) ($preview['user_space']['logs_dir'] ?? '')) . '</p>';
+		}
 		echo '<p style="margin-bottom:0;color:#646970;">' . esc_html__('Preview only. No shell execution occurs in this version.', 'freesiem-sentinel') . '</p>';
 		echo '</div>';
 		echo '<div style="background:#fff;padding:20px;border:1px solid #dcdcde;border-radius:12px;">';
