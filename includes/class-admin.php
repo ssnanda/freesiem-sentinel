@@ -597,6 +597,13 @@ class Freesiem_Admin
 			'matched_domain' => (string) ($integration['matched_server_name'] ?? ''),
 			'confidence' => (string) ($integration['detection_confidence'] ?? 'ambiguous'),
 		]);
+		if (!empty($integration['permissions_blocked'])) {
+			$guidance = freesiem_sentinel_get_nginx_permission_guidance($integration, $environment);
+			freesiem_sentinel_add_ssl_log('warning', __('Automatic nginx apply is currently blocked by filesystem permissions.', 'freesiem-sentinel'), 'nginx_permission_guidance', [
+				'paths' => array_values(array_map(static fn(array $item): string => (string) ($item['path'] ?? ''), (array) ($guidance['items'] ?? []))),
+				'web_user' => (string) ($guidance['web_user']['user'] ?? ''),
+			]);
+		}
 
 		$notice_level = (string) ($integration['detection_confidence'] ?? '') === 'exact' ? 'success' : ((string) ($integration['detection_confidence'] ?? '') === 'probable' ? 'warning' : 'error');
 		freesiem_sentinel_set_notice($notice_level, (string) ($integration['detection_result'] ?? __('Nginx detection completed.', 'freesiem-sentinel')));
@@ -1967,6 +1974,7 @@ class Freesiem_Admin
 	{
 		$certificate = freesiem_sentinel_get_certificate_view_data($ssl_state);
 		$integration = freesiem_sentinel_detect_nginx_integration($ssl_settings, $environment, $ssl_state);
+		$permission_guidance = freesiem_sentinel_get_nginx_permission_guidance($integration, $environment);
 		$user_space = freesiem_sentinel_get_ssl_user_space_paths($ssl_settings);
 		$user_space_config = !empty($ssl_state['user_space_config_dir']) ? (string) $ssl_state['user_space_config_dir'] : (string) ($user_space['config_dir'] ?? '');
 		$lineage_exists = freesiem_sentinel_ssl_lineage_exists((string) ($environment['configured_host'] ?? ''), ['user_space' => ['config_dir' => $user_space_config]]);
@@ -2027,6 +2035,11 @@ class Freesiem_Admin
 		echo '<div style="background:#fff;padding:20px;border:1px solid #dcdcde;border-radius:12px;">';
 		$this->render_ssl_nginx_section($ssl_settings, $environment, $ssl_state);
 		echo '</div>';
+		if (!empty($permission_guidance['blocked'])) {
+			echo '<div style="background:#fff;padding:20px;border:1px solid #dcdcde;border-radius:12px;">';
+			$this->render_ssl_nginx_permission_guidance($permission_guidance);
+			echo '</div>';
+		}
 		echo '<div style="background:#fff;padding:20px;border:1px solid #dcdcde;border-radius:12px;">';
 		echo '<h2 style="margin-top:0;">' . esc_html__('Alerts / Warnings', 'freesiem-sentinel') . '</h2>';
 		if (!empty($readiness['blocker_messages'])) {
@@ -2134,6 +2147,41 @@ class Freesiem_Admin
 		echo '<p><strong>' . esc_html__('Manual fallback', 'freesiem-sentinel') . ':</strong></p>';
 		echo '<p style="margin-bottom:6px;color:#646970;">' . esc_html__('If automatic patching is not safe, copy the preview into your nginx site config, then run these commands manually.', 'freesiem-sentinel') . '</p>';
 		echo '<pre style="white-space:pre-wrap;overflow:auto;">' . esc_html((string) ($integration['test_command'] ?? 'nginx -t') . "\n" . (string) ($integration['reload_command'] ?? 'nginx -s reload')) . '</pre>';
+	}
+
+	private function render_ssl_nginx_permission_guidance(array $guidance): void
+	{
+		echo '<h2 style="margin-top:0;">' . esc_html__('Permissions Required for Auto Apply', 'freesiem-sentinel') . '</h2>';
+		echo '<p style="margin-top:0;color:#646970;">' . esc_html__('Auto apply is blocked by filesystem permissions. Sentinel only recommends the minimum write access needed for the detected nginx files.', 'freesiem-sentinel') . '</p>';
+		echo '<p><strong>' . esc_html__('Detected web user', 'freesiem-sentinel') . ':</strong> ' . esc_html((string) ($guidance['web_user']['user'] ?? 'www-data')) . ' (' . esc_html((string) ($guidance['web_user']['confidence'] ?? 'low')) . ')</p>';
+		echo '<table class="widefat striped" style="margin-bottom:14px;"><thead><tr><th>' . esc_html__('Path', 'freesiem-sentinel') . '</th><th>' . esc_html__('Writable', 'freesiem-sentinel') . '</th><th>' . esc_html__('Reason needed', 'freesiem-sentinel') . '</th></tr></thead><tbody>';
+		foreach ((array) ($guidance['items'] ?? []) as $item) {
+			if (!is_array($item)) {
+				continue;
+			}
+			echo '<tr>';
+			echo '<td><code>' . esc_html((string) ($item['path'] ?? '')) . '</code></td>';
+			echo '<td><span style="' . esc_attr($this->ssl_preflight_badge_style(!empty($item['writable']) ? 'PASS' : 'FAIL')) . '">' . esc_html(!empty($item['writable']) ? 'PASS' : 'FAIL') . '</span></td>';
+			echo '<td>' . esc_html((string) ($item['reason'] ?? '')) . '</td>';
+			echo '</tr>';
+		}
+		echo '</tbody></table>';
+		echo '<p><strong>' . esc_html__('Recommended order', 'freesiem-sentinel') . ':</strong></p>';
+		echo '<ul style="margin-top:0;">';
+		echo '<li><strong>' . esc_html__('ACL', 'freesiem-sentinel') . '</strong> ' . esc_html__('LOW risk. Preferred because it grants path-specific access to the detected web user only.', 'freesiem-sentinel') . '</li>';
+		echo '<li><strong>' . esc_html__('Group write', 'freesiem-sentinel') . '</strong> ' . esc_html__('MEDIUM risk. Use only if ACL is unavailable on this server.', 'freesiem-sentinel') . '</li>';
+		echo '<li><strong>' . esc_html__('Broad permissions', 'freesiem-sentinel') . '</strong> ' . esc_html__('NOT recommended. Sentinel does not suggest chmod 777 or broad /etc/nginx access.', 'freesiem-sentinel') . '</li>';
+		echo '</ul>';
+		echo '<p><strong>' . esc_html__('ACL example commands', 'freesiem-sentinel') . ':</strong></p>';
+		echo '<pre style="white-space:pre-wrap;overflow:auto;">' . esc_html(implode("\n", (array) ($guidance['commands']['acl'] ?? []))) . '</pre>';
+		echo '<p><strong>' . esc_html__('Fallback group-write commands', 'freesiem-sentinel') . ':</strong></p>';
+		echo '<pre style="white-space:pre-wrap;overflow:auto;">' . esc_html(implode("\n", (array) ($guidance['commands']['group_write'] ?? []))) . '</pre>';
+		echo '<p><strong>' . esc_html__('Next steps', 'freesiem-sentinel') . ':</strong></p>';
+		echo '<ol style="margin-top:0;padding-left:18px;">';
+		foreach ((array) ($guidance['steps'] ?? []) as $step) {
+			echo '<li>' . esc_html((string) $step) . '</li>';
+		}
+		echo '</ol>';
 	}
 
 	private function render_ssl_preflight_tab(array $preflight): void

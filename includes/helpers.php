@@ -2410,10 +2410,14 @@ function freesiem_sentinel_detect_nginx_integration(?array $ssl_settings = null,
 	if (!$snippet_dir_writable) {
 		$apply_blockers[] = sprintf(__('The nginx snippets directory is not writable by PHP: %s', 'freesiem-sentinel'), $snippet_dir);
 	}
+	$permissions_blocked = !$config_writable || !$snippet_dir_writable;
 	$apply_allowed = !$preview_only && $mode === 'patch' && $config_writable && $snippet_dir_writable && $target_path !== '';
 	$apply_reason = $apply_allowed
 		? __('Detected nginx config and certificate files are ready for automatic apply.', 'freesiem-sentinel')
 		: implode(' ', array_values(array_unique(array_filter($apply_blockers))));
+	if (!$apply_allowed && $permissions_blocked) {
+		$apply_reason = __('Blocked by filesystem permissions. Review the permission guidance section below.', 'freesiem-sentinel');
+	}
 	if ($apply_reason === '') {
 		$apply_reason = $reason;
 	}
@@ -2434,6 +2438,7 @@ function freesiem_sentinel_detect_nginx_integration(?array $ssl_settings = null,
 		'config_writable' => $config_writable,
 		'snippet_path' => $snippet_path,
 		'snippet_dir_writable' => $snippet_dir_writable,
+		'permissions_blocked' => $permissions_blocked,
 		'mode' => $mode,
 		'apply_allowed' => $apply_allowed,
 		'reason' => $reason,
@@ -2450,6 +2455,96 @@ function freesiem_sentinel_detect_nginx_integration(?array $ssl_settings = null,
 		'nginx_t_ok' => !empty($detection['nginx_t_ok']),
 		'test_command' => (!empty($nginx_binary['path']) ? $nginx_binary['path'] : 'nginx') . ' -t',
 		'reload_command' => (!empty($nginx_binary['path']) ? $nginx_binary['path'] : 'nginx') . ' -s reload',
+	];
+}
+
+function freesiem_sentinel_detect_web_process_user(?array $environment = null): array
+{
+	$environment = is_array($environment) ? $environment : freesiem_sentinel_get_ssl_environment_snapshot();
+	$user = '';
+	$confidence = 'low';
+	$source = 'unknown';
+
+	if (function_exists('posix_geteuid') && function_exists('posix_getpwuid')) {
+		$process = @posix_getpwuid((int) posix_geteuid());
+		if (is_array($process) && !empty($process['name'])) {
+			$user = sanitize_key((string) $process['name']);
+			$confidence = 'high';
+			$source = 'php_process';
+		}
+	}
+
+	if ($user === '') {
+		$server = strtolower((string) ($_SERVER['SERVER_SOFTWARE'] ?? ''));
+		$os_family = sanitize_key((string) ($environment['install_environment']['os_family'] ?? 'unknown'));
+		if (str_contains($server, 'nginx')) {
+			$user = in_array($os_family, ['ubuntu_debian', 'unknown'], true) ? 'www-data' : 'nginx';
+			$confidence = 'probable';
+			$source = 'server_software';
+		} elseif (str_contains($server, 'apache')) {
+			$user = in_array($os_family, ['ubuntu_debian', 'unknown'], true) ? 'www-data' : 'apache';
+			$confidence = 'probable';
+			$source = 'server_software';
+		}
+	}
+
+	return [
+		'user' => $user !== '' ? $user : 'www-data',
+		'confidence' => $confidence,
+		'source' => $source,
+	];
+}
+
+function freesiem_sentinel_get_nginx_permission_guidance(array $integration, ?array $environment = null): array
+{
+	$environment = is_array($environment) ? $environment : freesiem_sentinel_get_ssl_environment_snapshot();
+	$web_user = freesiem_sentinel_detect_web_process_user($environment);
+	$user = (string) ($web_user['user'] ?? 'www-data');
+	$target_path = trim((string) ($integration['target_path'] ?? ''));
+	$snippet_path = trim((string) ($integration['snippet_path'] ?? ''));
+	$snippet_dir = $snippet_path !== '' ? dirname($snippet_path) : '';
+	$items = [];
+
+	if ($target_path !== '' && empty($integration['config_writable'])) {
+		$items[] = [
+			'path' => $target_path,
+			'writable' => false,
+			'reason' => __('Modify the nginx site config to add the Sentinel SSL include line.', 'freesiem-sentinel'),
+			'acl_command' => 'setfacl -m u:' . $user . ':rw ' . escapeshellarg($target_path),
+			'group_command' => 'chgrp ' . escapeshellarg($user) . ' ' . escapeshellarg($target_path) . ' && chmod 664 ' . escapeshellarg($target_path),
+		];
+	}
+
+	if ($snippet_dir !== '' && empty($integration['snippet_dir_writable'])) {
+		$items[] = [
+			'path' => $snippet_dir,
+			'writable' => false,
+			'reason' => __('Create the SSL snippet file that stores the certificate directives.', 'freesiem-sentinel'),
+			'acl_command' => 'setfacl -m u:' . $user . ':rwx ' . escapeshellarg($snippet_dir),
+			'group_command' => 'chgrp ' . escapeshellarg($user) . ' ' . escapeshellarg($snippet_dir) . ' && chmod 775 ' . escapeshellarg($snippet_dir),
+		];
+	}
+
+	$commands = [
+		'acl' => [],
+		'group_write' => [],
+	];
+
+	foreach ($items as $item) {
+		$commands['acl'][] = (string) $item['acl_command'];
+		$commands['group_write'][] = (string) $item['group_command'];
+	}
+
+	return [
+		'blocked' => $items !== [],
+		'items' => $items,
+		'web_user' => $web_user,
+		'commands' => $commands,
+		'steps' => [
+			__('Grant the minimum write permissions shown below.', 'freesiem-sentinel'),
+			__('Click Detect Nginx Config to refresh the writable checks.', 'freesiem-sentinel'),
+			__('Click Apply SSL to Nginx once both paths report PASS.', 'freesiem-sentinel'),
+		],
 	];
 }
 
