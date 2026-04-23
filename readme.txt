@@ -3,7 +3,7 @@ Contributors: freesiem
 Requires at least: 6.4
 Tested up to: 6.8
 Requires PHP: 8.1
-Stable tag: 0.3.28
+Stable tag: 0.3.29
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -70,6 +70,11 @@ Version bumps should always have matching git tags.
 GitHub Actions publishes the ZIP automatically when a `v*` tag is pushed.
 
 == Changelog ==
+
+= 0.3.29 =
+
+* Fix Update Live Synchy inside Sentinel so it compares and refreshes the bundled Synchy runtime version instead of the parent Sentinel plugin version
+* Keep Sentinel itself on the normal GitHub release updater while allowing Sync destinations to receive the latest bundled Synchy runtime
 
 = 0.3.28 =
 

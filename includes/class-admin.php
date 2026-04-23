@@ -196,7 +196,7 @@ class Freesiem_Admin
 					[
 						'ajaxUrl' => admin_url('admin-ajax.php'),
 						'nonce' => wp_create_nonce('synchy_sync_ajax'),
-						'localPluginVersion' => FREESIEM_SENTINEL_VERSION,
+						'localPluginVersion' => defined('SYNCHY_VERSION') ? SYNCHY_VERSION : FREESIEM_SENTINEL_VERSION,
 						'currentJob' => synchy_build_sync_job_response(synchy_get_visible_sync_job()),
 						'connectionState' => synchy_get_current_sync_connection_state(synchy_get_site_sync_options()),
 						'defaultStages' => synchy_get_sync_stage_items([]),
@@ -3565,18 +3565,9 @@ class Freesiem_Admin
 		}
 
 		if ($current_tab === 'sync') {
-			$sentinel_version = esc_html(FREESIEM_SENTINEL_VERSION);
-			$html = preg_replace(
-				'#(<span class="synchy-export-meta__label">\s*Local plugin version\s*</span>\s*<strong>)([^<]+)(</strong>)#i',
-				'$1' . $sentinel_version . '$3',
-				$html
-			) ?? $html;
-			if (defined('SYNCHY_VERSION') && SYNCHY_VERSION !== '') {
-				$html = str_replace(SYNCHY_VERSION, FREESIEM_SENTINEL_VERSION, $html);
-			}
 			$html = str_replace(
-				'"localPluginVersion":"' . esc_js(defined('SYNCHY_VERSION') ? SYNCHY_VERSION : ''),
 				'"localPluginVersion":"' . esc_js(FREESIEM_SENTINEL_VERSION),
+				'"localPluginVersion":"' . esc_js(defined('SYNCHY_VERSION') ? SYNCHY_VERSION : FREESIEM_SENTINEL_VERSION),
 				$html
 			);
 		}

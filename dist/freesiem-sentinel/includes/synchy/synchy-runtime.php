@@ -3,7 +3,7 @@
  * Plugin Name: Synchy
  * Plugin URI: https://github.com/ssnanda/synchy
  * Description: Starter admin shell for Synchy backup, restore, schedule, and sync tooling.
- * Version: 0.7.58
+ * Version: 0.7.59
  * Update URI: https://github.com/ssnanda/synchy
  * Author: sandman
  */
@@ -12,7 +12,7 @@ if (!defined('ABSPATH')) {
 	exit;
 }
 
-const SYNCHY_VERSION = '0.7.58';
+const SYNCHY_VERSION = '0.7.59';
 const SYNCHY_SLUG = 'synchy';
 const SYNCHY_EXPORT_OPTIONS = 'synchy_export_options';
 const SYNCHY_LAST_EXPORT_OPTION = 'synchy_last_export';
@@ -9451,7 +9451,7 @@ function synchy_render_incremental_site_sync_page(array $current): void
 										</div>
 										<div>
 											<span class="synchy-export-meta__label"><?php esc_html_e('Local plugin version', 'synchy'); ?></span>
-											<strong><?php echo esc_html(synchy_get_display_version()); ?></strong>
+											<strong><?php echo esc_html(SYNCHY_VERSION); ?></strong>
 										</div>
 										<div>
 											<span class="synchy-export-meta__label"><?php esc_html_e('Plugin version', 'synchy'); ?></span>
@@ -10307,7 +10307,8 @@ add_action('rest_api_init', function (): void {
 					[
 						'name' => get_bloginfo('name'),
 						'siteUrl' => home_url('/'),
-						'pluginVersion' => synchy_get_display_version(),
+						'pluginVersion' => SYNCHY_VERSION,
+						'sentinelVersion' => defined('FREESIEM_SENTINEL_VERSION') ? FREESIEM_SENTINEL_VERSION : '',
 						'wordpressVersion' => get_bloginfo('version'),
 						'authenticatedAs' => $user instanceof WP_User ? (string) $user->user_login : '',
 						'receiverMode' => 'root_installer_package_upload',
@@ -10374,7 +10375,8 @@ add_action('rest_api_init', function (): void {
 					return rest_ensure_response([
 						'success' => true,
 						'message' => __('Synchy updated the destination plugin files successfully.', 'synchy'),
-						'pluginVersion' => synchy_get_display_version(),
+						'pluginVersion' => SYNCHY_VERSION,
+						'sentinelVersion' => defined('FREESIEM_SENTINEL_VERSION') ? FREESIEM_SENTINEL_VERSION : '',
 					]);
 				} finally {
 					if (is_dir($temp_dir)) {
@@ -10654,7 +10656,7 @@ add_action('admin_enqueue_scripts', function (string $hook_suffix): void {
 			[
 				'ajaxUrl' => admin_url('admin-ajax.php'),
 				'nonce' => wp_create_nonce('synchy_sync_ajax'),
-				'localPluginVersion' => synchy_get_display_version(),
+				'localPluginVersion' => SYNCHY_VERSION,
 				'currentJob' => synchy_build_sync_job_response(synchy_get_visible_sync_job()),
 				'connectionState' => synchy_get_current_sync_connection_state(synchy_get_site_sync_options()),
 				'defaultStages' => synchy_get_sync_stage_items([]),
