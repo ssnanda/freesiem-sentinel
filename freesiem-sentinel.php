@@ -3,7 +3,7 @@
  * Plugin Name: freeSIEM Sentinel
  * Plugin URI: https://github.com/ssnanda/freesiem-sentinel
  * Description: Connects a WordPress site to freeSIEM Core for verification, local scanning, secure result uploads, command handling, and summary reporting.
- * Version: 0.3.31
+ * Version: 0.3.32
  * Update URI: https://github.com/ssnanda/freesiem-sentinel
  * Author: freesiem.com
  * Text Domain: freesiem-sentinel
@@ -13,10 +13,14 @@ if (!defined('ABSPATH')) {
 	exit;
 }
 
-define('FREESIEM_SENTINEL_VERSION', '0.3.31');
+define('FREESIEM_SENTINEL_VERSION', '0.3.32');
 define('FREESIEM_SENTINEL_SLUG', 'freesiem-sentinel');
 define('FREESIEM_SENTINEL_SYNCHY_PAGE', 'freesiem-synchy');
 define('FREESIEM_SENTINEL_OPTION', 'freesiem_sentinel_settings');
+define('FREESIEM_SENTINEL_INSTALL_UUID_OPTION', 'freesiem_sentinel_install_uuid');
+define('FREESIEM_SENTINEL_INSTALL_BASE_VERSION_OPTION', 'freesiem_sentinel_install_base_version');
+define('FREESIEM_SENTINEL_INSTALL_BASE_LAST_HEARTBEAT_OPTION', 'freesiem_sentinel_install_base_last_heartbeat');
+define('FREESIEM_SENTINEL_INSTALL_BASE_LAST_EVENT_OPTION', 'freesiem_sentinel_install_base_last_event');
 define('FREESIEM_SENTINEL_SSL_SETTINGS_OPTION', 'freesiem_sentinel_ssl_settings');
 define('FREESIEM_SENTINEL_SSL_PREFLIGHT_OPTION', 'freesiem_sentinel_ssl_preflight');
 define('FREESIEM_SENTINEL_SSL_DRY_RUN_OPTION', 'freesiem_sentinel_ssl_dry_run');
@@ -51,6 +55,7 @@ require_once FREESIEM_SENTINEL_PLUGIN_DIR . 'includes/class-api-client.php';
 require_once FREESIEM_SENTINEL_PLUGIN_DIR . 'includes/class-cloud-connect-state.php';
 require_once FREESIEM_SENTINEL_PLUGIN_DIR . 'includes/class-cloud-connect-signer.php';
 require_once FREESIEM_SENTINEL_PLUGIN_DIR . 'includes/class-cloud-connect-client.php';
+require_once FREESIEM_SENTINEL_PLUGIN_DIR . 'includes/class-install-base-dial-home.php';
 require_once FREESIEM_SENTINEL_PLUGIN_DIR . 'includes/class-pending-tasks.php';
 require_once FREESIEM_SENTINEL_PLUGIN_DIR . 'includes/class-tfa-service.php';
 require_once FREESIEM_SENTINEL_PLUGIN_DIR . 'includes/class-tfa-auth.php';

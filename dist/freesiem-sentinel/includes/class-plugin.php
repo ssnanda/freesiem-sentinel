@@ -16,6 +16,7 @@ class Freesiem_Plugin
 	private Freesiem_Updater $updater;
 	private Freesiem_Admin $admin;
 	private Freesiem_Cloud_Connect_Client $cloud_connect_client;
+	private Freesiem_Install_Base_Dial_Home $install_base_dial_home;
 	private Freesiem_Pending_Tasks $pending_tasks;
 	private Freesiem_TFA_Service $tfa_service;
 	private Freesiem_TFA_Auth $tfa_auth;
@@ -37,6 +38,7 @@ class Freesiem_Plugin
 		$this->bootstrap_settings();
 		$this->api_client = new Freesiem_API_Client();
 		$this->cloud_connect_client = new Freesiem_Cloud_Connect_Client();
+		$this->install_base_dial_home = new Freesiem_Install_Base_Dial_Home();
 		$this->scanner = new Freesiem_Scanner();
 		$this->results = new Freesiem_Results();
 		$this->updater = new Freesiem_Updater();
@@ -58,6 +60,7 @@ class Freesiem_Plugin
 		$this->pending_tasks->register();
 		$this->tfa_auth->register();
 		$this->tfa_remote->register();
+		add_action('init', [$this, 'maybe_send_install_base_upgrade_event']);
 	}
 
 	public static function activate(): void
@@ -69,6 +72,7 @@ class Freesiem_Plugin
 		$instance->ensure_plugin_uuid();
 		add_filter('cron_schedules', [$instance->cron, 'register_schedule']);
 		Freesiem_Cron::schedule_events();
+		$instance->send_install_base_event('activation');
 	}
 
 	public static function deactivate(): void
@@ -743,6 +747,21 @@ class Freesiem_Plugin
 		if (!empty($settings['site_id']) && !empty($settings['api_key']) && !empty($settings['hmac_secret'])) {
 			$this->perform_heartbeat();
 		}
+	}
+
+	public function maybe_send_install_base_upgrade_event(): void
+	{
+		$this->install_base_dial_home->maybe_send_upgrade();
+	}
+
+	public function send_install_base_event(string $event)
+	{
+		return $this->install_base_dial_home->send($event);
+	}
+
+	public function send_install_base_heartbeat(): void
+	{
+		$this->install_base_dial_home->heartbeat();
 	}
 
 	private function derive_scan_modules(array $scan_profile): array

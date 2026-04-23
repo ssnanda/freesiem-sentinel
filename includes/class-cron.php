@@ -11,6 +11,7 @@ class Freesiem_Cron
 	public const SYNC_HOOK = 'freesiem_sentinel_sync_results';
 	public const TASK_PROCESS_HOOK = 'freesiem_sentinel_process_pending_tasks';
 	public const TASK_HEARTBEAT_HOOK = 'freesiem_sentinel_task_priority_heartbeat';
+	public const INSTALL_BASE_HEARTBEAT_HOOK = 'freesiem_sentinel_install_base_heartbeat';
 
 	private Freesiem_Plugin $plugin;
 
@@ -26,6 +27,7 @@ class Freesiem_Cron
 		add_action(self::LOCAL_SCAN_HOOK, [$this, 'local_scan']);
 		add_action(self::SYNC_HOOK, [$this, 'sync_results']);
 		add_action(self::TASK_PROCESS_HOOK, [$this, 'process_pending_tasks']);
+		add_action(self::INSTALL_BASE_HEARTBEAT_HOOK, [$this, 'install_base_heartbeat']);
 	}
 
 	public function register_schedule(array $schedules): array
@@ -59,6 +61,10 @@ class Freesiem_Cron
 		if (!wp_next_scheduled(self::TASK_PROCESS_HOOK)) {
 			wp_schedule_event(time() + MINUTE_IN_SECONDS, 'freesiem_sentinel_every_minute', self::TASK_PROCESS_HOOK);
 		}
+
+		if (!wp_next_scheduled(self::INSTALL_BASE_HEARTBEAT_HOOK)) {
+			wp_schedule_event(time() + (15 * MINUTE_IN_SECONDS), 'hourly', self::INSTALL_BASE_HEARTBEAT_HOOK);
+		}
 	}
 
 	public static function clear_events(): void
@@ -68,6 +74,7 @@ class Freesiem_Cron
 		wp_clear_scheduled_hook(self::SYNC_HOOK);
 		wp_clear_scheduled_hook(self::TASK_PROCESS_HOOK);
 		wp_clear_scheduled_hook(self::TASK_HEARTBEAT_HOOK);
+		wp_clear_scheduled_hook(self::INSTALL_BASE_HEARTBEAT_HOOK);
 	}
 
 	public function heartbeat(): void
@@ -88,5 +95,10 @@ class Freesiem_Cron
 	public function process_pending_tasks(): void
 	{
 		$this->plugin->get_pending_tasks()->process_due_tasks();
+	}
+
+	public function install_base_heartbeat(): void
+	{
+		$this->plugin->send_install_base_heartbeat();
 	}
 }

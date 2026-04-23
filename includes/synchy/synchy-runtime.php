@@ -3,7 +3,7 @@
  * Plugin Name: Backup & Restore
  * Plugin URI: https://github.com/ssnanda/synchy
  * Description: Backup, restore, upload-to-live, and sync tooling bundled with freeSIEM Sentinel.
- * Version: 0.3.31
+ * Version: 0.3.32
  * Update URI: https://github.com/ssnanda/synchy
  * Author: sandman
  */
@@ -13,7 +13,7 @@ if (!defined('ABSPATH')) {
 }
 
 if (!defined('SYNCHY_VERSION')) {
-	define('SYNCHY_VERSION', defined('FREESIEM_SENTINEL_VERSION') ? FREESIEM_SENTINEL_VERSION : '0.3.31');
+	define('SYNCHY_VERSION', defined('FREESIEM_SENTINEL_VERSION') ? FREESIEM_SENTINEL_VERSION : '0.3.32');
 }
 const SYNCHY_SLUG = 'synchy';
 const SYNCHY_EXPORT_OPTIONS = 'synchy_export_options';
