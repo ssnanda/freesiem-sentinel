@@ -3,7 +3,7 @@ Contributors: freesiem
 Requires at least: 6.4
 Tested up to: 6.8
 Requires PHP: 8.1
-Stable tag: 0.3.17
+Stable tag: 0.3.28
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -70,6 +70,31 @@ Version bumps should always have matching git tags.
 GitHub Actions publishes the ZIP automatically when a `v*` tag is pushed.
 
 == Changelog ==
+
+= 0.3.28 =
+
+* Replace local development media URLs during Synchy Sync and restore so DDEV/local aliases do not survive pushes to live sites
+* Preserve serialized WordPress content while normalizing local-origin URLs to the destination site URL
+
+= 0.3.27 =
+
+* Improve Synchy full sync reliability and release packaging
+
+= 0.3.20 =
+
+* Harden Stealth Mode login and wp-admin enforcement, including safer token handling and preserved redirect flows
+* Add Stealth Mode visibility in logs and the Stealth Mode admin page
+* Expose Stealth Mode status to freeSIEM Core and add narrow signed Core commands for Stealth Mode management
+
+= 0.3.19 =
+
+* Add a wp-config.php stealth-mode recovery override so normal WordPress login behavior can be restored without changing saved settings
+* Show the effective stealth status and recovery snippet on the Stealth Mode admin page
+
+= 0.3.18 =
+
+* Preserve the stealth login token on wp-login form submits so protected logins redirect to the requested admin page instead of home
+* Avoid PHP 8.1+ admin-menu deprecation notices by registering hidden Sentinel pages without passing null parent slugs
 
 = 0.3.17 =
 

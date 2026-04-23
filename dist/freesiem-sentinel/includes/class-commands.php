@@ -27,6 +27,7 @@ class Freesiem_Commands
 			$payload = is_array($command['payload'] ?? null) ? $command['payload'] : [];
 
 			if (!$this->is_allowed_command_type($type)) {
+				$this->log_stealth_command_rejection($command_id, $type, __('Rejected unsupported Stealth Mode command.', 'freesiem-sentinel'));
 				continue;
 			}
 
@@ -109,6 +110,22 @@ class Freesiem_Commands
 					$response['result'] = is_wp_error($updated) ? [] : (is_array($updated) ? $updated : []);
 					break;
 
+				case 'enable_stealth_mode':
+				case 'disable_stealth_mode':
+				case 'update_stealth_mode_slug':
+				case 'enable_stealth_direct_login_block':
+				case 'disable_stealth_direct_login_block':
+				case 'enable_stealth_admin_redirect':
+				case 'disable_stealth_admin_redirect':
+					$updated = $this->plugin->apply_remote_stealth_mode_command($type, $payload);
+					$response['status'] = is_wp_error($updated) ? 'failed' : 'completed';
+					$response['message'] = is_wp_error($updated) ? $updated->get_error_message() : __('Stealth Mode settings updated.', 'freesiem-sentinel');
+					$response['result'] = is_wp_error($updated) ? [] : (is_array($updated) ? $updated : []);
+					if (is_wp_error($updated)) {
+						$this->log_stealth_command_rejection($command_id, $type, $updated->get_error_message());
+					}
+					break;
+
 				default:
 					return [];
 					break;
@@ -122,17 +139,19 @@ class Freesiem_Commands
 
 	private function is_allowed_command_type(string $type): bool
 	{
-		switch ($type) {
-			case 'run_local_scan':
-			case 'sync_results':
-			case 'request_remote_scan':
-			case 'send_inventory':
-			case 'reconnect':
-			case 'refresh_update_check':
-			case 'update_settings':
-				return true;
-			default:
-				return false;
+		return in_array($type, freesiem_sentinel_get_allowed_command_types(), true);
+	}
+
+	private function log_stealth_command_rejection(string $command_id, string $type, string $message): void
+	{
+		if (!str_contains($type, 'stealth')) {
+			return;
 		}
+
+		freesiem_sentinel_log_event('stealth_command_rejected', __('A Stealth Mode command was rejected.', 'freesiem-sentinel'), '', '', [
+			'command_id' => sanitize_text_field($command_id),
+			'command_type' => sanitize_key($type),
+			'reason' => sanitize_text_field($message),
+		]);
 	}
 }
