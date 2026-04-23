@@ -86,7 +86,7 @@ class Freesiem_Admin
 		add_submenu_page('freesiem-portal', __('TFA (2FA)', 'freesiem-sentinel'), __('TFA (2FA)', 'freesiem-sentinel'), 'manage_options', 'freesiem-tfa', [$this, 'render_tfa_page']);
 		add_submenu_page('freesiem-portal', __('Login Protection', 'freesiem-sentinel'), __('Login Protection', 'freesiem-sentinel'), 'manage_options', 'freesiem-login-protection', [$this, 'render_login_protection_page']);
 		add_submenu_page('freesiem-portal', __('Stealth Mode', 'freesiem-sentinel'), __('Stealth Mode', 'freesiem-sentinel'), 'manage_options', 'freesiem-stealth-mode', [$this, 'render_stealth_mode_page']);
-		add_submenu_page('freesiem-portal', __('Synchy', 'freesiem-sentinel'), __('Synchy', 'freesiem-sentinel'), 'manage_options', FREESIEM_SENTINEL_SYNCHY_PAGE, [$this, 'render_synchy_page']);
+		add_submenu_page('freesiem-portal', __('Backup & Restore', 'freesiem-sentinel'), __('Backup & Restore', 'freesiem-sentinel'), 'manage_options', FREESIEM_SENTINEL_SYNCHY_PAGE, [$this, 'render_synchy_page']);
 		add_submenu_page('freesiem-portal', __('Logs', 'freesiem-sentinel'), __('Logs', 'freesiem-sentinel'), 'manage_options', 'freesiem-logs', [$this, 'render_logs_page']);
 		add_submenu_page('freesiem-portal', __('Pending Tasks', 'freesiem-sentinel'), __('Pending Tasks', 'freesiem-sentinel'), 'read', 'freesiem-pending-tasks', [$this, 'render_pending_tasks_page']);
 		add_submenu_page('freesiem-portal', __('About', 'freesiem-sentinel'), __('About', 'freesiem-sentinel'), 'manage_options', 'freesiem-about', [$this, 'render_about_page']);
@@ -175,7 +175,7 @@ class Freesiem_Admin
 							'connectionReady' => __('Connection ready', 'synchy'),
 							'connectionError' => __('Connection failed', 'synchy'),
 							'pushAction' => __('Upload to Live', 'synchy'),
-							'unknownError' => __('Synchy hit an unexpected live push error.', 'synchy'),
+							'unknownError' => __('Backup & Restore hit an unexpected live push error.', 'synchy'),
 						],
 					]
 				);
@@ -254,7 +254,7 @@ class Freesiem_Admin
 							'never' => __('Never', 'synchy'),
 							'na' => __('N/A', 'synchy'),
 							'previewDefault' => __('Run Preview Changes to review changed files and database rows before syncing.', 'synchy'),
-							'unknownError' => __('Synchy hit an unexpected Sync error.', 'synchy'),
+							'unknownError' => __('Backup & Restore hit an unexpected Sync error.', 'synchy'),
 							'confirmSync' => __('Sync the previewed changes to the destination site now?', 'synchy'),
 							'confirmFullSync' => __('Run a full Sync for the selected scopes and send all tracked files and rows to the destination site now?', 'synchy'),
 							'confirmResumeSync' => __('Resume the remaining full Sync batches now?', 'synchy'),
@@ -297,12 +297,12 @@ class Freesiem_Admin
 					'defaultStages' => synchy_get_export_stage_items([]),
 					'strings' => [
 						'filesProcessed' => __('Files processed:', 'synchy'),
-						'unknownError' => __('Synchy hit an unexpected error while exporting.', 'synchy'),
+						'unknownError' => __('Backup & Restore hit an unexpected error while exporting.', 'synchy'),
 						'preparingLabel' => __('Preparing', 'synchy'),
 						'startingExport' => __('Starting export job...', 'synchy'),
 						'errorPhaseLabel' => __('Error', 'synchy'),
-						'completeTitle' => __('Synchy export complete', 'synchy'),
-						'errorTitle' => __('Synchy export needs attention', 'synchy'),
+						'completeTitle' => __('Backup complete', 'synchy'),
+						'errorTitle' => __('Backup needs attention', 'synchy'),
 					],
 				]
 			);
@@ -1213,8 +1213,8 @@ class Freesiem_Admin
 
 		if (!function_exists('synchy_render_page')) {
 			echo '<div class="wrap">';
-			echo '<h1>' . esc_html__('Synchy', 'freesiem-sentinel') . '</h1>';
-			echo '<p>' . esc_html__('The bundled Synchy runtime is not available.', 'freesiem-sentinel') . '</p>';
+			echo '<h1>' . esc_html__('Backup & Restore', 'freesiem-sentinel') . '</h1>';
+			echo '<p>' . esc_html__('The bundled Backup & Restore runtime is not available.', 'freesiem-sentinel') . '</p>';
 			echo '</div>';
 			return;
 		}
@@ -1223,8 +1223,8 @@ class Freesiem_Admin
 		$tabs = $this->get_synchy_tabs();
 
 		echo '<div class="wrap">';
-		echo '<h1>' . esc_html__('Synchy', 'freesiem-sentinel') . '</h1>';
-		echo '<p>' . esc_html(sprintf(__('Synchy capabilities are included in freeSIEM Sentinel v%s and are managed from this single submenu page.', 'freesiem-sentinel'), FREESIEM_SENTINEL_VERSION)) . '</p>';
+		echo '<h1>' . esc_html__('Backup & Restore', 'freesiem-sentinel') . '</h1>';
+		echo '<p>' . esc_html(sprintf(__('Backup, restore, upload-to-live, and sync capabilities are included in freeSIEM Sentinel v%s.', 'freesiem-sentinel'), FREESIEM_SENTINEL_VERSION)) . '</p>';
 		echo '<h2 class="nav-tab-wrapper" style="margin-bottom:16px;">';
 		foreach ($tabs as $tab => $config) {
 			$url = add_query_arg(
@@ -1898,8 +1898,8 @@ class Freesiem_Admin
 
 		echo '<div style="background:#fff;padding:20px;border:1px solid #dcdcde;border-radius:12px;margin-top:20px;">';
 		echo '<h2 style="margin-top:0;">' . esc_html__('Included Capabilities', 'freesiem-sentinel') . '</h2>';
-		echo '<p>' . esc_html__('freeSIEM Sentinel now includes the Synchy backup, import, upload-to-live, sync, and related admin workflows under the single freeSIEM menu.', 'freesiem-sentinel') . '</p>';
-		echo '<p><a class="button button-secondary" href="' . esc_url(freesiem_sentinel_admin_page_url(FREESIEM_SENTINEL_SYNCHY_PAGE)) . '">' . esc_html__('Open Synchy', 'freesiem-sentinel') . '</a></p>';
+		echo '<p>' . esc_html__('freeSIEM Sentinel includes backup, restore, import, upload-to-live, sync, and related site-management workflows under the single freeSIEM menu.', 'freesiem-sentinel') . '</p>';
+		echo '<p><a class="button button-secondary" href="' . esc_url(freesiem_sentinel_admin_page_url(FREESIEM_SENTINEL_SYNCHY_PAGE)) . '">' . esc_html__('Open Backup & Restore', 'freesiem-sentinel') . '</a></p>';
 		echo '</div>';
 
 		echo '<div style="background:#fff;padding:20px;border:1px solid #dcdcde;border-radius:12px;margin-top:20px;">';

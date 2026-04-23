@@ -402,7 +402,7 @@
 	testButton.addEventListener("click", async () => {
 		try {
 			testButton.disabled = true;
-			renderConnectionResult({ message: "Testing the destination Synchy receiver..." }, false);
+			renderConnectionResult({ message: "Testing the destination Backup & Restore receiver..." }, false);
 			const data = await request({
 				...serializeSyncOptions(),
 				action: "synchy_test_site_sync_connection",

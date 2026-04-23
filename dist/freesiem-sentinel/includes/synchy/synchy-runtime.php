@@ -1,9 +1,9 @@
 <?php
 /**
- * Plugin Name: Synchy
+ * Plugin Name: Backup & Restore
  * Plugin URI: https://github.com/ssnanda/synchy
- * Description: Starter admin shell for Synchy backup, restore, schedule, and sync tooling.
- * Version: 0.3.30
+ * Description: Backup, restore, upload-to-live, and sync tooling bundled with freeSIEM Sentinel.
+ * Version: 0.3.31
  * Update URI: https://github.com/ssnanda/synchy
  * Author: sandman
  */
@@ -13,7 +13,7 @@ if (!defined('ABSPATH')) {
 }
 
 if (!defined('SYNCHY_VERSION')) {
-	define('SYNCHY_VERSION', defined('FREESIEM_SENTINEL_VERSION') ? FREESIEM_SENTINEL_VERSION : '0.3.30');
+	define('SYNCHY_VERSION', defined('FREESIEM_SENTINEL_VERSION') ? FREESIEM_SENTINEL_VERSION : '0.3.31');
 }
 const SYNCHY_SLUG = 'synchy';
 const SYNCHY_EXPORT_OPTIONS = 'synchy_export_options';
@@ -137,7 +137,7 @@ function synchy_get_github_release_data(bool $force = false)
 	$config = synchy_get_github_update_config();
 
 	if (empty($config['enabled'])) {
-		return new WP_Error('synchy_github_updates_disabled', __('GitHub updates are not configured for Synchy.', 'synchy'));
+		return new WP_Error('synchy_github_updates_disabled', __('GitHub updates are not configured for Backup & Restore.', 'synchy'));
 	}
 
 	$cache_key = synchy_get_github_release_cache_key($config);
@@ -156,7 +156,7 @@ function synchy_get_github_release_data(bool $force = false)
 			'timeout' => 20,
 			'headers' => [
 				'Accept' => 'application/vnd.github+json',
-				'User-Agent' => 'Synchy/' . SYNCHY_VERSION . '; ' . wp_parse_url(home_url('/'), PHP_URL_HOST),
+				'User-Agent' => 'BackupRestore/' . SYNCHY_VERSION . '; ' . wp_parse_url(home_url('/'), PHP_URL_HOST),
 			],
 		]
 	);
@@ -170,21 +170,21 @@ function synchy_get_github_release_data(bool $force = false)
 	$release = json_decode($body, true);
 
 	if ($code < 200 || $code >= 300 || !is_array($release)) {
-		return new WP_Error('synchy_github_release_request_failed', __('Synchy could not read the latest GitHub release metadata.', 'synchy'));
+		return new WP_Error('synchy_github_release_request_failed', __('Backup & Restore could not read the latest GitHub release metadata.', 'synchy'));
 	}
 
 	$version = ltrim((string) ($release['tag_name'] ?? ''), 'vV');
 	$package_url = synchy_find_github_release_asset_url($release, (string) $config['asset_name']);
 
 	if ($version === '' || $package_url === '') {
-		return new WP_Error('synchy_github_release_invalid', __('Synchy could not find a valid version tag and zip asset in the latest GitHub release.', 'synchy'));
+		return new WP_Error('synchy_github_release_invalid', __('Backup & Restore could not find a valid version tag and zip asset in the latest GitHub release.', 'synchy'));
 	}
 
 	$data = [
 		'version' => $version,
 		'package_url' => $package_url,
 		'html_url' => (string) ($release['html_url'] ?? $config['html_url']),
-		'name' => (string) ($release['name'] ?? 'Synchy'),
+		'name' => (string) ($release['name'] ?? 'Backup & Restore'),
 		'body' => (string) ($release['body'] ?? ''),
 		'published_at' => (string) ($release['published_at'] ?? ''),
 		'repository_url' => (string) $config['html_url'],
@@ -199,10 +199,10 @@ function synchy_get_github_release_sections(array $release): array
 {
 	$repository_url = !empty($release['repository_url']) ? esc_url($release['repository_url']) : '';
 	$description = $repository_url === ''
-		? '<p>' . esc_html__('Synchy updates are served from a public GitHub release feed.', 'synchy') . '</p>'
+		? '<p>' . esc_html__('Sentinel updates are served from a public GitHub release feed.', 'synchy') . '</p>'
 		: '<p>' . sprintf(
 			/* translators: %s: GitHub repository URL */
-			esc_html__('Synchy updates are served from %s.', 'synchy'),
+			esc_html__('Sentinel updates are served from %s.', 'synchy'),
 			'<a href="' . $repository_url . '" target="_blank" rel="noopener noreferrer">' . esc_html($repository_url) . '</a>'
 		) . '</p>';
 	$changelog_body = trim((string) ($release['body'] ?? ''));
@@ -257,7 +257,7 @@ function synchy_refresh_plugin_update_state()
 	$config = synchy_get_github_update_config();
 
 	if (empty($config['enabled'])) {
-		return new WP_Error('synchy_github_updates_disabled', __('GitHub updates are not configured for Synchy.', 'synchy'));
+		return new WP_Error('synchy_github_updates_disabled', __('GitHub updates are not configured for Backup & Restore.', 'synchy'));
 	}
 
 	synchy_clear_github_update_cache();
@@ -362,10 +362,10 @@ add_filter('plugins_api', function ($result, string $action, $args) {
 	$sections = synchy_get_github_release_sections($release);
 
 	return (object) [
-		'name' => 'Synchy',
+		'name' => 'Backup & Restore',
 		'slug' => synchy_get_plugin_slug(),
 		'version' => (string) ($release['version'] ?? SYNCHY_VERSION),
-		'author' => '<a href="https://github.com/' . esc_attr(str_replace('https://github.com/', '', (string) ($release['repository_url'] ?? ''))) . '">Synchy</a>',
+		'author' => '<a href="https://github.com/' . esc_attr(str_replace('https://github.com/', '', (string) ($release['repository_url'] ?? ''))) . '">freeSIEM Sentinel</a>',
 		'author_profile' => (string) ($release['repository_url'] ?? ''),
 		'homepage' => (string) ($release['html_url'] ?? $release['repository_url'] ?? ''),
 		'download_link' => (string) ($release['package_url'] ?? ''),
@@ -405,7 +405,7 @@ add_filter('plugin_action_links_' . plugin_basename(__FILE__), function (array $
 
 add_action('admin_post_synchy_check_updates', function (): void {
 	if (!current_user_can('manage_options')) {
-		wp_die(esc_html__('You are not allowed to check Synchy updates.', 'synchy'));
+		wp_die(esc_html__('You are not allowed to check Sentinel updates.', 'synchy'));
 	}
 
 	check_admin_referer('synchy_check_updates');
@@ -429,7 +429,7 @@ add_action('admin_post_synchy_check_updates', function (): void {
 			'success',
 			sprintf(
 				/* translators: %s: latest release version */
-				__('Synchy found a newer GitHub release: v%s. You can update from Plugins or the About page.', 'synchy'),
+				__('Sentinel found a newer GitHub release: v%s. You can update from Plugins or the About page.', 'synchy'),
 				$latest_version
 			)
 		);
@@ -438,12 +438,12 @@ add_action('admin_post_synchy_check_updates', function (): void {
 			'success',
 			sprintf(
 				/* translators: %s: current plugin version */
-				__('Synchy is already on the latest GitHub release (v%s).', 'synchy'),
+				__('Sentinel is already on the latest GitHub release (v%s).', 'synchy'),
 				SYNCHY_VERSION
 			)
 		);
 	} else {
-		synchy_set_notice('success', __('Synchy checked GitHub successfully, but the latest release version could not be determined.', 'synchy'));
+		synchy_set_notice('success', __('Sentinel checked GitHub successfully, but the latest release version could not be determined.', 'synchy'));
 	}
 
 	wp_safe_redirect($redirect_to);
@@ -457,8 +457,8 @@ function synchy_get_pages(): array
 			'slug' => SYNCHY_SLUG,
 			'title' => __('Overview', 'synchy'),
 			'menu_title' => __('Overview', 'synchy'),
-			'headline' => __('Synchy', 'synchy'),
-			'description' => __('WordPress backup and site sync tools, starting with a clean admin foundation.', 'synchy'),
+			'headline' => __('Backup & Restore', 'synchy'),
+			'description' => __('WordPress backup, restore, upload-to-live, and sync tools bundled with freeSIEM Sentinel.', 'synchy'),
 		],
 		[
 			'slug' => 'synchy-export',
@@ -472,7 +472,7 @@ function synchy_get_pages(): array
 			'title' => __('Import', 'synchy'),
 			'menu_title' => __('Import', 'synchy'),
 			'headline' => __('Import', 'synchy'),
-			'description' => __('Restore a site from a Synchy package and safely replace the current install.', 'synchy'),
+			'description' => __('Restore a site from a Backup & Restore package and safely replace the current install.', 'synchy'),
 		],
 		[
 			'slug' => 'synchy-scheduled-backups',
@@ -486,7 +486,7 @@ function synchy_get_pages(): array
 			'title' => __('Upload to Live', 'synchy'),
 			'menu_title' => __('Upload to Live', 'synchy'),
 			'headline' => __('Upload to Live', 'synchy'),
-			'description' => __('Upload a full Synchy backup package to another WordPress site and launch the manual restore there.', 'synchy'),
+			'description' => __('Upload a full Backup & Restore package to another WordPress site and launch the manual restore there.', 'synchy'),
 		],
 			[
 				'slug' => 'synchy-site-sync',
@@ -695,7 +695,7 @@ function synchy_get_sync_scope_definitions(): array
 			'type' => 'db',
 			'group' => 'database',
 			'label' => __('Options', 'synchy'),
-			'description' => __('Selected WordPress options, excluding Synchy and transient data.', 'synchy'),
+			'description' => __('Selected WordPress options, excluding Backup & Restore and transient data.', 'synchy'),
 		],
 		'db_taxonomies' => [
 			'option_key' => 'sync_scope_db_taxonomies',
@@ -796,7 +796,7 @@ function synchy_get_sync_scope_tracked_items(string $scope_id): array
 			$wpdb->postmeta,
 		],
 		'db_options' => [
-			$wpdb->options . ' (' . __('excluding transients and Synchy state', 'synchy') . ')',
+			$wpdb->options . ' (' . __('excluding transients and Backup & Restore state', 'synchy') . ')',
 		],
 		'db_taxonomies' => [
 			$wpdb->terms,
@@ -2574,7 +2574,7 @@ function synchy_build_sync_upsert_statements(string $table, array $rows, array $
 
 function synchy_write_sync_sql_file(array $tables, string $path)
 {
-	$sql = "-- Synchy Sync Delta\n";
+	$sql = "-- Backup & Restore Sync Delta\n";
 	$sql .= '-- Generated at ' . gmdate('c') . "\n\n";
 
 	foreach ($tables as $table => $data) {
@@ -2617,7 +2617,7 @@ function synchy_build_sync_manifest(array $file_delta, array $db_delta, int $syn
 	}
 
 	return [
-		'plugin' => 'Synchy',
+		'plugin' => 'Backup & Restore',
 		'pluginVersion' => synchy_get_display_version(),
 		'mode' => (string) ($db_delta['mode'] ?? $file_delta['mode'] ?? 'delta'),
 		'syncedAt' => $sync_time,
@@ -4661,7 +4661,7 @@ function synchy_get_site_sync_stage_definitions(): array
 		],
 		'exporting_package' => [
 			'label' => __('Build Package', 'synchy'),
-			'description' => __('Run the full Synchy export that produces the zip and installer.', 'synchy'),
+			'description' => __('Run the full Backup & Restore export that produces the zip and installer.', 'synchy'),
 		],
 		'starting_remote_session' => [
 			'label' => __('Open Destination Session', 'synchy'),
@@ -4669,7 +4669,7 @@ function synchy_get_site_sync_stage_definitions(): array
 		],
 		'uploading_archive' => [
 			'label' => __('Upload Archive', 'synchy'),
-			'description' => __('Transfer the main Synchy zip archive to the destination.', 'synchy'),
+			'description' => __('Transfer the main Backup & Restore zip archive to the destination.', 'synchy'),
 		],
 		'uploading_installer' => [
 			'label' => __('Upload Installer', 'synchy'),
@@ -5260,7 +5260,7 @@ function synchy_test_site_sync_connection(array $options)
 	}
 
 	if (empty($response['siteUrl']) || empty($response['pluginVersion'])) {
-		return new WP_Error('synchy_site_sync_invalid_ping', __('The destination site responded, but it did not look like a Synchy receiver.', 'synchy'));
+		return new WP_Error('synchy_site_sync_invalid_ping', __('The destination site responded, but it did not look like a Backup & Restore receiver.', 'synchy'));
 	}
 
 	return $response;
@@ -7444,7 +7444,7 @@ function synchy_render_import_page(array $current): void
 							<label class="synchy-label" for="synchy-import-installer"><?php esc_html_e('installer.php (Required)', 'synchy'); ?></label>
 							<input id="synchy-import-installer" type="file" name="synchy_import_installer" accept=".php,application/x-httpd-php,text/x-php" required />
 							<p class="synchy-field-note">
-								<?php esc_html_e('Choose installer.php from the same Synchy export package. Synchy stages it as installer.php and tries to place it in the WordPress root first.', 'synchy'); ?>
+							<?php esc_html_e('Choose installer.php from the same Backup & Restore export package. Backup & Restore stages it as installer.php and tries to place it in the WordPress root first.', 'synchy'); ?>
 							</p>
 						</div>
 
@@ -7993,7 +7993,7 @@ function synchy_start_site_sync_job(array $raw_options)
 		'job_id' => wp_generate_uuid4(),
 		'status' => 'running',
 		'phase' => 'testing_connection',
-		'message' => __('Testing the destination Synchy receiver.', 'synchy'),
+		'message' => __('Testing the destination Backup & Restore receiver.', 'synchy'),
 		'progress' => 2,
 		'created_at' => gmdate('c'),
 		'options' => $options,
@@ -8250,7 +8250,7 @@ function synchy_process_site_sync_job(array $job): array
 			$job['phase'] = 'complete';
 			$job['message'] = !empty($finalize['message'])
 				? (string) $finalize['message']
-				: __('Package delivered to the destination Synchy receiver.', 'synchy');
+				: __('Package delivered to the destination Backup & Restore receiver.', 'synchy');
 			$job['progress'] = 100;
 			$job['remote_package'] = $finalize;
 
@@ -8292,7 +8292,7 @@ function synchy_render_export_history(array $history, string $page_slug): void
 				<div>
 					<h2><?php esc_html_e('Available Export History', 'synchy'); ?></h2>
 					<p class="synchy-field-note">
-						<?php esc_html_e('Synchy lists every retained export package whose archive is still available on disk. Delete removes the package files from this site.', 'synchy'); ?>
+						<?php esc_html_e('Backup & Restore lists every retained export package whose archive is still available on disk. Delete removes the package files from this site.', 'synchy'); ?>
 					</p>
 				</div>
 				<span class="synchy-badge">
@@ -8307,7 +8307,7 @@ function synchy_render_export_history(array $history, string $page_slug): void
 			</div>
 
 			<?php if ($history === []) : ?>
-				<p class="synchy-field-note"><?php esc_html_e('No Synchy exports are currently available on this site.', 'synchy'); ?></p>
+				<p class="synchy-field-note"><?php esc_html_e('No Backup & Restore exports are currently available on this site.', 'synchy'); ?></p>
 			<?php else : ?>
 				<div class="synchy-history-list">
 					<?php foreach ($history as $entry) : ?>
@@ -8364,7 +8364,7 @@ function synchy_render_export_history(array $history, string $page_slug): void
 									<a
 										class="button button-link-delete"
 										href="<?php echo esc_url(synchy_get_delete_export_url($package_id, $page_slug)); ?>"
-										onclick="return confirm('<?php echo esc_js(__('Delete this Synchy export and remove its files from disk?', 'synchy')); ?>');"
+										onclick="return confirm('<?php echo esc_js(__('Delete this Backup & Restore export and remove its files from disk?', 'synchy')); ?>');"
 									>
 										<?php esc_html_e('Delete Export', 'synchy'); ?>
 									</a>
@@ -8510,7 +8510,7 @@ function synchy_render_dashboard_widget(): void
 		: synchy_format_dashboard_timestamp((string) ($latest_export['created_at'] ?? ''));
 
 	$latest_export_detail = $latest_export === []
-		? __('Create your first Synchy package from Export.', 'synchy')
+		? __('Create your first Backup & Restore package from Export.', 'synchy')
 		: sprintf(
 			/* translators: 1: archive size, 2: file count */
 			__('%1$s archive, %2$s files.', 'synchy'),
@@ -8522,7 +8522,7 @@ function synchy_render_dashboard_widget(): void
 		<div class="synchy-dashboard-widget__hero">
 			<div>
 				<p class="synchy-eyebrow"><?php esc_html_e('Backup Workflow', 'synchy'); ?></p>
-				<h3><?php esc_html_e('Synchy', 'synchy'); ?></h3>
+				<h3><?php esc_html_e('Backup & Restore', 'synchy'); ?></h3>
 			</div>
 			<span class="synchy-badge"><?php echo esc_html('v' . SYNCHY_VERSION); ?></span>
 		</div>
@@ -8563,7 +8563,7 @@ function synchy_render_dashboard_widget(): void
 		<div class="synchy-dashboard-widget__section">
 			<strong><?php esc_html_e('Current Activity', 'synchy'); ?></strong>
 			<?php if ($activity_items === []) : ?>
-				<p class="synchy-dashboard-widget__empty"><?php esc_html_e('No Synchy jobs are running right now.', 'synchy'); ?></p>
+				<p class="synchy-dashboard-widget__empty"><?php esc_html_e('No Backup & Restore jobs are running right now.', 'synchy'); ?></p>
 			<?php else : ?>
 				<div class="synchy-dashboard-widget__activities">
 					<?php foreach ($activity_items as $activity) : ?>
@@ -8589,7 +8589,7 @@ function synchy_render_dashboard_widget(): void
 				<a href="<?php echo esc_url(synchy_get_admin_page_url('synchy-export')); ?>"><?php esc_html_e('Open Export', 'synchy'); ?></a>
 			</div>
 			<?php if ($recent_exports === []) : ?>
-				<p class="synchy-dashboard-widget__empty"><?php esc_html_e('No Synchy export packages are available yet.', 'synchy'); ?></p>
+				<p class="synchy-dashboard-widget__empty"><?php esc_html_e('No Backup & Restore export packages are available yet.', 'synchy'); ?></p>
 			<?php else : ?>
 				<ul class="synchy-dashboard-widget__list">
 					<?php foreach ($recent_exports as $entry) : ?>
@@ -8950,12 +8950,12 @@ function synchy_render_site_sync_page(array $current): void
 						<p class="synchy-panel__eyebrow synchy-panel__eyebrow--danger"><?php esc_html_e('Not Ready Yet', 'synchy'); ?></p>
 						<h2><?php esc_html_e('Upload to Live is still a manual package-delivery workflow.', 'synchy'); ?></h2>
 						<p>
-							<?php esc_html_e('It is good for sending the full Synchy package and installer.php to the destination site. It is not yet a one-click live deployment or automatic remote restore.', 'synchy'); ?>
+							<?php esc_html_e('It is good for sending the full Backup & Restore package and installer.php to the destination site. It is not yet a one-click live deployment or automatic remote restore.', 'synchy'); ?>
 						</p>
 					</div>
 					<ul class="synchy-checklist">
 						<li><?php esc_html_e('Working now: save the destination connection, verify authentication, and confirm the destination receiver is reachable.', 'synchy'); ?></li>
-						<li><?php esc_html_e('Working now: build a fresh full-site package locally with the Synchy export engine.', 'synchy'); ?></li>
+						<li><?php esc_html_e('Working now: build a fresh full-site package locally with the Backup & Restore export engine.', 'synchy'); ?></li>
 						<li><?php esc_html_e('Working now: upload the archive and installer.php to the destination site in chunks.', 'synchy'); ?></li>
 						<li><?php esc_html_e('Working now: place installer.php and the package zip in the destination root when that root is writable by PHP.', 'synchy'); ?></li>
 						<li><?php esc_html_e('Still manual: open installer.php on the destination site and run the overwrite/restore yourself.', 'synchy'); ?></li>
@@ -9085,7 +9085,7 @@ function synchy_render_site_sync_page(array $current): void
 									<h2><?php esc_html_e('Destination Check', 'synchy'); ?></h2>
 									<span class="synchy-badge" data-synchy-site-sync-result-badge><?php esc_html_e('Pending', 'synchy'); ?></span>
 								</div>
-								<p class="synchy-field-note" data-synchy-site-sync-result-message><?php esc_html_e('Use Test Connection to verify the destination Synchy receiver.', 'synchy'); ?></p>
+								<p class="synchy-field-note" data-synchy-site-sync-result-message><?php esc_html_e('Use Test Connection to verify the destination Backup & Restore receiver.', 'synchy'); ?></p>
 								<div class="synchy-export-meta synchy-export-meta--wide" data-synchy-site-sync-result-meta></div>
 							</div>
 						</div>
@@ -9093,10 +9093,10 @@ function synchy_render_site_sync_page(array $current): void
 						<div class="synchy-panel">
 							<h2><?php esc_html_e('Destination Requirements', 'synchy'); ?></h2>
 							<ul class="synchy-checklist">
-								<li><?php esc_html_e('Synchy must be installed and active on the destination site.', 'synchy'); ?></li>
-								<li><?php esc_html_e('The destination user must be able to manage options so Synchy can verify and receive the push package.', 'synchy'); ?></li>
+								<li><?php esc_html_e('Backup & Restore must be available through freeSIEM Sentinel on the destination site.', 'synchy'); ?></li>
+								<li><?php esc_html_e('The destination user must be able to manage options so Backup & Restore can verify and receive the push package.', 'synchy'); ?></li>
 								<li><?php esc_html_e('Application Passwords should be created on the live site user profile and used here instead of the raw wp-admin password.', 'synchy'); ?></li>
-								<li><?php esc_html_e('If you want Synchy to place installer.php and the zip directly in the destination root, that WordPress root must be writable by PHP.', 'synchy'); ?></li>
+								<li><?php esc_html_e('If you want Backup & Restore to place installer.php and the zip directly in the destination root, that WordPress root must be writable by PHP.', 'synchy'); ?></li>
 							</ul>
 						</div>
 
@@ -9105,7 +9105,7 @@ function synchy_render_site_sync_page(array $current): void
 							<ul class="synchy-checklist">
 								<li><?php esc_html_e('This live-push build authenticates, packages, uploads, and deploys a standalone installer to the destination root when that root is writable.', 'synchy'); ?></li>
 								<li><?php esc_html_e('The actual overwrite is still a manual installer run on the destination. One-click remote apply is not connected yet.', 'synchy'); ?></li>
-								<li><?php esc_html_e('If the destination root is not writable, Synchy leaves the package in wp-content/uploads/synchy-site-sync and you must move the zip and installer.php manually.', 'synchy'); ?></li>
+								<li><?php esc_html_e('If the destination root is not writable, Backup & Restore leaves the package in wp-content/uploads/synchy-site-sync and you must move the zip and installer.php manually.', 'synchy'); ?></li>
 								<li><?php esc_html_e('HTTPS chunk uploads depend on the destination host accepting request bodies at your configured chunk size.', 'synchy'); ?></li>
 							</ul>
 						</div>
@@ -9121,19 +9121,19 @@ function synchy_render_site_sync_page(array $current): void
 						<ul class="synchy-checklist synchy-checklist--detail">
 							<li>
 								<strong><?php esc_html_e('Authenticates against the destination site', 'synchy'); ?></strong>
-								<span><?php esc_html_e('Synchy connects with the destination username and WordPress application password over the REST API.', 'synchy'); ?></span>
+								<span><?php esc_html_e('Backup & Restore connects with the destination username and WordPress application password over the REST API.', 'synchy'); ?></span>
 							</li>
 							<li>
 								<strong><?php esc_html_e('Builds a fresh full-site package locally', 'synchy'); ?></strong>
 								<span><?php esc_html_e('The same export engine powers this live push so you always send a complete package generated from the local site.', 'synchy'); ?></span>
 							</li>
 							<li>
-								<strong><?php esc_html_e('Uploads the package to the destination Synchy receiver', 'synchy'); ?></strong>
+								<strong><?php esc_html_e('Uploads the package to the destination Backup & Restore receiver', 'synchy'); ?></strong>
 								<span><?php esc_html_e('Archive and installer.php are transferred in chunks so large packages can move through normal HTTPS requests.', 'synchy'); ?></span>
 							</li>
 							<li>
 								<strong><?php esc_html_e('Deploys a manual restore installer to the destination root', 'synchy'); ?></strong>
-								<span><?php esc_html_e('After upload, Synchy tries to place the zip and installer.php in the destination WordPress root so you can launch the restore manually.', 'synchy'); ?></span>
+								<span><?php esc_html_e('After upload, Backup & Restore tries to place the zip and installer.php in the destination WordPress root so you can launch the restore manually.', 'synchy'); ?></span>
 							</li>
 						</ul>
 					</div>
@@ -9224,7 +9224,7 @@ function synchy_render_incremental_site_sync_page(array $current): void
 	$status_duration = !empty($status['durationSeconds']) ? synchy_format_sync_duration((float) $status['durationSeconds']) : __('N/A', 'synchy');
 	$connection_state_status = (string) ($connection_state['status'] ?? '');
 	$connection_badge = __('Pending', 'synchy');
-	$connection_message = __('Use Test Connection to verify the destination Synchy receiver.', 'synchy');
+	$connection_message = __('Use Test Connection to verify the destination Backup & Restore receiver.', 'synchy');
 	$connection_inline_badge = __('Not checked', 'synchy');
 	$connection_inline_class = 'synchy-badge synchy-badge--muted';
 	$connection_remote_site = isset($connection_state['remoteSite']) && is_array($connection_state['remoteSite']) ? $connection_state['remoteSite'] : [];
@@ -9515,7 +9515,7 @@ function synchy_render_incremental_site_sync_page(array $current): void
 									<h2><?php esc_html_e('Pending Changes', 'synchy'); ?></h2>
 									<span class="synchy-badge" data-synchy-sync-preview-badge><?php echo esc_html($last_sync_time > 0 ? __('Delta', 'synchy') : __('Baseline', 'synchy')); ?></span>
 								</div>
-								<p class="synchy-field-note" data-synchy-sync-preview-message><?php esc_html_e('Run Preview Changes to see how many files and database rows Synchy will sync before anything is sent.', 'synchy'); ?></p>
+								<p class="synchy-field-note" data-synchy-sync-preview-message><?php esc_html_e('Run Preview Changes to see how many files and database rows Backup & Restore will sync before anything is sent.', 'synchy'); ?></p>
 								<p class="synchy-field-note is-hidden" data-synchy-sync-batch-counter></p>
 								<div class="synchy-sync-tree is-hidden" data-synchy-sync-preview-tree></div>
 							</div>
@@ -9632,20 +9632,20 @@ function synchy_render_settings_page(array $current): void
 							<?php
 							printf(
 								/* translators: 1: current version, 2: latest version */
-								esc_html__('Synchy is on v%1$s and GitHub has v%2$s ready to install.', 'synchy'),
+								esc_html__('Sentinel is on v%1$s and GitHub has v%2$s ready to install.', 'synchy'),
 								esc_html(SYNCHY_VERSION),
 								esc_html($latest_version)
 							);
 							?>
 						</p>
 					<?php else : ?>
-						<p class="synchy-field-note"><?php esc_html_e('Use the manual check if you want to force WordPress to refresh Synchy release data from GitHub right now.', 'synchy'); ?></p>
+						<p class="synchy-field-note"><?php esc_html_e('Use the manual check if you want to force WordPress to refresh Sentinel release data from GitHub right now.', 'synchy'); ?></p>
 					<?php endif; ?>
 				</div>
 
 				<div class="synchy-panel synchy-panel--muted">
-					<h2><?php esc_html_e('About Synchy', 'synchy'); ?></h2>
-					<p><?php esc_html_e('Synchy is being built as a WordPress backup, restore, and deployment tool with a clear split between manual package workflows and future incremental sync workflows.', 'synchy'); ?></p>
+					<h2><?php esc_html_e('About Backup & Restore', 'synchy'); ?></h2>
+					<p><?php esc_html_e('Backup & Restore is the freeSIEM Sentinel workflow for WordPress backups, restores, package delivery, and future incremental sync workflows.', 'synchy'); ?></p>
 					<ul class="synchy-checklist">
 						<li><?php esc_html_e('Export builds a portable archive plus installer package.', 'synchy'); ?></li>
 						<li><?php esc_html_e('Import is the destination-side overwrite path for full package restores.', 'synchy'); ?></li>
@@ -9660,14 +9660,14 @@ function synchy_render_settings_page(array $current): void
 					<h2><?php esc_html_e('Current Direction', 'synchy'); ?></h2>
 					<ul class="synchy-checklist">
 						<li><?php esc_html_e('Keep full-package backup and restore dependable first.', 'synchy'); ?></li>
-						<li><?php esc_html_e('Use GitHub Releases as the update source for installed Synchy sites.', 'synchy'); ?></li>
+						<li><?php esc_html_e('Use GitHub Releases as the update source for installed Sentinel sites.', 'synchy'); ?></li>
 						<li><?php esc_html_e('Move future live-site sync toward smaller incremental changes after an initial full push.', 'synchy'); ?></li>
 					</ul>
 				</div>
 
 				<div class="synchy-panel synchy-panel--muted">
 					<h2><?php esc_html_e('Next Plugin-Level Settings', 'synchy'); ?></h2>
-					<p><?php esc_html_e('This screen is also the home for future global Synchy settings, such as update behavior, default destinations, retention rules, and system-level diagnostics.', 'synchy'); ?></p>
+					<p><?php esc_html_e('This screen is also the home for future global Backup & Restore settings, such as update behavior, default destinations, retention rules, and system-level diagnostics.', 'synchy'); ?></p>
 				</div>
 			</div>
 		</div>
@@ -9772,7 +9772,7 @@ function synchy_render_page(string $page_slug): void
 
 				<div class="synchy-panel synchy-panel--muted">
 					<h2><?php esc_html_e('Next Step', 'synchy'); ?></h2>
-					<p><?php esc_html_e('This screen is a placeholder for future Synchy functionality. The export workflow is now the active build area.', 'synchy'); ?></p>
+					<p><?php esc_html_e('This screen is a placeholder for future Backup & Restore functionality. The export workflow is now the active build area.', 'synchy'); ?></p>
 				</div>
 			</div>
 		</div>
@@ -9785,8 +9785,8 @@ add_action('admin_menu', function (): void {
 	$first = array_shift($pages);
 
 	add_menu_page(
-		__('Synchy', 'synchy'),
-		__('Synchy', 'synchy'),
+		__('Backup & Restore', 'synchy'),
+		__('Backup & Restore', 'synchy'),
 		'manage_options',
 		$first['slug'],
 		static function () use ($first): void {
@@ -9820,7 +9820,7 @@ add_action('wp_dashboard_setup', function (): void {
 
 	add_meta_box(
 		'synchy_dashboard_widget',
-		__('Synchy', 'synchy'),
+		__('Backup & Restore', 'synchy'),
 		'synchy_render_dashboard_widget',
 		'dashboard',
 		'side',
@@ -10572,7 +10572,7 @@ add_action('rest_api_init', function (): void {
 						'packageId' => (string) ($session['manifest_summary']['package_id'] ?? ''),
 						'destinationPath' => (string) ($session['directory'] ?? ''),
 						'deployStatus' => (string) ($session['root_deploy']['status'] ?? 'staged_only'),
-						'message' => (string) ($session['root_deploy']['message'] ?? __('Package delivered to the destination Synchy receiver.', 'synchy')),
+						'message' => (string) ($session['root_deploy']['message'] ?? __('Package delivered to the destination Backup & Restore receiver.', 'synchy')),
 						'installerUrl' => (string) ($session['root_deploy']['installerUrl'] ?? ''),
 						'installerPath' => (string) ($session['root_deploy']['installerPath'] ?? ''),
 						'archivePath' => (string) ($session['root_deploy']['archivePath'] ?? ''),
@@ -10641,7 +10641,7 @@ add_action('admin_enqueue_scripts', function (string $hook_suffix): void {
 					'connectionReady' => __('Connection ready', 'synchy'),
 					'connectionError' => __('Connection failed', 'synchy'),
 					'pushAction' => __('Upload to Live', 'synchy'),
-					'unknownError' => __('Synchy hit an unexpected live push error.', 'synchy'),
+					'unknownError' => __('Backup & Restore hit an unexpected live push error.', 'synchy'),
 				],
 			]
 		);
@@ -10728,7 +10728,7 @@ add_action('admin_enqueue_scripts', function (string $hook_suffix): void {
 					'never' => __('Never', 'synchy'),
 					'na' => __('N/A', 'synchy'),
 					'previewDefault' => __('Run Preview Changes to review changed files and database rows before syncing.', 'synchy'),
-					'unknownError' => __('Synchy hit an unexpected Sync error.', 'synchy'),
+					'unknownError' => __('Backup & Restore hit an unexpected Sync error.', 'synchy'),
 					'confirmSync' => __('Sync the previewed changes to the destination site now?', 'synchy'),
 					'confirmFullSync' => __('Run a full Sync for the selected scopes and send all tracked files and rows to the destination site now?', 'synchy'),
 					'confirmResumeSync' => __('Resume the remaining full Sync batches now?', 'synchy'),
@@ -10779,12 +10779,12 @@ add_action('admin_enqueue_scripts', function (string $hook_suffix): void {
 			'defaultStages' => synchy_get_export_stage_items([]),
 			'strings' => [
 				'filesProcessed' => __('Files processed:', 'synchy'),
-				'unknownError' => __('Synchy hit an unexpected error while exporting.', 'synchy'),
+				'unknownError' => __('Backup & Restore hit an unexpected error while exporting.', 'synchy'),
 				'preparingLabel' => __('Preparing', 'synchy'),
 				'startingExport' => __('Starting export job...', 'synchy'),
 				'errorPhaseLabel' => __('Error', 'synchy'),
-				'completeTitle' => __('Synchy export complete', 'synchy'),
-				'errorTitle' => __('Synchy export needs attention', 'synchy'),
+				'completeTitle' => __('Backup & Restore export complete', 'synchy'),
+				'errorTitle' => __('Backup & Restore export needs attention', 'synchy'),
 			],
 		]
 	);

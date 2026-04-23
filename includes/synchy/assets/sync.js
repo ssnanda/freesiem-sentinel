@@ -557,7 +557,7 @@
 		connectionPanel.classList.remove("is-hidden");
 		connectionBadge.textContent = isError ? (config.strings.connectionError || "Connection failed") : (config.strings.connectionReady || "Connection ready");
 		connectionMessage.textContent = isError
-			? payload.message || config.strings.unknownError || "Synchy hit an unexpected Sync error."
+			? payload.message || config.strings.unknownError || "Backup & Restore hit an unexpected Sync error."
 			: payload.message || "Destination site is ready for Sync.";
 
 		if (isError) {
@@ -940,7 +940,7 @@
 		}
 
 		if (!response.ok || !payload || payload.success !== true) {
-			const message = payload?.data?.message || payload?.message || config.strings.unknownError || "Synchy hit an unexpected Sync error.";
+			const message = payload?.data?.message || payload?.message || config.strings.unknownError || "Backup & Restore hit an unexpected Sync error.";
 			throw new Error(message);
 		}
 

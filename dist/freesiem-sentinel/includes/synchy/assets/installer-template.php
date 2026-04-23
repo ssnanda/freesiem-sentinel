@@ -424,7 +424,7 @@ function synchyInstallerExpectedArchiveSize(): int
 function synchyInstallerValidateArchive(string $archivePath): void
 {
 	if (!is_readable($archivePath)) {
-		throw new RuntimeException('Could not read the Synchy archive next to this installer.');
+		throw new RuntimeException('Could not read the Backup & Restore archive next to this installer.');
 	}
 
 	$expected_size = synchyInstallerExpectedArchiveSize();
@@ -445,7 +445,7 @@ function synchyInstallerValidateArchive(string $archivePath): void
 		$actual_hash = strtolower((string) hash_file('sha256', $archivePath));
 
 		if (!hash_equals($expected_hash, $actual_hash)) {
-			throw new RuntimeException('Archive hash mismatch detected. Make sure installer.php and the zip belong to the same Synchy package.');
+			throw new RuntimeException('Archive hash mismatch detected. Make sure installer.php and the zip belong to the same Backup & Restore package.');
 		}
 	}
 }
@@ -463,12 +463,12 @@ function synchyInstallerExtractArchive(string $archivePath, string $extractDirec
 	$result = $zip->open($archivePath);
 
 	if ($result !== true) {
-		throw new RuntimeException('Could not open the Synchy archive for extraction.');
+		throw new RuntimeException('Could not open the Backup & Restore archive for extraction.');
 	}
 
 	if (!$zip->extractTo($extractDirectory)) {
 		$zip->close();
-		throw new RuntimeException('Could not extract the Synchy archive into the restore workspace.');
+		throw new RuntimeException('Could not extract the Backup & Restore archive into the restore workspace.');
 	}
 
 	$zip->close();
@@ -1062,7 +1062,7 @@ function synchyInstallerBuildWpConfigContents(string $templatePath, array $confi
 		$contents = (string) preg_replace($pattern, $replacement, $contents, 1, $count);
 
 		if ($count !== 1) {
-			throw new RuntimeException('Could not update ' . $constant . ' in the wp-config template. Synchy expects standard WordPress constant definitions.');
+			throw new RuntimeException('Could not update ' . $constant . ' in the wp-config template. Backup & Restore expects standard WordPress constant definitions.');
 		}
 	}
 
@@ -1122,7 +1122,7 @@ function synchyInstallerResolveWpConfigTemplate(string $wordpressRoot, string $e
 		];
 	}
 
-	throw new RuntimeException('Synchy could not find a wp-config template in the package. The archive must include wp-config.php or wp-config-sample.php.');
+	throw new RuntimeException('Backup & Restore could not find a wp-config template in the package. The archive must include wp-config.php or wp-config-sample.php.');
 }
 
 function synchyInstallerUpdateWpConfig(string $wordpressRoot, string $extractDirectory, array $config, array &$messages): void
@@ -1133,7 +1133,7 @@ function synchyInstallerUpdateWpConfig(string $wordpressRoot, string $extractDir
 
 	if (($template['mode'] ?? '') === 'update') {
 		if (!is_writable($config_path)) {
-			throw new RuntimeException('wp-config.php is not writable, so Synchy cannot update the destination database credentials.');
+			throw new RuntimeException('wp-config.php is not writable, so Backup & Restore cannot update the destination database credentials.');
 		}
 
 		$backup_path = $config_path . '.synchy-' . date('Ymd-His') . '.bak';
@@ -1152,7 +1152,7 @@ function synchyInstallerUpdateWpConfig(string $wordpressRoot, string $extractDir
 	}
 
 	if (!is_writable($wordpressRoot)) {
-		throw new RuntimeException('The destination folder is not writable, so Synchy cannot create wp-config.php there.');
+		throw new RuntimeException('The destination folder is not writable, so Backup & Restore cannot create wp-config.php there.');
 	}
 
 	if (@file_put_contents($config_path, $contents, LOCK_EX) === false) {
@@ -1290,7 +1290,7 @@ $request_method = strtoupper((string) ($_SERVER['REQUEST_METHOD'] ?? 'GET'));
 $action = $request_method === 'POST' ? synchyInstallerPostedString('action') : '';
 
 if ($archive_path === '') {
-	$errors[] = 'Could not find the Synchy archive next to this installer.';
+	$errors[] = 'Could not find the Backup & Restore archive next to this installer.';
 } elseif ($expected_archive_size > 0 && $actual_archive_size !== $expected_archive_size) {
 	$errors[] = 'Archive size mismatch detected. Expected ' . synchyInstallerReadableSize($expected_archive_size) . ' but found ' . synchyInstallerReadableSize($actual_archive_size) . '.';
 }
@@ -1305,7 +1305,7 @@ if ($database_config['prefix'] === '') {
 
 if ($request_method === 'POST') {
 	if (!$authorized) {
-		$errors[] = 'This installer URL is locked. Open it with the full tokenized URL from Synchy Site Sync.';
+		$errors[] = 'This installer URL is locked. Open it with the full tokenized URL from Backup & Restore.';
 	} elseif ($action === 'load_databases') {
 		try {
 			synchyInstallerValidateDatabaseConfig($database_config, false);
@@ -1401,7 +1401,7 @@ if ($request_method === 'POST') {
 			$cleanup_targets = synchyInstallerBuildCleanupTargets($wordpress_root, $package_directory, $archive_path, $workspace_root);
 
 			if ($cleanup_targets === []) {
-				$warnings[] = 'No Synchy cleanup files were found at this location.';
+				$warnings[] = 'No Backup & Restore cleanup files were found at this location.';
 			} else {
 				synchyInstallerDeleteCleanupTargets($cleanup_targets, $cleanup_messages);
 				$cleanup_complete = true;
@@ -1419,7 +1419,7 @@ $cleanup_targets = synchyInstallerBuildCleanupTargets($wordpress_root, $package_
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Synchy Installer</title>
+<title>Backup & Restore Installer</title>
 <style>
 body{margin:0;padding:32px;font:16px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#eef4ef;color:#12323b}
 .shell{max-width:1040px;margin:0 auto;padding:28px;border:1px solid #d7e1da;border-radius:24px;background:#fff;box-shadow:0 18px 36px rgba(18,35,28,.08)}
@@ -1464,14 +1464,14 @@ a{color:#1e7bc8}
 </head>
 <body>
 <div class="shell">
-	<p class="eyebrow">Synchy Installer</p>
+	<p class="eyebrow">Backup & Restore Installer</p>
 	<h1>Manual Restore</h1>
-		<p>This installer restores the Synchy archive staged next to it. It overwrites the destination files and replaces the selected MySQL database with the package database dump.</p>
+		<p>This installer restores the Backup & Restore archive staged next to it. It overwrites the destination files and replaces the selected MySQL database with the package database dump.</p>
 
 	<?php if ($token_required && !$authorized) : ?>
 		<div class="notice error">
 			<strong>Installer locked.</strong>
-			<p>Open this installer with the full tokenized URL provided by Synchy Site Sync.</p>
+			<p>Open this installer with the full tokenized URL provided by Backup & Restore.</p>
 		</div>
 	<?php endif; ?>
 
@@ -1489,7 +1489,7 @@ a{color:#1e7bc8}
 	<?php if ($cleanup_complete) : ?>
 		<div class="notice success">
 			<strong>Cleanup complete.</strong>
-			<p>Synchy removed the installer, package zip, restore workspace, and any matching staged session folders it found for this restore.</p>
+			<p>Backup & Restore removed the installer, package zip, restore workspace, and any matching staged session folders it found for this restore.</p>
 		</div>
 	<?php endif; ?>
 
@@ -1507,9 +1507,9 @@ a{color:#1e7bc8}
 	<?php if ($restore_complete && !$cleanup_complete) : ?>
 		<div class="card stack">
 			<h2>Cleanup Files</h2>
-			<p>Use the button below to remove the temporary Synchy restore files from this destination. Synchy keeps any <code>wp-config.php.synchy-*.bak</code> backup file in place so you can recover it manually if needed.</p>
+			<p>Use the button below to remove the temporary Backup & Restore files from this destination. Backup & Restore keeps any <code>wp-config.php.synchy-*.bak</code> backup file in place so you can recover it manually if needed.</p>
 			<?php if ($cleanup_targets === []) : ?>
-				<div class="notice info">No Synchy cleanup files were found at this location.</div>
+				<div class="notice info">No Backup & Restore cleanup files were found at this location.</div>
 			<?php else : ?>
 				<ul class="cleanup-list">
 					<?php foreach ($cleanup_targets as $target) : ?>
@@ -1616,8 +1616,8 @@ a{color:#1e7bc8}
 	<div class="card stack">
 		<h2>What Restore Does</h2>
 			<ul>
-				<li>Validates that the zip next to this installer matches the expected Synchy package.</li>
-				<li>Extracts the uploaded Synchy archive into a temporary workspace next to this installer.</li>
+				<li>Validates that the zip next to this installer matches the expected Backup & Restore package.</li>
+				<li>Extracts the uploaded Backup & Restore archive into a temporary workspace next to this installer.</li>
 				<li>Connects to the destination MySQL server using the credentials you provide here.</li>
 				<li>Drops all existing tables and views in the selected destination database, then imports the package dump.</li>
 				<li>Runs URL replacement from the source package URLs to the destination URL you confirm below.</li>
@@ -1637,7 +1637,7 @@ a{color:#1e7bc8}
 					<div class="field full">
 						<label for="destination_url"><span class="label">Destination URL</span></label>
 						<input id="destination_url" type="url" name="destination_url" value="<?php echo synchyInstallerEscape($destination_url); ?>" placeholder="https://staging.example.com">
-						<p class="hint">Synchy will replace the source package URLs with this value during restore. It defaults to the URL you opened this installer from, but you can correct it here before running the restore.</p>
+						<p class="hint">Backup & Restore will replace the source package URLs with this value during restore. It defaults to the URL you opened this installer from, but you can correct it here before running the restore.</p>
 					</div>
 					<div class="field">
 						<label for="db_host"><span class="label">Database Host</span></label>
