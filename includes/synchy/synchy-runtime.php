@@ -1006,6 +1006,51 @@ function synchy_ensure_site_sync_options_not_autoloaded(): void
 	);
 }
 
+function synchy_get_site_sync_save_url(): string
+{
+	return admin_url('admin-post.php');
+}
+
+function synchy_render_site_sync_save_fields(): void
+{
+	wp_nonce_field('synchy_save_site_sync_options', 'synchy_site_sync_nonce');
+	echo '<input type="hidden" name="action" value="synchy_save_site_sync_options" />';
+}
+
+function synchy_handle_save_site_sync_options(): void
+{
+	if (!current_user_can('manage_options')) {
+		wp_die(esc_html__('You are not allowed to save Synchy Sync settings.', 'synchy'), 403);
+	}
+
+	check_admin_referer('synchy_save_site_sync_options', 'synchy_site_sync_nonce');
+
+	$options = isset($_POST[SYNCHY_SITE_SYNC_OPTIONS])
+		? synchy_sanitize_site_sync_options(wp_unslash($_POST[SYNCHY_SITE_SYNC_OPTIONS]))
+		: synchy_get_site_sync_options();
+
+	synchy_save_site_sync_options($options);
+
+	$redirect = wp_get_referer();
+
+	if (!$redirect) {
+		$redirect = admin_url('admin.php?page=freesiem-synchy&tab=sync');
+	}
+
+	wp_safe_redirect(add_query_arg('settings-updated', 'true', remove_query_arg('settings-updated', $redirect)));
+	exit;
+}
+
+function synchy_save_site_sync_options(array $options): array
+{
+	$options = synchy_sanitize_site_sync_options($options);
+
+	update_option(SYNCHY_SITE_SYNC_OPTIONS, $options, false);
+	synchy_ensure_site_sync_options_not_autoloaded();
+
+	return $options;
+}
+
 function synchy_get_site_sync_password_hint(array $options): string
 {
 	$password = (string) ($options['destination_application_password'] ?? '');
@@ -8846,8 +8891,8 @@ function synchy_render_site_sync_page(array $current): void
 				</div>
 			</div>
 
-			<form method="post" action="options.php" class="synchy-form" data-synchy-site-sync-form>
-				<?php settings_fields('synchy_site_sync'); ?>
+			<form method="post" action="<?php echo esc_url(synchy_get_site_sync_save_url()); ?>" class="synchy-form" data-synchy-site-sync-form>
+				<?php synchy_render_site_sync_save_fields(); ?>
 
 				<div class="synchy-grid synchy-grid--upload-live">
 					<div class="synchy-panel synchy-panel--muted">
@@ -9175,8 +9220,8 @@ function synchy_render_incremental_site_sync_page(array $current): void
 				</div>
 			</div>
 
-			<form method="post" action="options.php" class="synchy-form" data-synchy-sync-form>
-				<?php settings_fields('synchy_site_sync'); ?>
+			<form method="post" action="<?php echo esc_url(synchy_get_site_sync_save_url()); ?>" class="synchy-form" data-synchy-sync-form>
+				<?php synchy_render_site_sync_save_fields(); ?>
 				<input type="hidden" name="<?php echo esc_attr(SYNCHY_SITE_SYNC_OPTIONS); ?>[sync_scope_selection_present]" value="1" />
 
 				<div class="synchy-grid synchy-grid--upload-live">
@@ -9739,6 +9784,8 @@ add_action('admin_init', function (): void {
 	);
 });
 
+add_action('admin_post_synchy_save_site_sync_options', 'synchy_handle_save_site_sync_options');
+
 add_action('wp_ajax_synchy_start_export', function (): void {
 	if (!current_user_can('manage_options')) {
 		wp_send_json_error(['message' => __('You are not allowed to run Synchy exports.', 'synchy')], 403);
@@ -9793,7 +9840,7 @@ add_action('wp_ajax_synchy_test_site_sync_connection', function (): void {
 
 	check_ajax_referer('synchy_site_sync_ajax', 'nonce');
 
-	$options = isset($_POST[SYNCHY_SITE_SYNC_OPTIONS]) ? synchy_sanitize_site_sync_options(wp_unslash($_POST[SYNCHY_SITE_SYNC_OPTIONS])) : synchy_get_site_sync_options();
+	$options = isset($_POST[SYNCHY_SITE_SYNC_OPTIONS]) ? synchy_save_site_sync_options(wp_unslash($_POST[SYNCHY_SITE_SYNC_OPTIONS])) : synchy_get_site_sync_options();
 	$result = synchy_test_site_sync_connection($options);
 
 	if (is_wp_error($result)) {
@@ -9866,7 +9913,7 @@ add_action('wp_ajax_synchy_test_sync_connection', function (): void {
 
 	check_ajax_referer('synchy_sync_ajax', 'nonce');
 
-	$options = isset($_POST[SYNCHY_SITE_SYNC_OPTIONS]) ? synchy_sanitize_site_sync_options(wp_unslash($_POST[SYNCHY_SITE_SYNC_OPTIONS])) : synchy_get_site_sync_options();
+	$options = isset($_POST[SYNCHY_SITE_SYNC_OPTIONS]) ? synchy_save_site_sync_options(wp_unslash($_POST[SYNCHY_SITE_SYNC_OPTIONS])) : synchy_get_site_sync_options();
 	$result = synchy_test_site_sync_connection($options);
 
 	if (is_wp_error($result)) {
