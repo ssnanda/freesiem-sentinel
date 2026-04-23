@@ -196,7 +196,7 @@ class Freesiem_Admin
 					[
 						'ajaxUrl' => admin_url('admin-ajax.php'),
 						'nonce' => wp_create_nonce('synchy_sync_ajax'),
-						'localPluginVersion' => defined('SYNCHY_VERSION') ? SYNCHY_VERSION : FREESIEM_SENTINEL_VERSION,
+						'localPluginVersion' => FREESIEM_SENTINEL_VERSION,
 						'currentJob' => synchy_build_sync_job_response(synchy_get_visible_sync_job()),
 						'connectionState' => synchy_get_current_sync_connection_state(synchy_get_site_sync_options()),
 						'defaultStages' => synchy_get_sync_stage_items([]),
@@ -229,12 +229,12 @@ class Freesiem_Admin
 							'lastRun' => __('Last run', 'synchy'),
 							'lastSync' => __('Last successful Sync', 'synchy'),
 							'destination' => __('Destination', 'synchy'),
-							'localPluginVersion' => __('Local plugin version', 'synchy'),
+							'localPluginVersion' => __('Local Sentinel version', 'synchy'),
 							'files' => __('Files', 'synchy'),
 							'dbRows' => __('DB rows', 'synchy'),
 							'duration' => __('Duration', 'synchy'),
 							'site' => __('Site', 'synchy'),
-							'pluginVersion' => __('Plugin version', 'synchy'),
+							'pluginVersion' => __('Sentinel version', 'synchy'),
 							'authenticatedAs' => __('Authenticated as', 'synchy'),
 							'selectedScopes' => __('Selected scopes', 'synchy'),
 							'needsBaseline' => __('Needs baseline', 'synchy'),
@@ -265,10 +265,10 @@ class Freesiem_Admin
 							'currentBatch' => __('Current batch', 'synchy'),
 							'pausePending' => __('Pause requested', 'synchy'),
 							'updateAvailable' => __('Destination update available:', 'synchy'),
-							'destinationUpToDate' => __('Destination Synchy is up to date.', 'synchy'),
-							'updateCheckPending' => __('Run or wait for the connection check to compare Synchy versions.', 'synchy'),
-							'confirmUpdateRemoteSynchy' => __('Update Synchy on the destination site from this local plugin copy now?', 'synchy'),
-							'destinationUpdated' => __('Destination Synchy updated.', 'synchy'),
+							'destinationUpToDate' => __('Destination Sentinel is up to date.', 'synchy'),
+							'updateCheckPending' => __('Run or wait for the connection check to compare Sentinel versions.', 'synchy'),
+							'confirmUpdateRemoteSynchy' => __('Update Sentinel on the destination site from this local plugin copy now?', 'synchy'),
+							'destinationUpdated' => __('Destination Sentinel updated.', 'synchy'),
 						],
 					]
 				);
@@ -3562,14 +3562,6 @@ class Freesiem_Admin
 
 		foreach ($about_urls as $about_url) {
 			$html = preg_replace('#<a[^>]+href="' . $about_url . '"[^>]*>.*?</a>#si', '', $html) ?? $html;
-		}
-
-		if ($current_tab === 'sync') {
-			$html = str_replace(
-				'"localPluginVersion":"' . esc_js(FREESIEM_SENTINEL_VERSION),
-				'"localPluginVersion":"' . esc_js(defined('SYNCHY_VERSION') ? SYNCHY_VERSION : FREESIEM_SENTINEL_VERSION),
-				$html
-			);
 		}
 
 		return $html;

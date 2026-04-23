@@ -3,7 +3,7 @@
  * Plugin Name: Synchy
  * Plugin URI: https://github.com/ssnanda/synchy
  * Description: Starter admin shell for Synchy backup, restore, schedule, and sync tooling.
- * Version: 0.7.59
+ * Version: 0.3.30
  * Update URI: https://github.com/ssnanda/synchy
  * Author: sandman
  */
@@ -12,7 +12,9 @@ if (!defined('ABSPATH')) {
 	exit;
 }
 
-const SYNCHY_VERSION = '0.7.59';
+if (!defined('SYNCHY_VERSION')) {
+	define('SYNCHY_VERSION', defined('FREESIEM_SENTINEL_VERSION') ? FREESIEM_SENTINEL_VERSION : '0.3.30');
+}
 const SYNCHY_SLUG = 'synchy';
 const SYNCHY_EXPORT_OPTIONS = 'synchy_export_options';
 const SYNCHY_LAST_EXPORT_OPTION = 'synchy_last_export';
@@ -2616,7 +2618,7 @@ function synchy_build_sync_manifest(array $file_delta, array $db_delta, int $syn
 
 	return [
 		'plugin' => 'Synchy',
-		'pluginVersion' => SYNCHY_VERSION,
+		'pluginVersion' => synchy_get_display_version(),
 		'mode' => (string) ($db_delta['mode'] ?? $file_delta['mode'] ?? 'delta'),
 		'syncedAt' => $sync_time,
 		'source' => [
@@ -5276,8 +5278,11 @@ function synchy_build_self_update_package()
 		return $temp_dir;
 	}
 
-	$plugin_dir = wp_normalize_path(plugin_dir_path(__FILE__));
-	$zip_path = wp_normalize_path(trailingslashit($temp_dir) . 'synchy.zip');
+	$plugin_dir = wp_normalize_path(defined('FREESIEM_SENTINEL_PLUGIN_DIR') ? FREESIEM_SENTINEL_PLUGIN_DIR : plugin_dir_path(__FILE__));
+	$plugin_folder = defined('FREESIEM_SENTINEL_SLUG') ? FREESIEM_SENTINEL_SLUG : basename(untrailingslashit($plugin_dir));
+	$plugin_folder = sanitize_file_name($plugin_folder !== '' ? $plugin_folder : 'synchy');
+	$zip_filename = $plugin_folder === 'freesiem-sentinel' ? 'freesiem-sentinel.zip' : 'synchy.zip';
+	$zip_path = wp_normalize_path(trailingslashit($temp_dir) . $zip_filename);
 	$zip = new ZipArchive();
 	$result = $zip->open($zip_path, ZipArchive::CREATE | ZipArchive::OVERWRITE);
 
@@ -5299,11 +5304,18 @@ function synchy_build_self_update_package()
 		$absolute_path = wp_normalize_path($item->getPathname());
 		$relative_path = ltrim(str_replace($plugin_dir, '', $absolute_path), '/');
 
-		if ($relative_path === '' || str_starts_with($relative_path, '.git/')) {
+		if (
+			$relative_path === ''
+			|| str_starts_with($relative_path, '.git/')
+			|| str_starts_with($relative_path, '.github/')
+			|| str_starts_with($relative_path, 'dist/')
+			|| str_starts_with($relative_path, 'backups/')
+			|| str_starts_with($relative_path, 'releases/')
+		) {
 			continue;
 		}
 
-		if (!$zip->addFile($absolute_path, 'synchy/' . $relative_path)) {
+		if (!$zip->addFile($absolute_path, $plugin_folder . '/' . $relative_path)) {
 			$zip->close();
 			synchy_rrmdir($temp_dir);
 			return new WP_Error(
@@ -5322,7 +5334,7 @@ function synchy_build_self_update_package()
 	return [
 		'zip_path' => $zip_path,
 		'temp_dir' => $temp_dir,
-		'filename' => 'synchy.zip',
+		'filename' => $zip_filename,
 	];
 }
 
@@ -5410,8 +5422,12 @@ function synchy_apply_self_update_package(string $zip_path)
 			return $unzipped;
 		}
 
-		$source_dir = wp_normalize_path(trailingslashit($temp_dir) . 'synchy');
-		$destination_dir = wp_normalize_path(plugin_dir_path(__FILE__));
+		$sentinel_source_dir = wp_normalize_path(trailingslashit($temp_dir) . 'freesiem-sentinel');
+		$synchy_source_dir = wp_normalize_path(trailingslashit($temp_dir) . 'synchy');
+		$source_dir = is_dir($sentinel_source_dir) ? $sentinel_source_dir : $synchy_source_dir;
+		$destination_dir = is_dir($sentinel_source_dir) && defined('FREESIEM_SENTINEL_PLUGIN_DIR')
+			? wp_normalize_path(FREESIEM_SENTINEL_PLUGIN_DIR)
+			: wp_normalize_path(plugin_dir_path(__FILE__));
 		$copied = synchy_copy_directory_contents($source_dir, $destination_dir);
 
 		if (is_wp_error($copied)) {
@@ -5419,7 +5435,7 @@ function synchy_apply_self_update_package(string $zip_path)
 		}
 
 		return [
-			'pluginVersion' => SYNCHY_VERSION,
+			'pluginVersion' => synchy_get_display_version(),
 			'pluginDirectory' => $destination_dir,
 		];
 	} finally {
@@ -9450,12 +9466,12 @@ function synchy_render_incremental_site_sync_page(array $current): void
 											<strong><?php echo esc_html((string) ($connection_remote_site['siteUrl'] ?? '')); ?></strong>
 										</div>
 										<div>
-											<span class="synchy-export-meta__label"><?php esc_html_e('Local plugin version', 'synchy'); ?></span>
-											<strong><?php echo esc_html(SYNCHY_VERSION); ?></strong>
+											<span class="synchy-export-meta__label"><?php esc_html_e('Local Sentinel version', 'synchy'); ?></span>
+											<strong><?php echo esc_html(synchy_get_display_version()); ?></strong>
 										</div>
 										<div>
-											<span class="synchy-export-meta__label"><?php esc_html_e('Plugin version', 'synchy'); ?></span>
-											<strong><?php echo esc_html((string) ($connection_remote_site['pluginVersion'] ?? '')); ?></strong>
+											<span class="synchy-export-meta__label"><?php esc_html_e('Sentinel version', 'synchy'); ?></span>
+											<strong><?php echo esc_html((string) ($connection_remote_site['sentinelVersion'] ?? $connection_remote_site['pluginVersion'] ?? '')); ?></strong>
 										</div>
 										<div>
 											<span class="synchy-export-meta__label"><?php esc_html_e('Authenticated as', 'synchy'); ?></span>
@@ -9464,8 +9480,8 @@ function synchy_render_incremental_site_sync_page(array $current): void
 									<?php endif; ?>
 								</div>
 								<div class="synchy-stack synchy-stack--compact">
-									<button type="button" class="button is-hidden" data-synchy-update-remote-synchy><?php esc_html_e('Update Live Synchy', 'synchy'); ?></button>
-									<p class="synchy-field-note" data-synchy-update-remote-note><?php esc_html_e('Run or wait for the connection check to compare Synchy versions.', 'synchy'); ?></p>
+									<button type="button" class="button is-hidden" data-synchy-update-remote-synchy><?php esc_html_e('Update Live Sentinel', 'synchy'); ?></button>
+									<p class="synchy-field-note" data-synchy-update-remote-note><?php esc_html_e('Run or wait for the connection check to compare Sentinel versions.', 'synchy'); ?></p>
 								</div>
 							</div>
 						</div>
@@ -10307,8 +10323,7 @@ add_action('rest_api_init', function (): void {
 					[
 						'name' => get_bloginfo('name'),
 						'siteUrl' => home_url('/'),
-						'pluginVersion' => SYNCHY_VERSION,
-						'sentinelVersion' => defined('FREESIEM_SENTINEL_VERSION') ? FREESIEM_SENTINEL_VERSION : '',
+						'pluginVersion' => synchy_get_display_version(),
 						'wordpressVersion' => get_bloginfo('version'),
 						'authenticatedAs' => $user instanceof WP_User ? (string) $user->user_login : '',
 						'receiverMode' => 'root_installer_package_upload',
@@ -10374,9 +10389,8 @@ add_action('rest_api_init', function (): void {
 
 					return rest_ensure_response([
 						'success' => true,
-						'message' => __('Synchy updated the destination plugin files successfully.', 'synchy'),
-						'pluginVersion' => SYNCHY_VERSION,
-						'sentinelVersion' => defined('FREESIEM_SENTINEL_VERSION') ? FREESIEM_SENTINEL_VERSION : '',
+						'message' => __('Sentinel updated the destination plugin files successfully.', 'synchy'),
+						'pluginVersion' => synchy_get_display_version(),
 					]);
 				} finally {
 					if (is_dir($temp_dir)) {
@@ -10656,7 +10670,7 @@ add_action('admin_enqueue_scripts', function (string $hook_suffix): void {
 			[
 				'ajaxUrl' => admin_url('admin-ajax.php'),
 				'nonce' => wp_create_nonce('synchy_sync_ajax'),
-				'localPluginVersion' => SYNCHY_VERSION,
+				'localPluginVersion' => synchy_get_display_version(),
 				'currentJob' => synchy_build_sync_job_response(synchy_get_visible_sync_job()),
 				'connectionState' => synchy_get_current_sync_connection_state(synchy_get_site_sync_options()),
 				'defaultStages' => synchy_get_sync_stage_items([]),
@@ -10689,12 +10703,12 @@ add_action('admin_enqueue_scripts', function (string $hook_suffix): void {
 					'lastRun' => __('Last run', 'synchy'),
 					'lastSync' => __('Last successful Sync', 'synchy'),
 					'destination' => __('Destination', 'synchy'),
-					'localPluginVersion' => __('Local plugin version', 'synchy'),
+					'localPluginVersion' => __('Local Sentinel version', 'synchy'),
 					'files' => __('Files', 'synchy'),
 					'dbRows' => __('DB rows', 'synchy'),
 					'duration' => __('Duration', 'synchy'),
 					'site' => __('Site', 'synchy'),
-					'pluginVersion' => __('Plugin version', 'synchy'),
+					'pluginVersion' => __('Sentinel version', 'synchy'),
 					'authenticatedAs' => __('Authenticated as', 'synchy'),
 					'selectedScopes' => __('Selected scopes', 'synchy'),
 					'needsBaseline' => __('Needs baseline', 'synchy'),
@@ -10725,10 +10739,10 @@ add_action('admin_enqueue_scripts', function (string $hook_suffix): void {
 					'currentBatch' => __('Current batch', 'synchy'),
 					'pausePending' => __('Pause requested', 'synchy'),
 					'updateAvailable' => __('Destination update available:', 'synchy'),
-					'destinationUpToDate' => __('Destination Synchy is up to date.', 'synchy'),
-					'updateCheckPending' => __('Run or wait for the connection check to compare Synchy versions.', 'synchy'),
-					'confirmUpdateRemoteSynchy' => __('Update Synchy on the destination site from this local plugin copy now?', 'synchy'),
-					'destinationUpdated' => __('Destination Synchy updated.', 'synchy'),
+					'destinationUpToDate' => __('Destination Sentinel is up to date.', 'synchy'),
+					'updateCheckPending' => __('Run or wait for the connection check to compare Sentinel versions.', 'synchy'),
+					'confirmUpdateRemoteSynchy' => __('Update Sentinel on the destination site from this local plugin copy now?', 'synchy'),
+					'destinationUpdated' => __('Destination Sentinel updated.', 'synchy'),
 				],
 			]
 		);

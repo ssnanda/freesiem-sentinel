@@ -297,7 +297,7 @@
 		const fields = [
 			["Site", payload.name || payload.remoteSiteName || "Unknown"],
 			["URL", payload.siteUrl || payload.remoteSiteUrl || ""],
-			["Synchy", payload.pluginVersion || ""],
+			["Sentinel", payload.pluginVersion || ""],
 			["WordPress", payload.wordpressVersion || ""],
 			["User", payload.authenticatedAs || ""],
 			["Deploy", payload.deployStatus || ""],

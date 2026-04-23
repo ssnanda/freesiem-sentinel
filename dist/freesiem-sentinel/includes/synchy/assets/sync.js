@@ -172,10 +172,13 @@
 		return 0;
 	};
 
+	const getRemotePluginVersion = (remoteSite) =>
+		String(remoteSite?.sentinelVersion || remoteSite?.pluginVersion || "");
+
 	const refreshRemoteVersionUntilCurrent = (attempt = 0) => {
 		const maxAttempts = 6;
 		const localVersion = String(config.localPluginVersion || "");
-		const remoteVersion = String(currentConnectionState?.remoteSite?.pluginVersion || "");
+		const remoteVersion = getRemotePluginVersion(currentConnectionState?.remoteSite || {});
 
 		if (
 			localVersion !== ""
@@ -565,8 +568,8 @@
 		renderMeta(connectionMeta, [
 			{ label: config.strings.site || "Site", value: payload.name || "" },
 			{ label: config.strings.destination || "Destination", value: payload.siteUrl || "" },
-			{ label: config.strings.localPluginVersion || "Local plugin version", value: config.localPluginVersion || "" },
-			{ label: config.strings.pluginVersion || "Plugin version", value: payload.pluginVersion || "" },
+			{ label: config.strings.localPluginVersion || "Local Sentinel version", value: config.localPluginVersion || "" },
+			{ label: config.strings.pluginVersion || "Sentinel version", value: getRemotePluginVersion(payload) },
 			{ label: config.strings.authenticatedAs || "Authenticated as", value: payload.authenticatedAs || "" },
 		]);
 	};
@@ -576,7 +579,7 @@
 			return;
 		}
 
-		const remoteVersion = String(currentConnectionState?.remoteSite?.pluginVersion || "");
+		const remoteVersion = getRemotePluginVersion(currentConnectionState?.remoteSite || {});
 		const localVersion = String(config.localPluginVersion || "");
 		const canCompare = remoteVersion !== "" && localVersion !== "";
 		const remoteIsOlder = canCompare && compareVersions(remoteVersion, localVersion) < 0;
@@ -586,8 +589,8 @@
 		updateRemoteNote.textContent = remoteIsOlder
 			? `${config.strings.updateAvailable || "Destination update available"} ${remoteVersion} -> ${localVersion}`
 			: (canCompare
-				? (config.strings.destinationUpToDate || "Destination Synchy is up to date.")
-				: (config.strings.updateCheckPending || "Run or wait for the connection check to compare Synchy versions."));
+				? (config.strings.destinationUpToDate || "Destination Sentinel is up to date.")
+				: (config.strings.updateCheckPending || "Run or wait for the connection check to compare Sentinel versions."));
 	};
 
 	const performConnectionTest = async () => {
@@ -618,7 +621,7 @@
 	};
 
 	const updateRemoteSynchy = async () => {
-		if (!window.confirm(config.strings.confirmUpdateRemoteSynchy || "Update Synchy on the destination site from this local plugin copy now?")) {
+		if (!window.confirm(config.strings.confirmUpdateRemoteSynchy || "Update Sentinel on the destination site from this local plugin copy now?")) {
 			return;
 		}
 
@@ -630,7 +633,7 @@
 			if (data.remoteSite) {
 				currentConnectionState = {
 					status: "connected",
-					message: data.message || config.strings.destinationUpdated || "Destination Synchy updated.",
+					message: data.message || config.strings.destinationUpdated || "Destination Sentinel updated.",
 					remoteSite: data.remoteSite,
 				};
 				connectionVerified = true;
