@@ -977,6 +977,35 @@ function synchy_get_site_sync_options(): array
 	return $options;
 }
 
+function synchy_ensure_site_sync_options_not_autoloaded(): void
+{
+	global $wpdb;
+
+	if (!is_object($wpdb)) {
+		return;
+	}
+
+	$option_exists = $wpdb->get_var(
+		$wpdb->prepare(
+			"SELECT option_id FROM {$wpdb->options} WHERE option_name = %s LIMIT 1",
+			SYNCHY_SITE_SYNC_OPTIONS
+		)
+	);
+
+	if ($option_exists === null) {
+		add_option(SYNCHY_SITE_SYNC_OPTIONS, synchy_get_site_sync_defaults(), '', false);
+		return;
+	}
+
+	$wpdb->update(
+		$wpdb->options,
+		['autoload' => 'off'],
+		['option_name' => SYNCHY_SITE_SYNC_OPTIONS],
+		['%s'],
+		['%s']
+	);
+}
+
 function synchy_get_site_sync_password_hint(array $options): string
 {
 	$password = (string) ($options['destination_application_password'] ?? '');
@@ -9687,6 +9716,8 @@ add_action('synchy_run_full_sync_worker_event', function (string $worker_token):
 }, 10, 1);
 
 add_action('admin_init', function (): void {
+	synchy_ensure_site_sync_options_not_autoloaded();
+
 	register_setting(
 		'synchy_export',
 		SYNCHY_EXPORT_OPTIONS,
