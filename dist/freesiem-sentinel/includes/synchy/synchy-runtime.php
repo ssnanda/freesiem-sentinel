@@ -6396,6 +6396,459 @@ function synchy_execute_sync_sql_file(string $sql_path)
 	}
 }
 
+function synchy_get_manifest_table_rows_by_suffix(array $manifest, string $suffix): array
+{
+	$tables = isset($manifest['database']['tables']) && is_array($manifest['database']['tables']) ? $manifest['database']['tables'] : [];
+
+	foreach ($tables as $table_name => $table_data) {
+		if (str_ends_with((string) $table_name, $suffix) && is_array($table_data)) {
+			return array_values((array) ($table_data['rows'] ?? []));
+		}
+	}
+
+	return [];
+}
+
+function synchy_merge_nav_menu_repair_rows(array $existing, string $key_field, array $incoming): array
+{
+	foreach ($incoming as $row) {
+		if (!is_array($row)) {
+			continue;
+		}
+
+		$key = isset($row[$key_field]) ? (string) $row[$key_field] : '';
+
+		if ($key === '') {
+			$key = md5((string) wp_json_encode($row));
+		}
+
+		$existing[$key] = $row;
+	}
+
+	return $existing;
+}
+
+function synchy_get_nav_menu_repair_state_path(): string
+{
+	$upload_dir = wp_upload_dir(null, false);
+	$base_dir = isset($upload_dir['basedir']) ? (string) $upload_dir['basedir'] : '';
+
+	if ($base_dir === '') {
+		$base_dir = WP_CONTENT_DIR . '/uploads';
+	}
+
+	return trailingslashit(wp_normalize_path($base_dir)) . 'synchy/nav-menu-repair-state.json';
+}
+
+function synchy_get_nav_menu_repair_state(): array
+{
+	$path = synchy_get_nav_menu_repair_state_path();
+
+	if (is_readable($path)) {
+		$decoded = json_decode((string) file_get_contents($path), true);
+
+		if (is_array($decoded)) {
+			return $decoded;
+		}
+	}
+
+	$state = get_option('synchy_nav_menu_repair_state', []);
+
+	return is_array($state) ? $state : [];
+}
+
+function synchy_store_nav_menu_repair_state(array $state): void
+{
+	$path = synchy_get_nav_menu_repair_state_path();
+	$directory = dirname($path);
+
+	if (wp_mkdir_p($directory)) {
+		file_put_contents($path, (string) wp_json_encode($state));
+	}
+
+	update_option('synchy_nav_menu_repair_state', $state, false);
+}
+
+function synchy_delete_nav_menu_repair_state(): void
+{
+	$path = synchy_get_nav_menu_repair_state_path();
+
+	if (is_file($path)) {
+		@unlink($path);
+	}
+
+	delete_option('synchy_nav_menu_repair_state');
+}
+
+function synchy_prepare_sync_metadata_replacements(array $manifest): void
+{
+	global $wpdb;
+
+	$postmeta_rows = synchy_get_manifest_table_rows_by_suffix($manifest, 'postmeta');
+
+	if ($postmeta_rows === []) {
+		return;
+	}
+
+	$pairs = [];
+
+	foreach ($postmeta_rows as $row) {
+		if (!is_array($row)) {
+			continue;
+		}
+
+		$post_id = (int) ($row['post_id'] ?? 0);
+		$meta_key = (string) ($row['meta_key'] ?? '');
+
+		if ($post_id <= 0 || $meta_key === '') {
+			continue;
+		}
+
+		if (!str_starts_with($meta_key, '_menu_item_') && !str_starts_with($meta_key, '_srfm_')) {
+			continue;
+		}
+
+		$pairs[$post_id . "\n" . $meta_key] = [
+			'post_id' => $post_id,
+			'meta_key' => $meta_key,
+		];
+	}
+
+	foreach ($pairs as $pair) {
+		$wpdb->delete(
+			$wpdb->postmeta,
+			[
+				'post_id' => (int) $pair['post_id'],
+				'meta_key' => (string) $pair['meta_key'],
+			],
+			[
+				'%d',
+				'%s',
+			]
+		);
+	}
+}
+
+function synchy_repair_synced_nav_menus(array $manifest): array
+{
+	global $wpdb;
+
+	$terms = synchy_get_manifest_table_rows_by_suffix($manifest, 'terms');
+	$term_taxonomy = synchy_get_manifest_table_rows_by_suffix($manifest, 'term_taxonomy');
+	$relationships = synchy_get_manifest_table_rows_by_suffix($manifest, 'term_relationships');
+	$posts = synchy_get_manifest_table_rows_by_suffix($manifest, 'posts');
+	$postmeta = synchy_get_manifest_table_rows_by_suffix($manifest, 'postmeta');
+	$options = synchy_get_manifest_table_rows_by_suffix($manifest, 'options');
+	$state = synchy_get_nav_menu_repair_state();
+	$state['terms'] = synchy_merge_nav_menu_repair_rows((array) ($state['terms'] ?? []), 'term_id', $terms);
+	$state['term_taxonomy'] = synchy_merge_nav_menu_repair_rows((array) ($state['term_taxonomy'] ?? []), 'term_taxonomy_id', $term_taxonomy);
+	$state['term_relationships'] = synchy_merge_nav_menu_repair_rows(
+		(array) ($state['term_relationships'] ?? []),
+		'object_id',
+		array_filter($relationships, static fn($row): bool => is_array($row) && isset($row['term_taxonomy_id']))
+	);
+	$state['posts'] = synchy_merge_nav_menu_repair_rows(
+		(array) ($state['posts'] ?? []),
+		'ID',
+		array_filter($posts, static fn($row): bool => is_array($row) && (string) ($row['post_type'] ?? '') === 'nav_menu_item')
+	);
+	$state['postmeta'] = synchy_merge_nav_menu_repair_rows(
+		(array) ($state['postmeta'] ?? []),
+		'meta_id',
+		array_filter($postmeta, static fn($row): bool => is_array($row) && str_starts_with((string) ($row['meta_key'] ?? ''), '_menu_item_'))
+	);
+	$state['options'] = synchy_merge_nav_menu_repair_rows(
+		(array) ($state['options'] ?? []),
+		'option_name',
+		array_filter($options, static fn($row): bool => is_array($row) && str_starts_with((string) ($row['option_name'] ?? ''), 'theme_mods_'))
+	);
+
+	$terms = array_values((array) ($state['terms'] ?? []));
+	$term_taxonomy = array_values((array) ($state['term_taxonomy'] ?? []));
+	$relationships = array_values((array) ($state['term_relationships'] ?? []));
+	$posts = array_values((array) ($state['posts'] ?? []));
+	$postmeta = array_values((array) ($state['postmeta'] ?? []));
+	$options = array_values((array) ($state['options'] ?? []));
+
+	if ($terms === [] || $term_taxonomy === [] || $relationships === []) {
+		synchy_store_nav_menu_repair_state($state);
+		return [
+			'menusRepaired' => 0,
+			'menuItemsRepaired' => 0,
+			'locationsRepaired' => 0,
+		];
+	}
+
+	if (!function_exists('wp_update_nav_menu_item')) {
+		require_once ABSPATH . 'wp-admin/includes/nav-menu.php';
+	}
+
+	$terms_by_id = [];
+	foreach ($terms as $term) {
+		if (is_array($term) && isset($term['term_id'])) {
+			$terms_by_id[(int) $term['term_id']] = $term;
+		}
+	}
+
+	$nav_taxonomy_by_source_tt = [];
+	foreach ($term_taxonomy as $taxonomy) {
+		if (!is_array($taxonomy) || (string) ($taxonomy['taxonomy'] ?? '') !== 'nav_menu') {
+			continue;
+		}
+
+		$source_tt_id = (int) ($taxonomy['term_taxonomy_id'] ?? 0);
+		$source_term_id = (int) ($taxonomy['term_id'] ?? 0);
+
+		if ($source_tt_id <= 0 || !isset($terms_by_id[$source_term_id])) {
+			continue;
+		}
+
+		$nav_taxonomy_by_source_tt[$source_tt_id] = [
+			'term_id' => $source_term_id,
+			'term' => $terms_by_id[$source_term_id],
+		];
+	}
+
+	if ($nav_taxonomy_by_source_tt === []) {
+		synchy_store_nav_menu_repair_state($state);
+		return [
+			'menusRepaired' => 0,
+			'menuItemsRepaired' => 0,
+			'locationsRepaired' => 0,
+		];
+	}
+
+	$source_item_ids_from_relationships = [];
+
+	foreach ($relationships as $relationship) {
+		if (!is_array($relationship)) {
+			continue;
+		}
+
+		$source_tt_id = (int) ($relationship['term_taxonomy_id'] ?? 0);
+
+		if (!isset($nav_taxonomy_by_source_tt[$source_tt_id])) {
+			continue;
+		}
+
+		$object_id = (int) ($relationship['object_id'] ?? 0);
+
+		if ($object_id > 0) {
+			$source_item_ids_from_relationships[] = $object_id;
+		}
+	}
+
+	$source_item_ids_from_relationships = array_values(array_unique($source_item_ids_from_relationships));
+
+	if ($posts === [] && $source_item_ids_from_relationships !== []) {
+		$posts = synchy_fetch_rows_by_ids($wpdb->posts, 'ID', $source_item_ids_from_relationships);
+	}
+
+	if ($postmeta === [] && $source_item_ids_from_relationships !== []) {
+		$postmeta = synchy_fetch_rows_by_ids($wpdb->postmeta, 'post_id', $source_item_ids_from_relationships);
+	}
+
+	if ($options === []) {
+		$options = array_values(array_filter(
+			synchy_get_sync_option_rows(),
+			static fn(array $row): bool => str_starts_with((string) ($row['option_name'] ?? ''), 'theme_mods_')
+		));
+	}
+
+	$posts_by_id = [];
+	foreach ($posts as $post) {
+		if (is_array($post) && isset($post['ID'])) {
+			$posts_by_id[(int) $post['ID']] = $post;
+		}
+	}
+
+	$meta_by_post_id = [];
+	foreach ($postmeta as $meta) {
+		if (!is_array($meta)) {
+			continue;
+		}
+
+		$post_id = (int) ($meta['post_id'] ?? 0);
+		$meta_key = (string) ($meta['meta_key'] ?? '');
+
+		if ($post_id <= 0 || $meta_key === '') {
+			continue;
+		}
+
+		$meta_by_post_id[$post_id][$meta_key] = maybe_unserialize($meta['meta_value'] ?? '');
+	}
+
+	$source_menu_to_destination = [];
+	$menus_repaired = 0;
+	$items_repaired = 0;
+
+	foreach ($nav_taxonomy_by_source_tt as $source_tt_id => $menu_data) {
+		$term = (array) ($menu_data['term'] ?? []);
+		$name = (string) ($term['name'] ?? '');
+		$slug = (string) ($term['slug'] ?? '');
+
+		if ($name === '') {
+			continue;
+		}
+
+		$menu = $slug !== '' ? wp_get_nav_menu_object($slug) : false;
+
+		if (!$menu) {
+			$menu = wp_get_nav_menu_object($name);
+		}
+
+		if (!$menu) {
+			$created = wp_create_nav_menu($name);
+
+			if (is_wp_error($created)) {
+				continue;
+			}
+
+			$menu = wp_get_nav_menu_object((int) $created);
+		}
+
+		if (!$menu) {
+			continue;
+		}
+
+		$destination_menu_id = (int) $menu->term_id;
+		$source_menu_to_destination[(int) ($menu_data['term_id'] ?? 0)] = $destination_menu_id;
+		$menus_repaired++;
+
+		$source_item_ids = [];
+
+		foreach ($relationships as $relationship) {
+			if (!is_array($relationship) || (int) ($relationship['term_taxonomy_id'] ?? 0) !== (int) $source_tt_id) {
+				continue;
+			}
+
+			$source_item_ids[] = (int) ($relationship['object_id'] ?? 0);
+		}
+
+		$source_item_ids = array_values(array_unique(array_filter($source_item_ids)));
+		usort(
+			$source_item_ids,
+			static function (int $left, int $right) use ($posts_by_id): int {
+				$left_order = (int) ($posts_by_id[$left]['menu_order'] ?? 0);
+				$right_order = (int) ($posts_by_id[$right]['menu_order'] ?? 0);
+
+				if ($left_order === $right_order) {
+					return $left <=> $right;
+				}
+
+				if ($left_order <= 0) {
+					return -1;
+				}
+
+				if ($right_order <= 0) {
+					return 1;
+				}
+
+				return $left_order <=> $right_order;
+			}
+		);
+
+		foreach ($source_item_ids as $index => $source_item_id) {
+			$post = (array) ($posts_by_id[$source_item_id] ?? []);
+
+			if ((string) ($post['post_type'] ?? '') !== 'nav_menu_item') {
+				continue;
+			}
+
+			$meta = (array) ($meta_by_post_id[$source_item_id] ?? []);
+			$item_id = wp_update_nav_menu_item(
+				$destination_menu_id,
+				$source_item_id,
+				[
+					'menu-item-db-id' => $source_item_id,
+					'menu-item-object-id' => (int) ($meta['_menu_item_object_id'] ?? 0),
+					'menu-item-object' => (string) ($meta['_menu_item_object'] ?? ''),
+					'menu-item-parent-id' => (int) ($meta['_menu_item_menu_item_parent'] ?? 0),
+					'menu-item-position' => $index + 1,
+					'menu-item-type' => (string) ($meta['_menu_item_type'] ?? 'custom'),
+					'menu-item-title' => (string) ($post['post_title'] ?? ''),
+					'menu-item-url' => (string) ($meta['_menu_item_url'] ?? ''),
+					'menu-item-description' => (string) ($post['post_content'] ?? ''),
+					'menu-item-attr-title' => (string) ($post['post_excerpt'] ?? ''),
+					'menu-item-target' => (string) ($meta['_menu_item_target'] ?? ''),
+					'menu-item-classes' => implode(' ', array_filter((array) ($meta['_menu_item_classes'] ?? []), 'strlen')),
+					'menu-item-xfn' => (string) ($meta['_menu_item_xfn'] ?? ''),
+					'menu-item-status' => (string) ($post['post_status'] ?? 'publish'),
+				]
+			);
+
+			if (!is_wp_error($item_id) && (int) $item_id > 0) {
+				$items_repaired++;
+			}
+		}
+	}
+
+	$locations_repaired = 0;
+
+	foreach ($options as $option) {
+		if (!is_array($option)) {
+			continue;
+		}
+
+		$option_name = (string) ($option['option_name'] ?? '');
+
+		if (!str_starts_with($option_name, 'theme_mods_')) {
+			continue;
+		}
+
+		$value = maybe_unserialize($option['option_value'] ?? '');
+
+		if (!is_array($value) || empty($value['nav_menu_locations']) || !is_array($value['nav_menu_locations'])) {
+			continue;
+		}
+
+		foreach ($value['nav_menu_locations'] as $location => $source_menu_id) {
+			$source_menu_id = (int) $source_menu_id;
+
+			if (isset($source_menu_to_destination[$source_menu_id])) {
+				$value['nav_menu_locations'][$location] = $source_menu_to_destination[$source_menu_id];
+				$locations_repaired++;
+			}
+		}
+
+		update_option($option_name, $value);
+	}
+
+	$current_locations = get_theme_mod('nav_menu_locations', []);
+
+	if (is_array($current_locations) && count($source_menu_to_destination) === 1) {
+		$destination_menu_id = (int) reset($source_menu_to_destination);
+		$registered_locations = get_registered_nav_menus();
+
+		foreach ($registered_locations as $location => $_label) {
+			$current_menu_id = (int) ($current_locations[$location] ?? 0);
+
+			if ($current_menu_id <= 0 || !wp_get_nav_menu_object($current_menu_id)) {
+				$current_locations[$location] = $destination_menu_id;
+				$locations_repaired++;
+			}
+		}
+
+		set_theme_mod('nav_menu_locations', $current_locations);
+	}
+
+	if ($menus_repaired > 0) {
+		clean_term_cache(array_values($source_menu_to_destination), 'nav_menu');
+	}
+
+	if ($menus_repaired > 0 && $items_repaired > 0) {
+		synchy_delete_nav_menu_repair_state();
+	} else {
+		synchy_store_nav_menu_repair_state($state);
+	}
+
+	return [
+		'menusRepaired' => $menus_repaired,
+		'menuItemsRepaired' => $items_repaired,
+		'locationsRepaired' => $locations_repaired,
+	];
+}
+
 function synchy_validate_sync_zip_entries(ZipArchive $zip)
 {
 	$allowed = [];
@@ -6710,6 +7163,7 @@ function synchy_handle_remote_sync_request(WP_REST_Request $request)
 			return new WP_Error($prepared_sql->get_error_code(), $prepared_sql->get_error_message(), ['status' => 500]);
 		}
 
+		synchy_prepare_sync_metadata_replacements($manifest);
 		$executed = synchy_execute_sync_sql_file($sql_path);
 
 		if (is_wp_error($executed)) {
@@ -6717,6 +7171,7 @@ function synchy_handle_remote_sync_request(WP_REST_Request $request)
 		}
 
 		$applied_option_rows = synchy_apply_sync_option_rows((array) ($prepared_sql['optionRows'] ?? []));
+		$nav_menu_repair = synchy_repair_synced_nav_menus($manifest);
 		$deleted_result = synchy_apply_sync_deleted_paths($manifest);
 
 		if (is_wp_error($deleted_result)) {
@@ -6746,6 +7201,7 @@ function synchy_handle_remote_sync_request(WP_REST_Request $request)
 				(int) ($deleted_result['deletedFiles'] ?? 0)
 			),
 			'optionRowsApplied' => $applied_option_rows,
+			'navMenuRepair' => $nav_menu_repair,
 			'deletedFiles' => (int) ($deleted_result['deletedFiles'] ?? 0),
 			'deletedDirs' => (int) ($deleted_result['deletedDirs'] ?? 0),
 		]);
@@ -6767,6 +7223,7 @@ function synchy_handle_remote_sync_request(WP_REST_Request $request)
 			),
 			'deletedFiles' => (int) ($deleted_result['deletedFiles'] ?? 0),
 			'deletedDirs' => (int) ($deleted_result['deletedDirs'] ?? 0),
+			'navMenuRepair' => $nav_menu_repair,
 		]);
 	} finally {
 		if ($meta_root !== '' && is_dir($meta_root)) {

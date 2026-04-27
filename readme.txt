@@ -3,7 +3,7 @@ Contributors: freesiem
 Requires at least: 6.4
 Tested up to: 6.8
 Requires PHP: 8.1
-Stable tag: 0.3.32
+Stable tag: 0.3.33
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -70,6 +70,11 @@ Version bumps should always have matching git tags.
 GitHub Actions publishes the ZIP automatically when a `v*` tag is pushed.
 
 == Changelog ==
+
+= 0.3.33 =
+
+* Repair synced WordPress nav menus through the WordPress menu APIs after database apply so live destinations keep menu items and theme locations.
+* Replace incoming menu and SureForms post meta before applying sync SQL so stale destination meta rows do not mask synced values.
 
 = 0.3.32 =
 
