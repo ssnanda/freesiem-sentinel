@@ -13,6 +13,7 @@
 	const fullSyncButton = document.querySelector("[data-synchy-run-full-sync]");
 	const pauseSyncButton = document.querySelector("[data-synchy-pause-sync]");
 	const resumeSyncButton = document.querySelector("[data-synchy-resume-sync]");
+	const resetSyncButton = document.querySelector("[data-synchy-reset-sync]");
 	const manualBaselineButton = document.querySelector("[data-synchy-mark-baseline]");
 	const destinationUrlInput = document.querySelector("[data-synchy-sync-url]");
 	const usernameInput = document.querySelector("[data-synchy-sync-username]");
@@ -49,6 +50,7 @@
 		!fullSyncButton ||
 		!pauseSyncButton ||
 		!resumeSyncButton ||
+		!resetSyncButton ||
 		!manualBaselineButton ||
 		!saveButton ||
 		!destinationUrlInput ||
@@ -402,7 +404,7 @@
 
 	const getRunActionLabel = () =>
 		latestPreviewMode === "full" || Boolean(latestPreview?.forceFull)
-			? (config.strings.fullSync || "Full Sync")
+			? (config.strings.startFullSync || "Start Full Sync")
 			:
 		getHasPendingBaselineSelection()
 			? (config.strings.startBaseline || "Start Baseline")
@@ -522,10 +524,12 @@
 		fullSyncButton.disabled = (busy && !runningFullSync) || !hasSelection || hasFullSyncPreview || runningFullSync || resumableFullSync;
 		pauseSyncButton.disabled = !runningFullSync;
 		resumeSyncButton.disabled = runningFullSync || !resumableFullSync;
+		resetSyncButton.disabled = busy;
 		runButton.textContent = busy ? (config.strings.syncingAction || "Syncing...") : runLabel;
-		fullSyncButton.textContent = config.strings.fullSync || "Full Sync";
+		fullSyncButton.textContent = config.strings.fullSync || "Preview Full Sync";
 		pauseSyncButton.textContent = currentJob?.pauseRequested ? (config.strings.pausePending || "Pause requested") : (config.strings.pauseSync || "Pause Sync");
 		resumeSyncButton.textContent = config.strings.resumeSync || "Resume Sync";
+		resetSyncButton.textContent = config.strings.resetSync || "Cancel / Reset Sync";
 
 		if (manualBaselineButton) {
 			manualBaselineButton.disabled = busy || !hasSelection;
@@ -626,6 +630,10 @@
 		}
 
 		setBusy(true);
+		previewBadge.textContent = config.strings.preparingPreview || "Preparing preview...";
+		previewMessage.textContent = mode === "full"
+			? (config.strings.preparingFullPreview || "Preparing full Sync preview...")
+			: (config.strings.preparingPreview || "Preparing preview...");
 
 		try {
 			const data = await sendAjax("synchy_update_remote_synchy");
@@ -826,7 +834,7 @@
 	const renderPreview = (preview) => {
 		if (!preview) {
 			if (getIsRunningFullSync() || getHasResumableFullSync()) {
-				previewBadge.textContent = config.strings.fullSync || "Full Sync";
+				previewBadge.textContent = config.strings.fullSync || "Preview Full Sync";
 				previewMessage.textContent = currentJob?.message || (config.strings.previewDefault || "Run Preview Changes to load the pending file sections and database tables.");
 			} else {
 				previewBadge.textContent = "";
@@ -881,6 +889,10 @@
 	const buildStatusSummary = (status) => {
 		if (["error", "paused"].includes(String(status?.status || ""))) {
 			return getStatusMessage(status);
+		}
+
+		if (String(status?.status || "") === "idle" && status?.message) {
+			return status.message;
 		}
 
 		const lastSync = formatDateTime(status?.lastSyncTime || "");
@@ -1034,6 +1046,37 @@
 			clearPreview();
 			previewBadge.textContent = config.strings.previewError || "Preview failed";
 			previewMessage.textContent = error.message;
+		} finally {
+			setBusy(false);
+		}
+	};
+
+	const resetSyncState = async () => {
+		if (!window.confirm(config.strings.confirmResetSync || "Cancel the saved Sync job and clear local Sync baseline state? This does not change the destination site.")) {
+			return;
+		}
+
+		setBusy(true);
+		const resetMessage = config.strings.resetComplete || "Sync state reset. Run Preview Full Sync to start fresh.";
+
+		try {
+			const data = await sendAjax("synchy_reset_sync_state");
+			currentJob = data.job || null;
+			latestPreview = null;
+			latestPreviewMode = "delta";
+			changedScopeIds = new Set();
+			applyScopeStatus(data.scopeStatus || null);
+			renderProgress(null);
+			renderPreview(null);
+			renderStatus(data.status || { status: "idle", message: data.message || resetMessage });
+			previewBadge.textContent = config.strings.success || "Success";
+			previewMessage.textContent = data.message || resetMessage;
+		} catch (error) {
+			renderStatus({
+				status: "error",
+				message: error.message,
+				at: new Date().toISOString(),
+			});
 		} finally {
 			setBusy(false);
 		}
@@ -1270,6 +1313,7 @@
 	runButton.addEventListener("click", runSync);
 	pauseSyncButton.addEventListener("click", pauseFullSync);
 	resumeSyncButton.addEventListener("click", resumeFullSync);
+	resetSyncButton.addEventListener("click", resetSyncState);
 	manualBaselineButton.addEventListener("click", runManualBaseline);
 
 	updateTargetNote();
