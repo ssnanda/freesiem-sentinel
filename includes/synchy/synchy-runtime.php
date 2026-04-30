@@ -5346,13 +5346,140 @@ function synchy_build_self_update_package()
 		}
 	}
 
-	$zip->close();
+	$closed = $zip->close();
+
+	if (!$closed || !is_readable($zip_path) || filesize($zip_path) <= 0) {
+		synchy_rrmdir($temp_dir);
+		return new WP_Error('synchy_self_update_zip_write_failed', __('Synchy could not finish the remote plugin update package.', 'synchy'));
+	}
 
 	return [
 		'zip_path' => $zip_path,
 		'temp_dir' => $temp_dir,
 		'filename' => $zip_filename,
 	];
+}
+
+function synchy_get_self_update_plugin_file_entries(): array|WP_Error
+{
+	$plugin_dir = wp_normalize_path(defined('FREESIEM_SENTINEL_PLUGIN_DIR') ? FREESIEM_SENTINEL_PLUGIN_DIR : plugin_dir_path(__FILE__));
+	$plugin_folder = defined('FREESIEM_SENTINEL_SLUG') ? FREESIEM_SENTINEL_SLUG : basename(untrailingslashit($plugin_dir));
+	$plugin_folder = sanitize_file_name($plugin_folder !== '' ? $plugin_folder : 'synchy');
+
+	if (!is_dir($plugin_dir)) {
+		return new WP_Error('synchy_self_update_source_missing', __('Synchy could not find the local plugin files to package.', 'synchy'));
+	}
+
+	$files = [];
+	$total_bytes = 0;
+	$iterator = new RecursiveIteratorIterator(
+		new RecursiveDirectoryIterator($plugin_dir, FilesystemIterator::SKIP_DOTS),
+		RecursiveIteratorIterator::SELF_FIRST
+	);
+
+	foreach ($iterator as $item) {
+		if (!$item instanceof SplFileInfo || !$item->isFile()) {
+			continue;
+		}
+
+		$absolute_path = wp_normalize_path($item->getPathname());
+		$relative_path = ltrim(str_replace($plugin_dir, '', $absolute_path), '/');
+
+		if (
+			$relative_path === ''
+			|| str_starts_with($relative_path, '.git/')
+			|| str_starts_with($relative_path, '.github/')
+			|| str_starts_with($relative_path, 'dist/')
+			|| str_starts_with($relative_path, 'backups/')
+			|| str_starts_with($relative_path, 'releases/')
+		) {
+			continue;
+		}
+
+		$size = (int) @filesize($absolute_path);
+		$total_bytes += max(0, $size);
+		$files[] = [
+			'absolute_path' => $absolute_path,
+			'archive_path' => 'plugins/' . $plugin_folder . '/' . $relative_path,
+			'size' => $size,
+			'scope_id' => 'files_plugins',
+		];
+	}
+
+	return [
+		'plugin_folder' => $plugin_folder,
+		'files' => $files,
+		'total_bytes' => $total_bytes,
+	];
+}
+
+function synchy_update_remote_synchy_via_sync_package(array $options)
+{
+	$file_entries = synchy_get_self_update_plugin_file_entries();
+
+	if (is_wp_error($file_entries)) {
+		return $file_entries;
+	}
+
+	$temp_dir = synchy_prepare_sync_temp_dir('plugin-self-update-sync');
+
+	if (is_wp_error($temp_dir)) {
+		return $temp_dir;
+	}
+
+	try {
+		$files = array_values((array) ($file_entries['files'] ?? []));
+		$sync_time = time();
+		$file_delta = [
+			'mode' => 'baseline',
+			'files' => $files,
+			'count' => count($files),
+			'bytes' => (int) ($file_entries['total_bytes'] ?? 0),
+			'baseline_scopes' => ['files_plugins'],
+			'selected_scopes' => ['files_plugins'],
+		];
+		$db_delta = [
+			'mode' => 'baseline',
+			'tables' => [],
+			'table_counts' => [],
+			'total_rows' => 0,
+			'current_fingerprints' => [],
+			'baseline_scopes' => [],
+			'selected_scopes' => [],
+		];
+		$written = synchy_write_sync_package_from_parts($file_delta, $db_delta, $sync_time, $options, $temp_dir);
+
+		if (is_wp_error($written)) {
+			return $written;
+		}
+
+		$response = synchy_sync_remote_request(
+			$options,
+			$sync_time,
+			(string) ($written['zip_path'] ?? ''),
+			[
+				'X-Syncy-Batch-Id' => 'sentinel-plugin-self-update',
+				'X-Syncy-Batch-Label' => rawurlencode(__('Sentinel plugin self-update', 'synchy')),
+				'X-Syncy-Batch-Type' => 'files',
+				'X-Syncy-Batch-Sequence' => '1',
+			]
+		);
+
+		if (is_wp_error($response)) {
+			return $response;
+		}
+
+		return [
+			'success' => true,
+			'message' => __('Sentinel updated the destination plugin files through the Sync receiver.', 'synchy'),
+			'pluginVersion' => synchy_get_display_version(),
+			'fallback' => 'sync_package',
+		];
+	} finally {
+		if (is_dir($temp_dir)) {
+			synchy_rrmdir($temp_dir);
+		}
+	}
 }
 
 function synchy_copy_directory_contents(string $source_dir, string $destination_dir)
@@ -5418,12 +5545,8 @@ function synchy_copy_directory_contents(string $source_dir, string $destination_
 
 function synchy_apply_self_update_package(string $zip_path)
 {
-	if (!function_exists('unzip_file')) {
-		require_once ABSPATH . 'wp-admin/includes/file.php';
-	}
-
-	if (!function_exists('unzip_file')) {
-		return new WP_Error('synchy_self_update_unzip_missing', __('WordPress unzip support is not available on the destination site.', 'synchy'));
+	if (!class_exists('ZipArchive')) {
+		return new WP_Error('synchy_self_update_unzip_missing', __('ZipArchive is not available on the destination site.', 'synchy'));
 	}
 
 	$temp_dir = synchy_prepare_sync_temp_dir('plugin-self-update-receive');
@@ -5433,10 +5556,27 @@ function synchy_apply_self_update_package(string $zip_path)
 	}
 
 	try {
-		$unzipped = unzip_file($zip_path, $temp_dir);
+		$zip = new ZipArchive();
+		$opened = $zip->open($zip_path);
 
-		if (is_wp_error($unzipped)) {
-			return $unzipped;
+		if ($opened !== true) {
+			return new WP_Error('synchy_self_update_zip_open_failed', __('Synchy could not open the destination plugin update package.', 'synchy'));
+		}
+
+		for ($index = 0; $index < $zip->numFiles; $index++) {
+			$name = wp_normalize_path((string) $zip->getNameIndex($index));
+
+			if ($name === '' || str_starts_with($name, '/') || str_contains($name, '../') || str_contains($name, '..\\')) {
+				$zip->close();
+				return new WP_Error('synchy_self_update_zip_invalid_path', __('The destination plugin update package contains an invalid file path.', 'synchy'));
+			}
+		}
+
+		$extracted = $zip->extractTo($temp_dir);
+		$zip->close();
+
+		if (!$extracted) {
+			return new WP_Error('synchy_self_update_extract_failed', __('Synchy could not extract the destination plugin update package.', 'synchy'));
 		}
 
 		$sentinel_source_dir = wp_normalize_path(trailingslashit($temp_dir) . 'freesiem-sentinel');
@@ -5471,6 +5611,12 @@ function synchy_update_remote_synchy(array $options)
 	}
 
 	try {
+		$body = file_get_contents((string) $package['zip_path']);
+
+		if ($body === false || $body === '') {
+			return new WP_Error('synchy_self_update_package_read_failed', __('Synchy could not read the remote plugin update package before upload.', 'synchy'));
+		}
+
 		$response = synchy_site_sync_remote_request(
 			$options,
 			'plugin/update-self',
@@ -5481,12 +5627,18 @@ function synchy_update_remote_synchy(array $options)
 					'Content-Type' => 'application/zip',
 					'X-Synchy-Filename' => (string) ($package['filename'] ?? 'synchy.zip'),
 				],
-				'body' => file_get_contents((string) $package['zip_path']),
+				'body' => $body,
 				'data_format' => 'body',
 			]
 		);
 
 		if (is_wp_error($response)) {
+			$status = (int) $response->get_error_data('status');
+
+			if ($status >= 500 || $status === 0) {
+				return synchy_update_remote_synchy_via_sync_package($options);
+			}
+
 			return $response;
 		}
 
@@ -11247,6 +11399,8 @@ add_action('admin_enqueue_scripts', function (string $hook_suffix): void {
 					'destinationUpToDate' => __('Destination Sentinel is up to date.', 'synchy'),
 					'updateCheckPending' => __('Run or wait for the connection check to compare Sentinel versions.', 'synchy'),
 					'confirmUpdateRemoteSynchy' => __('Update Sentinel on the destination site from this local plugin copy now?', 'synchy'),
+					'updatingDestination' => __('Updating destination Sentinel...', 'synchy'),
+					'updatingDestinationDetail' => __('Building a plugin package locally and sending it to the destination site.', 'synchy'),
 					'destinationUpdated' => __('Destination Sentinel updated.', 'synchy'),
 				],
 			]

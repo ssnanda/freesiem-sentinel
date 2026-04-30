@@ -3,7 +3,7 @@ Contributors: freesiem
 Requires at least: 6.4
 Tested up to: 6.8
 Requires PHP: 8.1
-Stable tag: 0.3.35
+Stable tag: 0.3.36
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -70,6 +70,12 @@ Version bumps should always have matching git tags.
 GitHub Actions publishes the ZIP automatically when a `v*` tag is pushed.
 
 == Changelog ==
+
+= 0.3.36 =
+
+* Fix Update Live Sentinel by avoiding WordPress filesystem prompts when applying remote plugin packages.
+* Add a fallback that updates destination Sentinel files through the Sync receiver when older live sites return a server error from the self-update endpoint.
+* Show clear in-page progress and error messages while Update Live Sentinel is running.
 
 = 0.3.35 =
 

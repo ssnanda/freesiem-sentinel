@@ -630,18 +630,23 @@
 		}
 
 		setBusy(true);
-		previewBadge.textContent = config.strings.preparingPreview || "Preparing preview...";
-		previewMessage.textContent = mode === "full"
-			? (config.strings.preparingFullPreview || "Preparing full Sync preview...")
-			: (config.strings.preparingPreview || "Preparing preview...");
+		updateRemoteButton.disabled = true;
+		updateRemoteNote.textContent = config.strings.updatingDestination || "Updating destination Sentinel...";
+		previewBadge.textContent = config.strings.updatingDestination || "Updating destination Sentinel...";
+		previewMessage.textContent = config.strings.updatingDestinationDetail || "Building a plugin package locally and sending it to the destination site.";
 
 		try {
 			const data = await sendAjax("synchy_update_remote_synchy");
+			const successMessage = data.message || config.strings.destinationUpdated || "Destination Sentinel updated.";
+
+			updateRemoteNote.textContent = successMessage;
+			previewBadge.textContent = config.strings.success || "Success";
+			previewMessage.textContent = successMessage;
 
 			if (data.remoteSite) {
 				currentConnectionState = {
 					status: "connected",
-					message: data.message || config.strings.destinationUpdated || "Destination Sentinel updated.",
+					message: successMessage,
 					remoteSite: data.remoteSite,
 				};
 				connectionVerified = true;
@@ -651,6 +656,9 @@
 				refreshRemoteVersionUntilCurrent();
 			}
 		} catch (error) {
+			updateRemoteNote.textContent = error.message;
+			previewBadge.textContent = config.strings.error || "Error";
+			previewMessage.textContent = error.message;
 			renderConnectionResult({ message: error.message }, true);
 			updateRemoteUpdateControls();
 		} finally {

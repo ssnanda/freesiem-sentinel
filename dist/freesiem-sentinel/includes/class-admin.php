@@ -274,6 +274,8 @@ class Freesiem_Admin
 							'destinationUpToDate' => __('Destination Sentinel is up to date.', 'synchy'),
 							'updateCheckPending' => __('Run or wait for the connection check to compare Sentinel versions.', 'synchy'),
 							'confirmUpdateRemoteSynchy' => __('Update Sentinel on the destination site from this local plugin copy now?', 'synchy'),
+							'updatingDestination' => __('Updating destination Sentinel...', 'synchy'),
+							'updatingDestinationDetail' => __('Building a plugin package locally and sending it to the destination site.', 'synchy'),
 							'destinationUpdated' => __('Destination Sentinel updated.', 'synchy'),
 						],
 					]
