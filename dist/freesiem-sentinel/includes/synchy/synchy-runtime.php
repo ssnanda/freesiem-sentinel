@@ -3,7 +3,7 @@
  * Plugin Name: Backup & Restore
  * Plugin URI: https://github.com/ssnanda/synchy
  * Description: Backup, restore, upload-to-live, and sync tooling bundled with freeSIEM Sentinel.
- * Version: 0.3.32
+ * Version: 0.3.34
  * Update URI: https://github.com/ssnanda/synchy
  * Author: sandman
  */
@@ -13,7 +13,7 @@ if (!defined('ABSPATH')) {
 }
 
 if (!defined('SYNCHY_VERSION')) {
-	define('SYNCHY_VERSION', defined('FREESIEM_SENTINEL_VERSION') ? FREESIEM_SENTINEL_VERSION : '0.3.32');
+	define('SYNCHY_VERSION', defined('FREESIEM_SENTINEL_VERSION') ? FREESIEM_SENTINEL_VERSION : '0.3.34');
 }
 const SYNCHY_SLUG = 'synchy';
 const SYNCHY_EXPORT_OPTIONS = 'synchy_export_options';
@@ -1163,6 +1163,23 @@ function synchy_get_sync_status(): array
 function synchy_set_sync_status(array $status): void
 {
 	update_option(SYNCHY_SYNC_STATUS_OPTION, $status, false);
+}
+
+function synchy_reset_sync_state(): void
+{
+	delete_option(SYNCHY_SYNC_JOB_OPTION);
+	delete_option(SYNCHY_SYNC_STATUS_OPTION);
+	delete_option(SYNCHY_SYNC_LAST_TIME_OPTION);
+
+	$state_path = synchy_get_sync_state_path();
+	if ($state_path !== '' && is_file($state_path)) {
+		@unlink($state_path);
+	}
+
+	$temp_root = synchy_get_sync_temp_root();
+	if ($temp_root !== '' && is_dir($temp_root)) {
+		synchy_rrmdir($temp_root);
+	}
 }
 
 function synchy_sync_phase_label(string $phase): string
@@ -9832,9 +9849,10 @@ function synchy_render_incremental_site_sync_page(array $current): void
 									<div class="synchy-input-row">
 										<button type="button" class="button" data-synchy-preview-sync><?php esc_html_e('Preview Changes', 'synchy'); ?></button>
 										<button type="button" class="button button-primary button-large" data-synchy-run-sync disabled><?php echo esc_html($run_button_label); ?></button>
-										<button type="button" class="button" data-synchy-run-full-sync disabled><?php esc_html_e('Full Sync', 'synchy'); ?></button>
+										<button type="button" class="button" data-synchy-run-full-sync disabled><?php esc_html_e('Preview Full Sync', 'synchy'); ?></button>
 										<button type="button" class="button" data-synchy-pause-sync disabled><?php esc_html_e('Pause Sync', 'synchy'); ?></button>
 										<button type="button" class="button" data-synchy-resume-sync disabled><?php esc_html_e('Resume Sync', 'synchy'); ?></button>
+										<button type="button" class="button button-link-delete" data-synchy-reset-sync><?php esc_html_e('Cancel / Reset Sync', 'synchy'); ?></button>
 										<button
 											type="button"
 											class="button"
@@ -9851,6 +9869,9 @@ function synchy_render_incremental_site_sync_page(array $current): void
 											esc_html((string) ($options['destination_url'] ?: __('the destination URL above', 'synchy')))
 										);
 										?>
+									</p>
+									<p class="synchy-field-note">
+										<?php esc_html_e('Preview Changes and Preview Full Sync prepare a review first. Use the primary action button after preview to start the actual sync progress.', 'synchy'); ?>
 									</p>
 								</div>
 								<div class="synchy-sync-scope-table">
@@ -10594,6 +10615,27 @@ add_action('wp_ajax_synchy_resume_full_sync', function (): void {
 	]);
 });
 
+add_action('wp_ajax_synchy_reset_sync_state', function (): void {
+	if (!current_user_can('manage_options')) {
+		wp_send_json_error(['message' => __('You are not allowed to reset Synchy Sync state.', 'synchy')], 403);
+	}
+
+	check_ajax_referer('synchy_sync_ajax', 'nonce');
+
+	synchy_reset_sync_state();
+	$options = isset($_POST[SYNCHY_SITE_SYNC_OPTIONS]) ? synchy_sanitize_site_sync_options(wp_unslash($_POST[SYNCHY_SITE_SYNC_OPTIONS])) : synchy_get_site_sync_options();
+
+	wp_send_json_success([
+		'status' => [
+			'status' => 'idle',
+			'message' => __('Sync state reset. Run Preview Full Sync to start fresh.', 'synchy'),
+		],
+		'job' => synchy_build_sync_job_response([]),
+		'scopeStatus' => synchy_get_sync_scope_status($options),
+		'message' => __('Sync state reset. Run Preview Full Sync to start fresh.', 'synchy'),
+	]);
+});
+
 add_action('wp_ajax_synchy_run_sync_changes', function (): void {
 	if (!current_user_can('manage_options')) {
 		wp_send_json_error(['message' => __('You are not allowed to run Synchy Sync changes.', 'synchy')], 403);
@@ -11143,11 +11185,17 @@ add_action('admin_enqueue_scripts', function (string $hook_suffix): void {
 					'previewReady' => __('Preview ready', 'synchy'),
 					'previewError' => __('Preview failed', 'synchy'),
 					'startBaseline' => __('Start Baseline', 'synchy'),
+					'startFullSync' => __('Start Full Sync', 'synchy'),
 					'pushChanges' => __('Push Changes', 'synchy'),
-					'fullSync' => __('Full Sync', 'synchy'),
+					'fullSync' => __('Preview Full Sync', 'synchy'),
 					'pauseSync' => __('Pause Sync', 'synchy'),
 					'resumeSync' => __('Resume Sync', 'synchy'),
+					'resetSync' => __('Cancel / Reset Sync', 'synchy'),
 					'markManualBaseline' => __('Mark Manual Baseline Complete', 'synchy'),
+					'confirmResetSync' => __('Cancel the saved Sync job and clear local Sync baseline state? This does not change the destination site.', 'synchy'),
+					'resetComplete' => __('Sync state reset. Run Preview Full Sync to start fresh.', 'synchy'),
+					'preparingPreview' => __('Preparing preview...', 'synchy'),
+					'preparingFullPreview' => __('Preparing full Sync preview...', 'synchy'),
 					'syncingAction' => __('Syncing...', 'synchy'),
 					'paused' => __('Paused', 'synchy'),
 					'resumeReady' => __('Resume ready', 'synchy'),

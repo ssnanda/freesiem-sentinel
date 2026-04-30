@@ -3,7 +3,7 @@ Contributors: freesiem
 Requires at least: 6.4
 Tested up to: 6.8
 Requires PHP: 8.1
-Stable tag: 0.3.33
+Stable tag: 0.3.35
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -70,6 +70,15 @@ Version bumps should always have matching git tags.
 GitHub Actions publishes the ZIP automatically when a `v*` tag is pushed.
 
 == Changelog ==
+
+= 0.3.35 =
+
+* Package the latest Backup & Restore sync reset and WordPress menu repair updates for GitHub release delivery.
+
+= 0.3.34 =
+
+* Add a Cancel / Reset Sync action so interrupted full Sync jobs can be cleared and restarted cleanly.
+* Clarify full Sync as a preview-first workflow before any destination changes are pushed.
 
 = 0.3.33 =
 
