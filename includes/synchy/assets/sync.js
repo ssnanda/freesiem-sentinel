@@ -261,6 +261,48 @@
 		previewBatchCounter.classList.remove("is-hidden");
 	};
 
+	const parseFullSyncStatusMessage = (message) => {
+		const plannedMatch = String(message || "").match(/Full Sync is running:\s*([\d,]+)\s*files,\s*([\d,]+)\s*DB rows,\s*([\d,]+)\s*batches planned/i);
+
+		if (!plannedMatch) {
+			return null;
+		}
+
+		return {
+			filesCount: Number(String(plannedMatch[1] || "0").replace(/,/g, "")),
+			dbRows: Number(String(plannedMatch[2] || "0").replace(/,/g, "")),
+			totalBatches: Number(String(plannedMatch[3] || "0").replace(/,/g, "")),
+		};
+	};
+
+	const buildSyntheticFullSyncJob = () => {
+		if (String(currentStatus?.status || "") !== "running") {
+			return null;
+		}
+
+		const parsed = parseFullSyncStatusMessage(currentStatus?.message || "") || {};
+		const totalBatches = Number(parsed.totalBatches || latestFullSyncPlan?.totalBatches || currentJob?.totalBatches || 0);
+
+		return {
+			...(currentJob || {}),
+			status: "running",
+			runMode: "full",
+			phase: currentJob?.phase || "sending_package",
+			phaseLabel: currentJob?.phaseLabel || (config.strings.syncRunning || "Sync running"),
+			progress: Number(currentJob?.progress || 1),
+			message: currentJob?.message || currentStatus?.message || "Full Sync is running.",
+			filesCount: Number(currentJob?.filesCount || parsed.filesCount || 0),
+			dbRows: Number(currentJob?.dbRows || parsed.dbRows || 0),
+			totalBatches,
+			completedBatches: Number(currentJob?.completedBatches || 0),
+			currentBatchLabel: currentJob?.currentBatchLabel || "",
+			batches: Array.isArray(currentJob?.batches) && currentJob.batches.length > 0
+				? currentJob.batches
+				: Array.isArray(latestFullSyncPlan?.batches) ? latestFullSyncPlan.batches : [],
+			stages: Array.isArray(currentJob?.stages) ? currentJob.stages : Array.isArray(config.defaultStages) ? config.defaultStages : [],
+		};
+	};
+
 	const renderFullSyncPendingHeader = () => {
 		const jobStatus = String(currentJob?.status || "");
 		const savedStatus = String(currentStatus?.status || "");
@@ -934,7 +976,10 @@
 	const renderPreview = (preview) => {
 		if (!preview) {
 			if (hasFullSyncDisplayContext()) {
+				renderPreviewTree(latestFullSyncPlan);
 				renderFullSyncPendingHeader();
+				updateActionButtons();
+				return;
 			} else if (getIsRunningFullSync() || getHasResumableFullSync()) {
 				previewBadge.textContent = config.strings.fullSync || "Preview Full Sync";
 				previewMessage.textContent = currentJob?.message || (config.strings.previewDefault || "Run Preview Changes to load the pending file sections and database tables.");
@@ -1021,9 +1066,13 @@
 	};
 
 	const clearPreview = () => {
+		const keepFullSyncPlan = hasFullSyncDisplayContext();
+
 		latestPreview = null;
 		latestPreviewMode = "delta";
-		latestFullSyncPlan = null;
+		if (!keepFullSyncPlan) {
+			latestFullSyncPlan = null;
+		}
 		changedScopeIds = new Set();
 		renderPreview(null);
 		updateScopeRows();
@@ -1073,9 +1122,13 @@
 
 		try {
 			const data = await sendAjax("synchy_get_sync_job_status");
-			currentJob = mergeJobResponse(data.job);
+			if (data.status) {
+				currentStatus = data.status;
+				renderStatus(data.status);
+			}
+			currentJob = mergeJobResponse(data.job) || buildSyntheticFullSyncJob() || currentJob;
 			renderProgress(currentJob);
-			renderPreviewTree(latestPreview);
+			renderPreviewTree(latestPreview || latestFullSyncPlan);
 
 			if (currentJob && currentJob.status === "running") {
 				if (currentJob.runMode === "full") {
@@ -1100,9 +1153,12 @@
 
 		try {
 			const data = await sendAjax("synchy_continue_full_sync");
-			currentJob = mergeJobResponse(data.job);
+			if (data.status) {
+				currentStatus = data.status;
+			}
+			currentJob = mergeJobResponse(data.job) || buildSyntheticFullSyncJob() || currentJob;
 			renderProgress(currentJob);
-			renderPreviewTree(latestPreview);
+			renderPreviewTree(latestPreview || latestFullSyncPlan);
 			if (currentJob?.runMode === "full" && currentJob?.status === "running") {
 				statusBadge.textContent = config.strings.syncingAction || "Syncing...";
 				statusSummary.textContent = currentJob.message || "Full Sync is running. Keep this tab open while the batches run.";
@@ -1186,7 +1242,7 @@
 			latestPreview = data.preview || null;
 			latestPreviewMode = baselinePreview ? "baseline-full" : effectiveMode;
 			latestFullSyncPlan = effectiveMode === "full" ? latestPreview : null;
-			currentJob = data.job || currentJob;
+			currentJob = mergeJobResponse(data.job) || currentJob;
 			applyScopeStatus(data.scopeStatus || null);
 			if (data.remoteSite) {
 				currentConnectionState = {
@@ -1226,11 +1282,13 @@
 			currentJob = data.job || null;
 			latestPreview = null;
 			latestPreviewMode = "delta";
+			latestFullSyncPlan = null;
+			currentStatus = data.status || { status: "idle", message: data.message || resetMessage };
 			changedScopeIds = new Set();
 			applyScopeStatus(data.scopeStatus || null);
 			renderProgress(null);
 			renderPreview(null);
-			renderStatus(data.status || { status: "idle", message: data.message || resetMessage });
+			renderStatus(currentStatus);
 			previewBadge.textContent = config.strings.success || "Success";
 			previewMessage.textContent = data.message || resetMessage;
 		} catch (error) {
@@ -1350,9 +1408,12 @@
 			const data = await sendAjax("synchy_run_sync_changes", {
 				synchy_sync_run_mode: isFullSync ? "full" : "delta",
 			});
+			if (data.status) {
+				currentStatus = data.status;
+			}
 			currentJob = mergeJobResponse(data.job) || (isFullSync ? currentJob : null);
 			renderProgress(currentJob);
-			renderPreviewTree(latestPreview);
+			renderPreviewTree(latestPreview || latestFullSyncPlan);
 			if (!isFullSync || String(currentJob?.status || "") !== "running") {
 				renderStatus(data.status || {});
 			}
@@ -1392,9 +1453,12 @@
 	const pauseFullSync = async () => {
 		try {
 			const data = await sendAjax("synchy_pause_full_sync");
-			currentJob = data.job || null;
+			if (data.status) {
+				currentStatus = data.status;
+			}
+			currentJob = mergeJobResponse(data.job) || null;
 			renderProgress(currentJob);
-			renderPreviewTree(latestPreview);
+			renderPreviewTree(latestPreview || latestFullSyncPlan);
 			updateActionButtons();
 		} catch (error) {
 			renderStatus({
@@ -1427,9 +1491,12 @@
 
 		try {
 			const data = await sendAjax("synchy_resume_full_sync");
+			if (data.status) {
+				currentStatus = data.status;
+			}
 			currentJob = mergeJobResponse(data.job) || currentJob;
 			renderProgress(currentJob);
-			renderPreviewTree(latestPreview);
+			renderPreviewTree(latestPreview || latestFullSyncPlan);
 			renderFullSyncPendingHeader();
 			if (currentJob?.runMode !== "full" || currentJob?.status !== "running") {
 				renderStatus(data.status || {});
@@ -1515,11 +1582,12 @@
 
 	updateTargetNote();
 	updateScopeRows();
+	currentJob = mergeJobResponse(currentJob) || buildSyntheticFullSyncJob() || currentJob;
 	if (currentStatus) {
 		renderStatus(currentStatus);
 	}
 	renderProgress(currentJob);
-	renderPreviewTree(latestPreview);
+	renderPreviewTree(latestPreview || latestFullSyncPlan);
 	renderFullSyncPendingHeader();
 	updateRemoteUpdateControls();
 	if (currentConnectionState?.status === "connected") {

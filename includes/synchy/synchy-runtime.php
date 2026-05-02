@@ -10892,6 +10892,7 @@ add_action('wp_ajax_synchy_get_sync_job_status', function (): void {
 	check_ajax_referer('synchy_sync_ajax', 'nonce');
 
 	wp_send_json_success([
+		'status' => synchy_get_sync_status(),
 		'job' => synchy_build_sync_job_response(synchy_get_visible_sync_job()),
 	]);
 });
