@@ -72,6 +72,7 @@
 	let pendingBaselineScopeIds = new Set((config.scopeStatus?.pendingBaselineScopeIds || []).map(String));
 	let changedScopeIds = new Set();
 	let currentJob = config.currentJob || null;
+	let currentStatus = config.currentStatus || null;
 	let currentConnectionState = config.connectionState || null;
 	let autoConnectionCheckStarted = false;
 	let browserFullSyncDriverActive = false;
@@ -250,26 +251,34 @@
 
 		const completedBatchesSource = currentJob?.completedBatches ?? batches.filter((batch) => String(batch?.status || "") === "complete").length ?? 0;
 		const completedBatches = Number(completedBatchesSource);
-		const messageBatchMatch = String(currentJob?.message || "").match(/batch\s+(\d+)\s+of\s+(\d+)/i);
+		const messageBatchMatch = String(currentJob?.message || currentStatus?.message || "").match(/batch\s+(\d+)\s+of\s+(\d+)/i);
 		const currentBatchIndex = Number(currentJob?.currentBatchIndex || (messageBatchMatch ? messageBatchMatch[1] : 0));
 		const runningBatches = batches.filter((batch) => String(batch?.status || "") === "running").length
-			|| (currentJob?.runMode === "full" && currentJob?.status === "running" && (currentBatchIndex > completedBatches || String(currentJob?.message || "").toLowerCase().includes("syncing batch")) ? 1 : 0);
+			|| (currentJob?.runMode === "full" && currentJob?.status === "running" && (currentBatchIndex > completedBatches || String(currentJob?.message || "").toLowerCase().includes("syncing batch")) ? 1 : 0)
+			|| (String(currentStatus?.status || "") === "running" && String(currentStatus?.message || "").toLowerCase().includes("syncing batch") ? 1 : 0);
 
 		previewBatchCounter.textContent = `${completedBatches.toLocaleString()} / ${totalBatches.toLocaleString()} ${config.strings.batchesComplete || "batches complete"}${runningBatches > 0 ? ` | ${runningBatches.toLocaleString()} running${currentBatchIndex > 0 ? ` (${currentBatchIndex.toLocaleString()} of ${totalBatches.toLocaleString()})` : ""}` : ""}`;
 		previewBatchCounter.classList.remove("is-hidden");
 	};
 
 	const renderFullSyncPendingHeader = () => {
-		if (currentJob?.runMode !== "full" || !["running", "paused", "failed_partial"].includes(String(currentJob?.status || ""))) {
+		const jobStatus = String(currentJob?.status || "");
+		const savedStatus = String(currentStatus?.status || "");
+
+		if (
+			(currentJob?.runMode !== "full" || !["running", "paused", "failed_partial"].includes(jobStatus))
+			&& !(savedStatus === "running" && String(currentStatus?.mode || "") === "baseline")
+		) {
 			return;
 		}
 
-		previewBadge.textContent = currentJob.status === "running"
+		const effectiveStatus = jobStatus || savedStatus;
+		previewBadge.textContent = effectiveStatus === "running"
 			? (config.strings.syncRunning || "Sync running")
-			: currentJob.status === "paused"
+			: effectiveStatus === "paused"
 				? (config.strings.paused || "Paused")
 				: (config.strings.resumeReady || "Resume ready");
-		previewMessage.textContent = currentJob.message || "Full Sync batches are in progress.";
+		previewMessage.textContent = currentJob?.message || currentStatus?.message || "Full Sync batches are in progress.";
 		renderPreviewBatchCounter(latestPreview);
 	};
 
@@ -988,6 +997,7 @@
 	};
 
 	const renderStatus = (status) => {
+		currentStatus = status || currentStatus;
 		statusBadge.textContent = getStatusBadge(status);
 		statusSummary.textContent = buildStatusSummary(status);
 	};
@@ -1485,6 +1495,9 @@
 
 	updateTargetNote();
 	updateScopeRows();
+	if (currentStatus) {
+		renderStatus(currentStatus);
+	}
 	renderProgress(currentJob);
 	renderPreviewTree(latestPreview);
 	renderFullSyncPendingHeader();
@@ -1511,6 +1524,12 @@
 		if (currentJob.runMode === "full") {
 			window.setTimeout(driveFullSyncFromBrowser, 150);
 		}
+		return;
+	}
+
+	if (!currentJob?.status && String(currentStatus?.status || "") === "running") {
+		setBusy(true);
+		window.setTimeout(pollSyncJob, 1000);
 		return;
 	}
 

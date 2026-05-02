@@ -11442,6 +11442,7 @@ add_action('admin_enqueue_scripts', function (string $hook_suffix): void {
 				'nonce' => wp_create_nonce('synchy_sync_ajax'),
 				'localPluginVersion' => synchy_get_display_version(),
 				'currentJob' => synchy_build_sync_job_response(synchy_get_visible_sync_job()),
+				'currentStatus' => synchy_get_sync_status(),
 				'connectionState' => synchy_get_current_sync_connection_state(synchy_get_site_sync_options()),
 				'defaultStages' => synchy_get_sync_stage_items([]),
 				'scopeStatus' => synchy_get_sync_scope_status(synchy_get_site_sync_options()),
