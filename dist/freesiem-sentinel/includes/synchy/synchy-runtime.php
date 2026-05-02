@@ -1520,6 +1520,65 @@ function synchy_build_sync_manual_baseline_fingerprints(array $selected_scope_id
 	return $fingerprints;
 }
 
+function synchy_get_sync_current_file_scope_times(array $selected_scope_ids): array
+{
+	$delta = synchy_collect_sync_file_delta(
+		[
+			'scope_sync_times' => [],
+			'file_paths' => [],
+		],
+		$selected_scope_ids,
+		true
+	);
+	$times = [];
+
+	foreach ((array) ($delta['files'] ?? []) as $file) {
+		$scope_id = (string) ($file['scope_id'] ?? '');
+
+		if ($scope_id === '') {
+			continue;
+		}
+
+		$times[$scope_id] = max((int) ($times[$scope_id] ?? 0), (int) ($file['mtime'] ?? 0));
+	}
+
+	return $times;
+}
+
+function synchy_get_sync_current_content_scope_time(): int
+{
+	global $wpdb;
+
+	$value = $wpdb->get_var(
+		'SELECT MAX(GREATEST(UNIX_TIMESTAMP(`post_modified_gmt`), UNIX_TIMESTAMP(`post_date_gmt`))) FROM `' . str_replace('`', '``', $wpdb->posts) . '`'
+	);
+
+	return max(0, (int) $value);
+}
+
+function synchy_build_sync_scope_time_watermarks(array $selected_scope_ids, int $fallback_time): array
+{
+	$scope_times = [];
+
+	foreach ($selected_scope_ids as $scope_id) {
+		$scope_id = (string) $scope_id;
+
+		if ($scope_id !== '') {
+			$scope_times[$scope_id] = $fallback_time;
+		}
+	}
+
+	foreach (synchy_get_sync_current_file_scope_times(array_values(array_intersect($selected_scope_ids, ['files_plugins', 'files_themes', 'files_uploads']))) as $scope_id => $time) {
+		$scope_times[(string) $scope_id] = max((int) ($scope_times[(string) $scope_id] ?? 0), (int) $time, $fallback_time);
+	}
+
+	if (in_array('db_content', $selected_scope_ids, true)) {
+		$scope_times['db_content'] = max((int) ($scope_times['db_content'] ?? 0), synchy_get_sync_current_content_scope_time(), $fallback_time);
+	}
+
+	return $scope_times;
+}
+
 function synchy_mark_sync_baseline_complete(array $raw_options)
 {
 	$options = synchy_sanitize_site_sync_options($raw_options);
@@ -1539,8 +1598,8 @@ function synchy_mark_sync_baseline_complete(array $raw_options)
 	$state = synchy_get_sync_state();
 	$scope_sync_times = isset($state['scope_sync_times']) && is_array($state['scope_sync_times']) ? $state['scope_sync_times'] : [];
 
-	foreach ($selected_scope_ids as $scope_id) {
-		$scope_sync_times[$scope_id] = $sync_time;
+	foreach (synchy_build_sync_scope_time_watermarks($selected_scope_ids, $sync_time) as $scope_id => $scope_time) {
+		$scope_sync_times[$scope_id] = max($sync_time, (int) $scope_time);
 	}
 
 	$state['last_sync_time'] = $sync_time;
@@ -2937,8 +2996,8 @@ function synchy_prepare_sync_payload(array $options, array $selection = [], bool
 	)));
 	$scope_sync_times = isset($state['scope_sync_times']) && is_array($state['scope_sync_times']) ? $state['scope_sync_times'] : [];
 
-	foreach ($effective_selected_scope_ids as $scope_id) {
-		$scope_sync_times[$scope_id] = $sync_time;
+	foreach (synchy_build_sync_scope_time_watermarks($effective_selected_scope_ids, $sync_time) as $scope_id => $scope_time) {
+		$scope_sync_times[$scope_id] = max($sync_time, (int) $scope_time);
 	}
 
 	$next_state = [

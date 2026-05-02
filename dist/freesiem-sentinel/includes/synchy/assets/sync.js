@@ -404,9 +404,6 @@
 		currentJob?.runMode === "full" && ["paused", "failed_partial"].includes(String(currentJob?.status || ""));
 
 	const getRunActionLabel = () =>
-		latestPreviewMode === "full" || Boolean(latestPreview?.forceFull)
-			? (config.strings.startFullSync || "Start Full Sync")
-			:
 		getHasPendingBaselineSelection()
 			? (config.strings.startBaseline || "Start Baseline")
 			: (config.strings.pushChanges || "Push Changes");
@@ -521,13 +518,15 @@
 		const resumableFullSync = getHasResumableFullSync();
 
 		previewButton.disabled = busy || !hasSelection;
-		runButton.disabled = busy || !hasSelection || !hasPreviewChanges || !hasSelectedPreviewItems || runningFullSync || resumableFullSync;
-		fullSyncButton.disabled = (busy && !runningFullSync) || !hasSelection || hasFullSyncPreview || runningFullSync || resumableFullSync;
+		runButton.disabled = busy || !hasSelection || hasFullSyncPreview || !hasPreviewChanges || !hasSelectedPreviewItems || runningFullSync || resumableFullSync;
+		fullSyncButton.disabled = (busy && !runningFullSync) || !hasSelection || runningFullSync || resumableFullSync || (hasFullSyncPreview && (!hasPreviewChanges || !hasSelectedPreviewItems));
 		pauseSyncButton.disabled = !runningFullSync;
 		resumeSyncButton.disabled = runningFullSync || !resumableFullSync;
 		resetSyncButton.disabled = busy;
 		runButton.textContent = busy ? (config.strings.syncingAction || "Syncing...") : runLabel;
-		fullSyncButton.textContent = config.strings.fullSync || "Preview Full Sync";
+		fullSyncButton.textContent = hasFullSyncPreview
+			? (busy ? (config.strings.syncingAction || "Syncing...") : (config.strings.startFullSync || "Start Full Sync"))
+			: (config.strings.fullSync || "Preview Full Sync");
 		pauseSyncButton.textContent = currentJob?.pauseRequested ? (config.strings.pausePending || "Pause requested") : (config.strings.pauseSync || "Pause Sync");
 		resumeSyncButton.textContent = config.strings.resumeSync || "Resume Sync";
 		resetSyncButton.textContent = config.strings.resetSync || "Cancel / Reset Sync";
@@ -1008,6 +1007,8 @@
 			renderStatus(data.status || {});
 			applyScopeStatus(data.scopeStatus || null);
 		} catch (error) {
+			previewBadge.textContent = config.strings.error || "Error";
+			previewMessage.textContent = error.message;
 			renderStatus({
 				status: "error",
 				message: error.message,
@@ -1072,6 +1073,7 @@
 			});
 			latestPreview = data.preview || null;
 			latestPreviewMode = mode === "full" ? "full" : "delta";
+			currentJob = data.job || currentJob;
 			applyScopeStatus(data.scopeStatus || null);
 			if (data.remoteSite) {
 				currentConnectionState = {
@@ -1083,6 +1085,12 @@
 				renderConnectionResult(data.remoteSite || {}, false);
 			}
 			renderPreview(latestPreview);
+			if (mode === "full" && latestPreview !== null) {
+				statusBadge.textContent = config.strings.previewReady || "Preview ready";
+				statusSummary.textContent = getHasPreviewChanges()
+					? "Full Sync preview is ready. Click Start Full Sync to begin."
+					: "Full Sync preview found nothing to send for the selected scopes.";
+			}
 		} catch (error) {
 			clearPreview();
 			previewBadge.textContent = config.strings.previewError || "Preview failed";
@@ -1113,6 +1121,8 @@
 			previewBadge.textContent = config.strings.success || "Success";
 			previewMessage.textContent = data.message || resetMessage;
 		} catch (error) {
+			previewBadge.textContent = config.strings.error || "Error";
+			previewMessage.textContent = error.message;
 			renderStatus({
 				status: "error",
 				message: error.message,
@@ -1219,7 +1229,9 @@
 		renderPreviewTree(latestPreview);
 		window.setTimeout(pollSyncJob, 100);
 		statusBadge.textContent = config.strings.syncingAction || "Syncing...";
-		statusSummary.textContent = "Sync is running. Keep this tab open until it finishes.";
+		statusSummary.textContent = isFullSync
+			? "Full Sync is starting. Keep this tab open while the batches run."
+			: "Sync is running. Keep this tab open until it finishes.";
 
 		try {
 			const data = await sendAjax("synchy_run_sync_changes", {
@@ -1232,7 +1244,10 @@
 			applyScopeStatus(data.scopeStatus || null);
 			if (currentJob?.runMode === "full" && currentJob?.status === "running") {
 				setBusy(true);
+				statusBadge.textContent = config.strings.syncingAction || "Syncing...";
+				statusSummary.textContent = "Full Sync is running. Keep this tab open while the batches run.";
 				window.setTimeout(driveFullSyncFromBrowser, 50);
+				return;
 			}
 			if (!getHasResumableFullSync()) {
 				clearPreview();
@@ -1250,7 +1265,11 @@
 				mode: "",
 			});
 		} finally {
-			setBusy(false);
+			if (currentJob?.status === "running") {
+				setBusy(true);
+			} else {
+				setBusy(false);
+			}
 		}
 	};
 
@@ -1357,7 +1376,14 @@
 		updateRemoteButton.addEventListener("click", updateRemoteSynchy);
 	}
 	previewButton.addEventListener("click", () => runPreview("delta"));
-	fullSyncButton.addEventListener("click", () => runPreview("full"));
+	fullSyncButton.addEventListener("click", () => {
+		if (latestPreview !== null && (latestPreviewMode === "full" || Boolean(latestPreview?.forceFull))) {
+			runSync();
+			return;
+		}
+
+		runPreview("full");
+	});
 	runButton.addEventListener("click", runSync);
 	pauseSyncButton.addEventListener("click", pauseFullSync);
 	resumeSyncButton.addEventListener("click", resumeFullSync);

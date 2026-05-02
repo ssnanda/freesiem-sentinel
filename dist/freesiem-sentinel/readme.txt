@@ -3,7 +3,7 @@ Contributors: freesiem
 Requires at least: 6.4
 Tested up to: 6.8
 Requires PHP: 8.1
-Stable tag: 0.3.37
+Stable tag: 0.3.38
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -70,6 +70,12 @@ Version bumps should always have matching git tags.
 GitHub Actions publishes the ZIP automatically when a `v*` tag is pushed.
 
 == Changelog ==
+
+= 0.3.38 =
+
+* Simplify the Sync action flow so Preview Full Sync turns into Start Full Sync on the same button while Preview Changes keeps the baseline/push action separate.
+* Improve full Sync start feedback and keep the page busy while browser-driven batch processing is running.
+* Record manual baseline and completed Sync watermarks from current file/post timestamps so immediate previews do not show already-baselined items as pending.
 
 = 0.3.37 =
 
