@@ -10047,9 +10047,17 @@ function synchy_render_incremental_site_sync_page(array $current): void
 			<?php
 			$pending_tree_html = (string) ob_get_clean();
 		}
-	} elseif ((string) ($status['status'] ?? '') === 'running' && (string) ($status['mode'] ?? '') === 'baseline') {
+	} elseif ((string) ($status['status'] ?? '') === 'running') {
 		$pending_badge = __('Sync running', 'synchy');
 		$pending_message = (string) ($status['message'] ?? __('Full Sync batches are in progress.', 'synchy'));
+
+		if (preg_match('/(\d+)\s+batches\s+planned/i', $pending_message, $matches)) {
+			$pending_batch_counter = sprintf(
+				/* translators: %s: total batches */
+				__('0 / %s batches complete', 'synchy'),
+				number_format_i18n((int) $matches[1])
+			);
+		}
 	}
 	$connection_state_status = (string) ($connection_state['status'] ?? '');
 	$connection_badge = __('Pending', 'synchy');

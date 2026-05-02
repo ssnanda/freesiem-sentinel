@@ -264,15 +264,19 @@
 	const renderFullSyncPendingHeader = () => {
 		const jobStatus = String(currentJob?.status || "");
 		const savedStatus = String(currentStatus?.status || "");
+		const hasBatchPlan = Number(currentJob?.totalBatches || latestFullSyncPlan?.totalBatches || 0) > 0
+			|| (Array.isArray(currentJob?.batches) && currentJob.batches.length > 0)
+			|| (Array.isArray(latestFullSyncPlan?.batches) && latestFullSyncPlan.batches.length > 0);
 
 		if (
 			(currentJob?.runMode !== "full" || !["running", "paused", "failed_partial"].includes(jobStatus))
-			&& !(savedStatus === "running" && String(currentStatus?.mode || "") === "baseline")
+			&& !(savedStatus === "running")
+			&& !hasBatchPlan
 		) {
 			return;
 		}
 
-		const effectiveStatus = jobStatus || savedStatus;
+		const effectiveStatus = jobStatus || savedStatus || "running";
 		previewBadge.textContent = effectiveStatus === "running"
 			? (config.strings.syncRunning || "Sync running")
 			: effectiveStatus === "paused"
@@ -281,6 +285,12 @@
 		previewMessage.textContent = currentJob?.message || currentStatus?.message || "Full Sync batches are in progress.";
 		renderPreviewBatchCounter(latestPreview);
 	};
+
+	const hasFullSyncDisplayContext = () =>
+		currentJob?.runMode === "full"
+		|| String(currentStatus?.status || "") === "running"
+		|| Number(latestFullSyncPlan?.totalBatches || 0) > 0
+		|| (Array.isArray(latestFullSyncPlan?.batches) && latestFullSyncPlan.batches.length > 0);
 
 	const mergeJobResponse = (incoming) => {
 		if (!incoming || !incoming.status) {
@@ -773,15 +783,16 @@
 
 		const plannedBatchTotal = Number(currentJob?.totalBatches || preview?.totalBatches || latestFullSyncPlan?.totalBatches || 0);
 
-		if (plannedBatchTotal > 0) {
+		if (plannedBatchTotal > 0 || hasFullSyncDisplayContext()) {
+			const displayTotal = plannedBatchTotal > 0 ? plannedBatchTotal : Number(String(currentStatus?.message || "").match(/(\d+)\s+batches\s+planned/i)?.[1] || 0);
 			previewTreeContainer.innerHTML = `
 				<div class="synchy-sync-tree__section">
 					<h4>${escapeHtml(config.strings.batches || "Batches")}</h4>
 					<div class="synchy-sync-tree__node">
 						<div class="synchy-sync-tree__toggle">
 							<span>
-								<strong>${escapeHtml(`${Number(currentJob?.completedBatches || 0).toLocaleString()} / ${plannedBatchTotal.toLocaleString()} ${config.strings.batchesComplete || "batches complete"}`)}</strong>
-								<small>${escapeHtml(currentJob?.message || "Waiting for batch details to refresh.")}</small>
+								<strong>${escapeHtml(displayTotal > 0 ? `${Number(currentJob?.completedBatches || 0).toLocaleString()} / ${displayTotal.toLocaleString()} ${config.strings.batchesComplete || "batches complete"}` : "Full Sync status")}</strong>
+								<small>${escapeHtml(currentJob?.message || currentStatus?.message || "Waiting for batch details to refresh.")}</small>
 							</span>
 						</div>
 					</div>
@@ -922,7 +933,9 @@
 
 	const renderPreview = (preview) => {
 		if (!preview) {
-			if (getIsRunningFullSync() || getHasResumableFullSync()) {
+			if (hasFullSyncDisplayContext()) {
+				renderFullSyncPendingHeader();
+			} else if (getIsRunningFullSync() || getHasResumableFullSync()) {
 				previewBadge.textContent = config.strings.fullSync || "Preview Full Sync";
 				previewMessage.textContent = currentJob?.message || (config.strings.previewDefault || "Run Preview Changes to load the pending file sections and database tables.");
 			} else {
@@ -931,6 +944,7 @@
 			}
 			renderPreviewBatchCounter(null);
 			renderPreviewTree(null);
+			renderFullSyncPendingHeader();
 			return;
 		}
 
