@@ -1931,6 +1931,25 @@ function synchy_get_visible_sync_job(): array
 	}
 
 	$status = (string) ($job['status'] ?? '');
+	$is_full_sync = (string) ($job['run_mode'] ?? '') === 'full';
+	$total_batches = (int) ($job['total_batches'] ?? 0);
+	$completed_batches = (int) ($job['completed_batches'] ?? 0);
+
+	if (
+		$is_full_sync
+		&& $total_batches > 0
+		&& $completed_batches < $total_batches
+		&& !in_array($status, ['running', 'paused', 'failed_partial'], true)
+	) {
+		$job['status'] = 'failed_partial';
+		$job['phase'] = 'error';
+		$job['resumable'] = true;
+		$job['message'] = (string) ($job['message'] ?? '') !== ''
+			? (string) $job['message']
+			: __('This full Sync stopped before all batches completed. Resume Sync to continue from the saved batch plan.', 'synchy');
+		$job = synchy_update_sync_job($job);
+		$status = 'failed_partial';
+	}
 
 	if ($status === 'running') {
 		$updated_at = strtotime((string) ($job['updated_at'] ?? $job['created_at'] ?? ''));

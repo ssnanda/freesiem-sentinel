@@ -3,7 +3,7 @@ Contributors: freesiem
 Requires at least: 6.4
 Tested up to: 6.8
 Requires PHP: 8.1
-Stable tag: 0.3.42
+Stable tag: 0.3.43
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -70,6 +70,12 @@ Version bumps should always have matching git tags.
 GitHub Actions publishes the ZIP automatically when a `v*` tag is pushed.
 
 == Changelog ==
+
+= 0.3.43 =
+
+* Restore saved incomplete full Sync jobs after page reload so admins can resume instead of seeing only baseline setup.
+* Refresh the Pending Changes header during resumed full Sync runs instead of leaving stale success messages in that panel.
+* Infer the active running batch from the full Sync status message when the numeric current batch field has not refreshed yet.
 
 = 0.3.42 =
 

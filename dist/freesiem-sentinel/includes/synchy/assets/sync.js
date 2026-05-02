@@ -250,12 +250,27 @@
 
 		const completedBatchesSource = currentJob?.completedBatches ?? batches.filter((batch) => String(batch?.status || "") === "complete").length ?? 0;
 		const completedBatches = Number(completedBatchesSource);
-		const currentBatchIndex = Number(currentJob?.currentBatchIndex || 0);
+		const messageBatchMatch = String(currentJob?.message || "").match(/batch\s+(\d+)\s+of\s+(\d+)/i);
+		const currentBatchIndex = Number(currentJob?.currentBatchIndex || (messageBatchMatch ? messageBatchMatch[1] : 0));
 		const runningBatches = batches.filter((batch) => String(batch?.status || "") === "running").length
-			|| (currentJob?.runMode === "full" && currentJob?.status === "running" && Number(currentJob?.currentBatchIndex || 0) > Number(currentJob?.completedBatches || 0) ? 1 : 0);
+			|| (currentJob?.runMode === "full" && currentJob?.status === "running" && (currentBatchIndex > completedBatches || String(currentJob?.message || "").toLowerCase().includes("syncing batch")) ? 1 : 0);
 
 		previewBatchCounter.textContent = `${completedBatches.toLocaleString()} / ${totalBatches.toLocaleString()} ${config.strings.batchesComplete || "batches complete"}${runningBatches > 0 ? ` | ${runningBatches.toLocaleString()} running${currentBatchIndex > 0 ? ` (${currentBatchIndex.toLocaleString()} of ${totalBatches.toLocaleString()})` : ""}` : ""}`;
 		previewBatchCounter.classList.remove("is-hidden");
+	};
+
+	const renderFullSyncPendingHeader = () => {
+		if (currentJob?.runMode !== "full" || !["running", "paused", "failed_partial"].includes(String(currentJob?.status || ""))) {
+			return;
+		}
+
+		previewBadge.textContent = currentJob.status === "running"
+			? (config.strings.syncRunning || "Sync running")
+			: currentJob.status === "paused"
+				? (config.strings.paused || "Paused")
+				: (config.strings.resumeReady || "Resume ready");
+		previewMessage.textContent = currentJob.message || "Full Sync batches are in progress.";
+		renderPreviewBatchCounter(latestPreview);
 	};
 
 	const mergeJobResponse = (incoming) => {
@@ -738,6 +753,7 @@
 			`;
 			previewTreeContainer.classList.remove("is-hidden");
 			renderPreviewBatchCounter(preview);
+			renderFullSyncPendingHeader();
 			updateActionButtons();
 			return;
 		}
@@ -760,6 +776,7 @@
 			`;
 			previewTreeContainer.classList.remove("is-hidden");
 			renderPreviewBatchCounter(preview);
+			renderFullSyncPendingHeader();
 			updateActionButtons();
 			return;
 		}
@@ -1375,14 +1392,21 @@
 		};
 		renderProgress(currentJob);
 		renderPreviewTree(latestPreview);
+		renderFullSyncPendingHeader();
 		window.setTimeout(pollSyncJob, 100);
 
 		try {
 			const data = await sendAjax("synchy_resume_full_sync");
-			currentJob = data.job || null;
+			currentJob = mergeJobResponse(data.job) || currentJob;
 			renderProgress(currentJob);
 			renderPreviewTree(latestPreview);
-			renderStatus(data.status || {});
+			renderFullSyncPendingHeader();
+			if (currentJob?.runMode !== "full" || currentJob?.status !== "running") {
+				renderStatus(data.status || {});
+			} else {
+				statusBadge.textContent = config.strings.syncingAction || "Syncing...";
+				statusSummary.textContent = currentJob.message || "Full Sync is running. Keep this tab open while the batches run.";
+			}
 			applyScopeStatus(data.scopeStatus || null);
 			if (currentJob?.runMode === "full" && currentJob?.status === "running") {
 				window.setTimeout(driveFullSyncFromBrowser, 50);
@@ -1463,6 +1487,7 @@
 	updateScopeRows();
 	renderProgress(currentJob);
 	renderPreviewTree(latestPreview);
+	renderFullSyncPendingHeader();
 	updateRemoteUpdateControls();
 	if (currentConnectionState?.status === "connected") {
 		renderConnectionResult(currentConnectionState.remoteSite || {}, false);
@@ -1487,6 +1512,14 @@
 			window.setTimeout(driveFullSyncFromBrowser, 150);
 		}
 		return;
+	}
+
+	if (getHasResumableFullSync()) {
+		renderStatus({
+			status: "paused",
+			message: currentJob.message || "Full Sync stopped before all batches completed. Resume Sync to continue.",
+			at: currentJob.updatedAt || currentJob.createdAt || new Date().toISOString(),
+		});
 	}
 
 	updateConnectionControls();
