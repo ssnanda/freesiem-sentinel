@@ -6030,8 +6030,13 @@ function synchy_process_full_sync_job(array $job, array $options)
 	foreach ($batches as $index => $batch) {
 		$state = (string) ($job['batches'][$index]['status'] ?? 'pending');
 
-		if ($state === 'complete' || $state === 'running') {
+		if ($state === 'complete') {
 			continue;
+		}
+
+		if ($state === 'running') {
+			$job['batches'][$index]['status'] = 'pending';
+			$job['batches'][$index]['error_message'] = '';
 		}
 
 		$job['status'] = 'running';

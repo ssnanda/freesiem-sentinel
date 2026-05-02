@@ -3,7 +3,7 @@ Contributors: freesiem
 Requires at least: 6.4
 Tested up to: 6.8
 Requires PHP: 8.1
-Stable tag: 0.3.41
+Stable tag: 0.3.42
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -70,6 +70,11 @@ Version bumps should always have matching git tags.
 GitHub Actions publishes the ZIP automatically when a `v*` tag is pushed.
 
 == Changelog ==
+
+= 0.3.42 =
+
+* Retry interrupted full Sync batches that were left in a running state, allowing Resume Sync to continue after a destination fatal error or timeout.
+* Show the active full Sync batch count from the current batch index when detailed batch status has not refreshed yet.
 
 = 0.3.41 =
 

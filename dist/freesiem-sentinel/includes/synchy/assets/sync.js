@@ -250,9 +250,11 @@
 
 		const completedBatchesSource = currentJob?.completedBatches ?? batches.filter((batch) => String(batch?.status || "") === "complete").length ?? 0;
 		const completedBatches = Number(completedBatchesSource);
-		const runningBatches = batches.filter((batch) => String(batch?.status || "") === "running").length;
+		const currentBatchIndex = Number(currentJob?.currentBatchIndex || 0);
+		const runningBatches = batches.filter((batch) => String(batch?.status || "") === "running").length
+			|| (currentJob?.runMode === "full" && currentJob?.status === "running" && Number(currentJob?.currentBatchIndex || 0) > Number(currentJob?.completedBatches || 0) ? 1 : 0);
 
-		previewBatchCounter.textContent = `${completedBatches.toLocaleString()} / ${totalBatches.toLocaleString()} ${config.strings.batchesComplete || "batches complete"}${runningBatches > 0 ? ` | ${runningBatches.toLocaleString()} running` : ""}`;
+		previewBatchCounter.textContent = `${completedBatches.toLocaleString()} / ${totalBatches.toLocaleString()} ${config.strings.batchesComplete || "batches complete"}${runningBatches > 0 ? ` | ${runningBatches.toLocaleString()} running${currentBatchIndex > 0 ? ` (${currentBatchIndex.toLocaleString()} of ${totalBatches.toLocaleString()})` : ""}` : ""}`;
 		previewBatchCounter.classList.remove("is-hidden");
 	};
 
