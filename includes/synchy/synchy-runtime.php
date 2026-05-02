@@ -9953,7 +9953,8 @@ function synchy_render_schedule_page(array $current): void
 function synchy_render_incremental_site_sync_page(array $current): void
 {
 	$options = synchy_get_site_sync_options();
-	$running_job = synchy_get_running_sync_job();
+	$visible_sync_job = synchy_get_visible_sync_job();
+	$running_job = (($visible_sync_job['status'] ?? '') === 'running') ? $visible_sync_job : [];
 	$connection_state = synchy_get_current_sync_connection_state($options);
 	$sync_stage_items = synchy_get_sync_stage_items($running_job);
 	$password_hint = synchy_get_site_sync_password_hint($options);
@@ -9967,6 +9968,89 @@ function synchy_render_incremental_site_sync_page(array $current): void
 	$status_destination = (string) ($status['destinationUrl'] ?? $options['destination_url'] ?? __('Not set', 'synchy'));
 	$status_mode = ucfirst((string) ($status['mode'] ?? ($last_sync_time > 0 ? 'delta' : 'baseline')));
 	$status_duration = !empty($status['durationSeconds']) ? synchy_format_sync_duration((float) $status['durationSeconds']) : __('N/A', 'synchy');
+	$pending_badge = $last_sync_time > 0 ? __('Delta', 'synchy') : __('Baseline', 'synchy');
+	$pending_message = __('Run Preview Changes to see how many files and database rows Backup & Restore will sync before anything is sent.', 'synchy');
+	$pending_batch_counter = '';
+	$pending_tree_classes = 'synchy-sync-tree is-hidden';
+	$pending_tree_html = '';
+	$full_sync_status = (string) ($visible_sync_job['status'] ?? '');
+
+	if (
+		(string) ($visible_sync_job['run_mode'] ?? '') === 'full'
+		&& in_array($full_sync_status, ['running', 'paused', 'failed_partial'], true)
+	) {
+		$pending_badge = $full_sync_status === 'running'
+			? __('Sync running', 'synchy')
+			: ($full_sync_status === 'paused' ? __('Paused', 'synchy') : __('Resume ready', 'synchy'));
+		$pending_message = (string) ($visible_sync_job['message'] ?? __('Full Sync batches are in progress.', 'synchy'));
+		$total_batches = max(0, (int) ($visible_sync_job['total_batches'] ?? 0));
+		$completed_batches = max(0, (int) ($visible_sync_job['completed_batches'] ?? 0));
+		$current_batch_index = max(0, (int) ($visible_sync_job['current_batch_index'] ?? 0));
+		$running_count = $full_sync_status === 'running' && $current_batch_index > $completed_batches ? 1 : 0;
+
+		if ($total_batches > 0) {
+			$pending_batch_counter = sprintf(
+				/* translators: 1: completed batches, 2: total batches */
+				__('%1$s / %2$s batches complete', 'synchy'),
+				number_format_i18n($completed_batches),
+				number_format_i18n($total_batches)
+			);
+
+			if ($running_count > 0) {
+				$pending_batch_counter .= ' | ' . sprintf(
+					/* translators: 1: current batch, 2: total batches */
+					__('1 running (%1$s of %2$s)', 'synchy'),
+					number_format_i18n($current_batch_index),
+					number_format_i18n($total_batches)
+				);
+			}
+		}
+
+		$batches = array_values(array_filter((array) ($visible_sync_job['batches'] ?? []), 'is_array'));
+
+		if ($batches !== []) {
+			$pending_tree_classes = 'synchy-sync-tree';
+			ob_start();
+			?>
+			<div class="synchy-sync-tree__section">
+				<h4><?php esc_html_e('Batches', 'synchy'); ?></h4>
+				<?php foreach ($batches as $batch) : ?>
+					<?php
+					$batch_status = (string) ($batch['status'] ?? 'pending');
+					$marker = $batch_status === 'complete' ? '[x]' : ($batch_status === 'running' ? '[>]' : ($batch_status === 'failed' ? '[!]' : '[ ]'));
+					$detail = (int) ($batch['file_count'] ?? 0) > 0
+						? sprintf(
+							/* translators: 1: file count, 2: byte count */
+							__('%1$s files | %2$s bytes', 'synchy'),
+							number_format_i18n((int) ($batch['file_count'] ?? 0)),
+							size_format((int) ($batch['work_units'] ?? 0))
+						)
+						: sprintf(
+							/* translators: %s: row count */
+							__('%s rows', 'synchy'),
+							number_format_i18n((int) ($batch['db_rows'] ?? 0))
+						);
+					?>
+					<div class="synchy-sync-tree__node">
+						<div class="synchy-sync-tree__toggle">
+							<span>
+								<strong><?php echo esc_html($marker . ' ' . (string) ($batch['label'] ?? '')); ?></strong>
+								<small><?php echo esc_html($detail); ?></small>
+							</span>
+						</div>
+						<?php if (!empty($batch['error_message'])) : ?>
+							<p class="synchy-sync-tree__sample"><?php echo esc_html((string) $batch['error_message']); ?></p>
+						<?php endif; ?>
+					</div>
+				<?php endforeach; ?>
+			</div>
+			<?php
+			$pending_tree_html = (string) ob_get_clean();
+		}
+	} elseif ((string) ($status['status'] ?? '') === 'running' && (string) ($status['mode'] ?? '') === 'baseline') {
+		$pending_badge = __('Sync running', 'synchy');
+		$pending_message = (string) ($status['message'] ?? __('Full Sync batches are in progress.', 'synchy'));
+	}
 	$connection_state_status = (string) ($connection_state['status'] ?? '');
 	$connection_badge = __('Pending', 'synchy');
 	$connection_message = __('Use Test Connection to verify the destination Backup & Restore receiver.', 'synchy');
@@ -10262,11 +10346,11 @@ function synchy_render_incremental_site_sync_page(array $current): void
 							<div class="synchy-stack synchy-stack--compact">
 								<div class="synchy-stack__split">
 									<h2><?php esc_html_e('Pending Changes', 'synchy'); ?></h2>
-									<span class="synchy-badge" data-synchy-sync-preview-badge><?php echo esc_html($last_sync_time > 0 ? __('Delta', 'synchy') : __('Baseline', 'synchy')); ?></span>
+									<span class="synchy-badge" data-synchy-sync-preview-badge><?php echo esc_html($pending_badge); ?></span>
 								</div>
-								<p class="synchy-field-note" data-synchy-sync-preview-message><?php esc_html_e('Run Preview Changes to see how many files and database rows Backup & Restore will sync before anything is sent.', 'synchy'); ?></p>
-								<p class="synchy-field-note is-hidden" data-synchy-sync-batch-counter></p>
-								<div class="synchy-sync-tree is-hidden" data-synchy-sync-preview-tree></div>
+								<p class="synchy-field-note" data-synchy-sync-preview-message><?php echo esc_html($pending_message); ?></p>
+								<p class="synchy-field-note<?php echo $pending_batch_counter === '' ? ' is-hidden' : ''; ?>" data-synchy-sync-batch-counter><?php echo esc_html($pending_batch_counter); ?></p>
+								<div class="<?php echo esc_attr($pending_tree_classes); ?>" data-synchy-sync-preview-tree><?php echo wp_kses_post($pending_tree_html); ?></div>
 							</div>
 						</div>
 

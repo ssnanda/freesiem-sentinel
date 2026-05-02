@@ -450,6 +450,9 @@
 	const getHasPendingBaselineSelection = () =>
 		getSelectedScopeIds().some((scopeId) => pendingBaselineScopeIds.has(String(scopeId)));
 
+	const getIsBatchedBaselinePreview = () =>
+		latestPreview !== null && latestPreviewMode === "baseline-full";
+
 	const getIsRunningFullSync = () => currentJob?.runMode === "full" && currentJob?.status === "running";
 	const getHasResumableFullSync = () =>
 		currentJob?.runMode === "full" && ["paused", "failed_partial"].includes(String(currentJob?.status || ""));
@@ -564,12 +567,13 @@
 		const runLabel = getRunActionLabel();
 		const hasPreviewChanges = getHasPreviewChanges();
 		const hasSelectedPreviewItems = getHasSelectedPreviewItems();
-		const hasFullSyncPreview = latestPreview !== null && (latestPreviewMode === "full" || Boolean(latestPreview?.forceFull));
+		const hasFullSyncPreview = latestPreview !== null && latestPreviewMode === "full";
+		const hasBatchedBaselinePreview = getIsBatchedBaselinePreview();
 		const runningFullSync = getIsRunningFullSync();
 		const resumableFullSync = getHasResumableFullSync();
 
 		previewButton.disabled = busy || !hasSelection;
-		runButton.disabled = busy || !hasSelection || hasFullSyncPreview || !hasPreviewChanges || !hasSelectedPreviewItems || runningFullSync || resumableFullSync;
+		runButton.disabled = busy || !hasSelection || (hasFullSyncPreview && !hasBatchedBaselinePreview) || !hasPreviewChanges || !hasSelectedPreviewItems || runningFullSync || resumableFullSync;
 		fullSyncButton.disabled = (busy && !runningFullSync) || !hasSelection || runningFullSync || resumableFullSync || (hasFullSyncPreview && (!hasPreviewChanges || !hasSelectedPreviewItems));
 		pauseSyncButton.disabled = !runningFullSync;
 		resumeSyncButton.disabled = runningFullSync || !resumableFullSync;
@@ -1160,12 +1164,14 @@
 				}
 			}
 
+			const baselinePreview = mode !== "full" && getHasPendingBaselineSelection();
+			const effectiveMode = mode === "full" || baselinePreview ? "full" : "delta";
 			const data = await sendAjax("synchy_preview_sync_changes", {
-				synchy_sync_run_mode: mode === "full" ? "full" : "delta",
+				synchy_sync_run_mode: effectiveMode,
 			});
 			latestPreview = data.preview || null;
-			latestPreviewMode = mode === "full" ? "full" : "delta";
-			latestFullSyncPlan = mode === "full" ? latestPreview : null;
+			latestPreviewMode = baselinePreview ? "baseline-full" : effectiveMode;
+			latestFullSyncPlan = effectiveMode === "full" ? latestPreview : null;
 			currentJob = data.job || currentJob;
 			applyScopeStatus(data.scopeStatus || null);
 			if (data.remoteSite) {
@@ -1178,11 +1184,11 @@
 				renderConnectionResult(data.remoteSite || {}, false);
 			}
 			renderPreview(latestPreview);
-			if (mode === "full" && latestPreview !== null) {
+			if (effectiveMode === "full" && latestPreview !== null) {
 				statusBadge.textContent = config.strings.previewReady || "Preview ready";
 				statusSummary.textContent = getHasPreviewChanges()
-					? "Full Sync preview is ready. Click Start Full Sync to begin."
-					: "Full Sync preview found nothing to send for the selected scopes.";
+					? (baselinePreview ? "Baseline preview is ready. Click Start Baseline to begin the batched sync." : "Full Sync preview is ready. Click Start Full Sync to begin.")
+					: (baselinePreview ? "Baseline preview found nothing to send for the selected scopes." : "Full Sync preview found nothing to send for the selected scopes.");
 			}
 		} catch (error) {
 			clearPreview();
@@ -1285,7 +1291,7 @@
 		const scopeLabels = getSelectedScopeLabels();
 		const selectedFileSections = form.querySelectorAll('input[name="synchy_sync_selected_file_scopes[]"]:checked').length;
 		const selectedDbTables = form.querySelectorAll('input[name="synchy_sync_selected_db_tables[]"]:checked').length;
-		const isFullSync = latestPreviewMode === "full" || Boolean(latestPreview?.forceFull);
+		const isFullSync = latestPreviewMode === "full" || getIsBatchedBaselinePreview() || Boolean(latestPreview?.forceFull);
 		const confirmMessage = [
 			isFullSync
 				? (config.strings.confirmFullSync || "Run a full Sync for the selected scopes and send all tracked files and rows to the destination site now?")
