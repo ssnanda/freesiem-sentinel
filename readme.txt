@@ -3,7 +3,7 @@ Contributors: freesiem
 Requires at least: 6.4
 Tested up to: 6.8
 Requires PHP: 8.1
-Stable tag: 0.3.38
+Stable tag: 0.3.39
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -70,6 +70,11 @@ Version bumps should always have matching git tags.
 GitHub Actions publishes the ZIP automatically when a `v*` tag is pushed.
 
 == Changelog ==
+
+= 0.3.39 =
+
+* Keep the full Sync progress panel visible immediately after Start Full Sync and prevent empty status refreshes from reverting the UI to Awaiting baseline.
+* Return an explicit running status when a full Sync job is queued so admins see the planned files, rows, and batch count while processing starts.
 
 = 0.3.38 =
 

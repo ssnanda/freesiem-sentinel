@@ -877,6 +877,8 @@
 				return config.strings.success || "Success";
 			case "paused":
 				return config.strings.paused || "Paused";
+			case "running":
+				return config.strings.syncingAction || "Syncing...";
 			case "error":
 				return config.strings.error || "Error";
 			case "idle":
@@ -895,7 +897,7 @@
 	};
 
 	const buildStatusSummary = (status) => {
-		if (["error", "paused"].includes(String(status?.status || ""))) {
+		if (["error", "paused", "running"].includes(String(status?.status || ""))) {
 			return getStatusMessage(status);
 		}
 
@@ -1237,15 +1239,19 @@
 			const data = await sendAjax("synchy_run_sync_changes", {
 				synchy_sync_run_mode: isFullSync ? "full" : "delta",
 			});
-			currentJob = data.job || null;
+			const responseJob = data.job || null;
+			currentJob = responseJob?.status ? responseJob : (isFullSync ? currentJob : null);
 			renderProgress(currentJob);
 			renderPreviewTree(latestPreview);
-			renderStatus(data.status || {});
+			if (!isFullSync || String(currentJob?.status || "") !== "running") {
+				renderStatus(data.status || {});
+			}
 			applyScopeStatus(data.scopeStatus || null);
 			if (currentJob?.runMode === "full" && currentJob?.status === "running") {
 				setBusy(true);
 				statusBadge.textContent = config.strings.syncingAction || "Syncing...";
 				statusSummary.textContent = "Full Sync is running. Keep this tab open while the batches run.";
+				renderProgress(currentJob);
 				window.setTimeout(driveFullSyncFromBrowser, 50);
 				return;
 			}

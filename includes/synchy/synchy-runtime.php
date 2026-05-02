@@ -7549,10 +7549,28 @@ function synchy_run_sync_changes(array $raw_options)
 
 		$job['sync_time_base'] = (int) (($payload['summary']['syncedAt'] ?? time()) * 100);
 		$job = synchy_update_sync_job($job);
+		$status = [
+			'status' => 'running',
+			'mode' => 'baseline',
+			'filesSynced' => (int) ($job['files_count'] ?? 0),
+			'dbRowsSynced' => (int) ($job['db_rows'] ?? 0),
+			'durationSeconds' => 0,
+			'destinationUrl' => (string) ($options['destination_url'] ?? ''),
+			'selectedScopeLabels' => (array) ($job['selected_scope_labels'] ?? []),
+			'at' => gmdate('c'),
+			'message' => sprintf(
+				__('Full Sync is running: %1$d files, %2$d DB rows, %3$d batches planned.', 'synchy'),
+				(int) ($job['files_count'] ?? 0),
+				(int) ($job['db_rows'] ?? 0),
+				(int) ($job['total_batches'] ?? 0)
+			),
+			'lastSyncTime' => synchy_get_sync_last_time(),
+		];
+		synchy_set_sync_status($status);
 		$job = synchy_schedule_full_sync_worker($job, 0);
 		synchy_trigger_full_sync_worker_async((string) ($job['worker_token'] ?? ''));
 
-		return synchy_get_sync_status();
+		return $status;
 	}
 
 	$job = synchy_start_sync_job($options);
