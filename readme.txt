@@ -3,7 +3,7 @@ Contributors: freesiem
 Requires at least: 6.4
 Tested up to: 6.8
 Requires PHP: 8.1
-Stable tag: 0.3.39
+Stable tag: 0.3.40
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -70,6 +70,11 @@ Version bumps should always have matching git tags.
 GitHub Actions publishes the ZIP automatically when a `v*` tag is pushed.
 
 == Changelog ==
+
+= 0.3.40 =
+
+* Keep the full Sync batch plan visible in Pending Changes while the running job status catches up.
+* Preserve previewed batch details during polling so admins can see completed, running, and planned batches refresh during full Sync.
 
 = 0.3.39 =
 

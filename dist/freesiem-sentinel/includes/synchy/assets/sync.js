@@ -67,6 +67,7 @@
 
 	let latestPreview = null;
 	let latestPreviewMode = "delta";
+	let latestFullSyncPlan = null;
 	let busy = false;
 	let pendingBaselineScopeIds = new Set((config.scopeStatus?.pendingBaselineScopeIds || []).map(String));
 	let changedScopeIds = new Set();
@@ -235,8 +236,10 @@
 
 		const batches = Array.isArray(currentJob?.batches) && currentJob.batches.length > 0
 			? currentJob.batches
-			: Array.isArray(preview?.batches) ? preview.batches : [];
-		const totalBatchesSource = currentJob?.totalBatches ?? preview?.totalBatches ?? batches.length ?? 0;
+			: Array.isArray(preview?.batches) && preview.batches.length > 0
+				? preview.batches
+				: Array.isArray(latestFullSyncPlan?.batches) ? latestFullSyncPlan.batches : [];
+		const totalBatchesSource = currentJob?.totalBatches ?? preview?.totalBatches ?? latestFullSyncPlan?.totalBatches ?? batches.length ?? 0;
 		const totalBatches = Number(totalBatchesSource);
 
 		if (totalBatches <= 0) {
@@ -247,9 +250,31 @@
 
 		const completedBatchesSource = currentJob?.completedBatches ?? batches.filter((batch) => String(batch?.status || "") === "complete").length ?? 0;
 		const completedBatches = Number(completedBatchesSource);
+		const runningBatches = batches.filter((batch) => String(batch?.status || "") === "running").length;
 
-		previewBatchCounter.textContent = `${completedBatches.toLocaleString()} / ${totalBatches.toLocaleString()} ${config.strings.batchesComplete || "batches complete"}`;
+		previewBatchCounter.textContent = `${completedBatches.toLocaleString()} / ${totalBatches.toLocaleString()} ${config.strings.batchesComplete || "batches complete"}${runningBatches > 0 ? ` | ${runningBatches.toLocaleString()} running` : ""}`;
 		previewBatchCounter.classList.remove("is-hidden");
+	};
+
+	const mergeJobResponse = (incoming) => {
+		if (!incoming || !incoming.status) {
+			return null;
+		}
+
+		const previousBatches = Array.isArray(currentJob?.batches) && currentJob.batches.length > 0
+			? currentJob.batches
+			: Array.isArray(latestFullSyncPlan?.batches) ? latestFullSyncPlan.batches : [];
+		const incomingBatches = Array.isArray(incoming.batches) ? incoming.batches : [];
+
+		if (incoming.runMode === "full" && incomingBatches.length === 0 && previousBatches.length > 0) {
+			return {
+				...incoming,
+				batches: previousBatches,
+				totalBatches: Number(incoming.totalBatches || latestFullSyncPlan?.totalBatches || previousBatches.length),
+			};
+		}
+
+		return incoming;
 	};
 
 	const getFileBucketLabel = (scopeId, path) => {
@@ -678,7 +703,9 @@
 
 		const activeBatchSource = Array.isArray(currentJob?.batches) && currentJob.batches.length > 0
 			? currentJob.batches
-			: Array.isArray(preview?.batches) ? preview.batches : [];
+			: Array.isArray(preview?.batches) && preview.batches.length > 0
+				? preview.batches
+				: Array.isArray(latestFullSyncPlan?.batches) ? latestFullSyncPlan.batches : [];
 
 		if (activeBatchSource.length > 0) {
 			changedScopeIds = new Set(activeBatchSource.map((batch) => String(batch.scopeId || "")).filter(Boolean));
@@ -705,6 +732,28 @@
 							</div>
 						`;
 					}).join("")}
+				</div>
+			`;
+			previewTreeContainer.classList.remove("is-hidden");
+			renderPreviewBatchCounter(preview);
+			updateActionButtons();
+			return;
+		}
+
+		const plannedBatchTotal = Number(currentJob?.totalBatches || preview?.totalBatches || latestFullSyncPlan?.totalBatches || 0);
+
+		if (plannedBatchTotal > 0) {
+			previewTreeContainer.innerHTML = `
+				<div class="synchy-sync-tree__section">
+					<h4>${escapeHtml(config.strings.batches || "Batches")}</h4>
+					<div class="synchy-sync-tree__node">
+						<div class="synchy-sync-tree__toggle">
+							<span>
+								<strong>${escapeHtml(`${Number(currentJob?.completedBatches || 0).toLocaleString()} / ${plannedBatchTotal.toLocaleString()} ${config.strings.batchesComplete || "batches complete"}`)}</strong>
+								<small>${escapeHtml(currentJob?.message || "Waiting for batch details to refresh.")}</small>
+							</span>
+						</div>
+					</div>
 				</div>
 			`;
 			previewTreeContainer.classList.remove("is-hidden");
@@ -927,6 +976,7 @@
 	const clearPreview = () => {
 		latestPreview = null;
 		latestPreviewMode = "delta";
+		latestFullSyncPlan = null;
 		changedScopeIds = new Set();
 		renderPreview(null);
 		updateScopeRows();
@@ -976,7 +1026,7 @@
 
 		try {
 			const data = await sendAjax("synchy_get_sync_job_status");
-			currentJob = data.job || null;
+			currentJob = mergeJobResponse(data.job);
 			renderProgress(currentJob);
 			renderPreviewTree(latestPreview);
 
@@ -1003,7 +1053,7 @@
 
 		try {
 			const data = await sendAjax("synchy_continue_full_sync");
-			currentJob = data.job || null;
+			currentJob = mergeJobResponse(data.job);
 			renderProgress(currentJob);
 			renderPreviewTree(latestPreview);
 			renderStatus(data.status || {});
@@ -1075,6 +1125,7 @@
 			});
 			latestPreview = data.preview || null;
 			latestPreviewMode = mode === "full" ? "full" : "delta";
+			latestFullSyncPlan = mode === "full" ? latestPreview : null;
 			currentJob = data.job || currentJob;
 			applyScopeStatus(data.scopeStatus || null);
 			if (data.remoteSite) {
@@ -1239,8 +1290,7 @@
 			const data = await sendAjax("synchy_run_sync_changes", {
 				synchy_sync_run_mode: isFullSync ? "full" : "delta",
 			});
-			const responseJob = data.job || null;
-			currentJob = responseJob?.status ? responseJob : (isFullSync ? currentJob : null);
+			currentJob = mergeJobResponse(data.job) || (isFullSync ? currentJob : null);
 			renderProgress(currentJob);
 			renderPreviewTree(latestPreview);
 			if (!isFullSync || String(currentJob?.status || "") !== "running") {
