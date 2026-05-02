@@ -1420,6 +1420,35 @@ function synchy_read_full_sync_batch_payload(array $batch): array
 	return is_array($decoded) ? $decoded : ['files' => [], 'tables' => []];
 }
 
+function synchy_write_full_sync_next_state(string $job_dir, array $next_state): array|WP_Error
+{
+	$path = wp_normalize_path(trailingslashit($job_dir) . 'next-state.json');
+	$json = wp_json_encode($next_state, JSON_UNESCAPED_SLASHES);
+
+	if ($json === false || file_put_contents($path, $json) === false) {
+		return new WP_Error('synchy_full_sync_next_state_failed', __('Synchy could not save the full Sync baseline state.', 'synchy'));
+	}
+
+	return [
+		'next_state_path' => $path,
+	];
+}
+
+function synchy_read_full_sync_next_state(array $job): array
+{
+	$path = (string) ($job['next_state_path'] ?? '');
+
+	if ($path !== '' && is_readable($path)) {
+		$decoded = json_decode((string) file_get_contents($path), true);
+
+		if (is_array($decoded)) {
+			return $decoded;
+		}
+	}
+
+	return isset($job['next_state']) && is_array($job['next_state']) ? $job['next_state'] : [];
+}
+
 function synchy_build_full_sync_job(array $options, array $payload)
 {
 	$job_id = wp_generate_uuid4();
@@ -1453,6 +1482,13 @@ function synchy_build_full_sync_job(array $options, array $payload)
 	}
 	unset($batch);
 
+	$next_state_written = synchy_write_full_sync_next_state($job_dir, (array) ($payload['next_state'] ?? []));
+
+	if (is_wp_error($next_state_written)) {
+		synchy_rrmdir($job_dir);
+		return $next_state_written;
+	}
+
 	return synchy_update_sync_job([
 		'job_id' => $job_id,
 		'sync_id' => (string) (($payload['summary']['syncId'] ?? '') ?: ('full-' . gmdate('YmdHis') . '-' . strtolower(wp_generate_password(6, false, false)))),
@@ -1479,8 +1515,11 @@ function synchy_build_full_sync_job(array $options, array $payload)
 		'completed_work_units' => 0,
 		'total_work_units' => $total_work_units,
 		'batches' => $batches,
-		'next_state' => (array) ($payload['next_state'] ?? []),
-		'summary' => (array) ($payload['summary'] ?? []),
+		'next_state_path' => (string) ($next_state_written['next_state_path'] ?? ''),
+		'summary' => [
+			'syncId' => (string) ($payload['summary']['syncId'] ?? ''),
+			'syncedAt' => (int) ($payload['summary']['syncedAt'] ?? time()),
+		],
 		'temp_dir' => $job_dir,
 	]);
 }
@@ -1783,7 +1822,7 @@ function synchy_get_full_sync_batch_max_files(): int
 
 function synchy_get_full_sync_batch_max_rows(): int
 {
-	return 1000;
+	return 100;
 }
 
 function synchy_prepare_sync_job_dir(string $job_id)
@@ -2193,18 +2232,37 @@ function synchy_should_sync_option_name(string $option_name): bool
 		return false;
 	}
 
-	if (preg_match('/^(_site)?_transient(_timeout)?_/', $option_name)) {
+	if (preg_match('/^(_site)?_transient(_timeout)?_/', $option_name) || str_contains($option_name, '_transient_') || str_contains($option_name, '_transient_timeout_')) {
+		return false;
+	}
+
+	if (preg_match('/(^|_)db_version$/', $option_name) || preg_match('/(^|_)current_version$/', $option_name)) {
 		return false;
 	}
 
 	$excluded = [
 		'home',
 		'siteurl',
+		'active_plugins',
+		'auto_plugin_theme_update_emails',
+		'auto_update_core_dev',
+		'auto_update_core_major',
+		'auto_update_core_minor',
 		'cron',
+		'db_version',
+		'finished_updating_comment_type',
+		'fresh_site',
+		'initial_db_version',
+		'can_compress_scripts',
+		'db_upgraded',
 		'recently_edited',
+		'recently_activated',
+		'uninstall_plugins',
 		'uagb_asset_version',
 		'__uagb_asset_version',
+		'wp_force_deactivated_plugins',
 		'fs_active_plugins',
+		'action_scheduler_migration_status',
 		'wcstripe_cache_live_account_data',
 		SYNCHY_EXPORT_OPTIONS,
 		SYNCHY_LAST_EXPORT_OPTION,
@@ -2224,8 +2282,42 @@ function synchy_should_sync_option_name(string $option_name): bool
 
 	$excluded_prefixes = [
 		'action_scheduler_lock_',
+		'action_scheduler_',
+		'amplitude_',
+		'ast_block_templates_',
+		'ast-block-templates-',
+		'ast_skip_',
+		'astra-sites-',
+		'astra_partials_',
+		'astra_usage_',
+		'bsf_',
+		'cozmos_',
+		'course_',
+		'cp-',
+		'cp_',
+		'freesiem_sentinel_',
+		'hostinger_',
+		'is_beta_enable_rollback_',
+		'llms_',
+		'lifterlms_',
+		'litespeed.admin_',
+		'mo_firebase_',
+		'nps-survey-',
+		'schema-ActionScheduler_',
+		'spectra_',
+		'srfm_',
+		'sureforms_',
+		'tawkto-',
+		'uagb_',
 		'wcstripe_cache_',
 		'fs_',
+		'wp_formy_',
+		'wp_notes_',
+		'wpmdr_',
+		'wpforms_activation_',
+		'wpforms_version',
+		'wppb_',
+		'zip_ai_',
 	];
 
 	foreach ($excluded_prefixes as $prefix) {
@@ -5984,7 +6076,7 @@ function synchy_mark_full_sync_batch_failed(array $job, int $index, string $mess
 
 function synchy_finalize_full_sync_success(array $job, array $options, float $started_at): array
 {
-	$next_state = isset($job['next_state']) && is_array($job['next_state']) ? $job['next_state'] : [];
+	$next_state = synchy_read_full_sync_next_state($job);
 	$next_state['last_result'] = [
 		'mode' => 'baseline',
 		'filesSynced' => (int) ($job['files_count'] ?? 0),

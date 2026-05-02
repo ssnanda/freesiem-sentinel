@@ -76,6 +76,7 @@ GitHub Actions publishes the ZIP automatically when a `v*` tag is pushed.
 * Keep running full Sync and baseline batch plans visible in Pending Changes after page refresh or empty status polls.
 * Rebuild a running full Sync job in the browser from saved Sync status so polling and batch driving continue instead of stopping at the default preview message.
 * Include saved Sync status in the job status endpoint and avoid clearing the active full Sync plan unless the user cancels/resets Sync.
+* Store large full Sync baseline state on disk, split database batches into smaller chunks, and exclude plugin/runtime options that can crash the destination.
 
 = 0.3.46 =
 
