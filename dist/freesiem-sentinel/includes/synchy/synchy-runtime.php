@@ -6085,7 +6085,17 @@ function synchy_continue_full_sync_job(array $options)
 		return $job;
 	}
 
-	return synchy_process_full_sync_job($job, $options);
+	if ((string) ($job['options_signature'] ?? '') !== synchy_build_sync_options_signature($options)) {
+		return new WP_Error('synchy_full_sync_continue_mismatch', __('The saved full Sync no longer matches the current destination or scope settings. Run a fresh Full Sync preview first.', 'synchy'));
+	}
+
+	$worker_token = (string) ($job['worker_token'] ?? '');
+
+	if ($worker_token === '') {
+		return new WP_Error('synchy_full_sync_worker_missing', __('Synchy could not find the requested full Sync worker.', 'synchy'));
+	}
+
+	return synchy_run_full_sync_worker_by_token($worker_token);
 }
 
 function synchy_run_full_sync_worker_by_token(string $worker_token)

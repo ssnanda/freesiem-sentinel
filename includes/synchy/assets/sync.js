@@ -73,6 +73,7 @@
 	let currentJob = config.currentJob || null;
 	let currentConnectionState = config.connectionState || null;
 	let autoConnectionCheckStarted = false;
+	let browserFullSyncDriverActive = false;
 	// Require a live connection test in the current page session before trusting the destination.
 	let connectionVerified = false;
 	const initialConnectionState = {
@@ -968,7 +969,7 @@
 	};
 
 	const pollSyncJob = async () => {
-		if (!busy) {
+		if (!busy && !(currentJob?.runMode === "full" && currentJob?.status === "running")) {
 			return;
 		}
 
@@ -979,12 +980,44 @@
 			renderPreviewTree(latestPreview);
 
 			if (currentJob && currentJob.status === "running") {
+				if (currentJob.runMode === "full") {
+					window.setTimeout(driveFullSyncFromBrowser, 50);
+				}
 				window.setTimeout(pollSyncJob, 250);
 				return;
 			}
 		} catch (error) {
 			if (busy) {
 				window.setTimeout(pollSyncJob, 500);
+			}
+		}
+	};
+
+	const driveFullSyncFromBrowser = async () => {
+		if (browserFullSyncDriverActive || currentJob?.runMode !== "full" || currentJob?.status !== "running") {
+			return;
+		}
+
+		browserFullSyncDriverActive = true;
+
+		try {
+			const data = await sendAjax("synchy_continue_full_sync");
+			currentJob = data.job || null;
+			renderProgress(currentJob);
+			renderPreviewTree(latestPreview);
+			renderStatus(data.status || {});
+			applyScopeStatus(data.scopeStatus || null);
+		} catch (error) {
+			renderStatus({
+				status: "error",
+				message: error.message,
+				at: new Date().toISOString(),
+			});
+		} finally {
+			browserFullSyncDriverActive = false;
+
+			if (currentJob?.runMode === "full" && currentJob?.status === "running") {
+				window.setTimeout(driveFullSyncFromBrowser, 250);
 			}
 		}
 	};
@@ -1197,6 +1230,10 @@
 			renderPreviewTree(latestPreview);
 			renderStatus(data.status || {});
 			applyScopeStatus(data.scopeStatus || null);
+			if (currentJob?.runMode === "full" && currentJob?.status === "running") {
+				setBusy(true);
+				window.setTimeout(driveFullSyncFromBrowser, 50);
+			}
 			if (!getHasResumableFullSync()) {
 				clearPreview();
 			}
@@ -1259,6 +1296,9 @@
 			renderPreviewTree(latestPreview);
 			renderStatus(data.status || {});
 			applyScopeStatus(data.scopeStatus || null);
+			if (currentJob?.runMode === "full" && currentJob?.status === "running") {
+				window.setTimeout(driveFullSyncFromBrowser, 50);
+			}
 		} catch (error) {
 			renderStatus({
 				status: "error",
@@ -1348,6 +1388,9 @@
 	if (currentJob && currentJob.status === "running") {
 		setBusy(true);
 		window.setTimeout(pollSyncJob, 100);
+		if (currentJob.runMode === "full") {
+			window.setTimeout(driveFullSyncFromBrowser, 150);
+		}
 		return;
 	}
 
