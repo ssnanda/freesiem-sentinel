@@ -1056,16 +1056,27 @@
 			currentJob = mergeJobResponse(data.job);
 			renderProgress(currentJob);
 			renderPreviewTree(latestPreview);
-			renderStatus(data.status || {});
+			if (currentJob?.runMode === "full" && currentJob?.status === "running") {
+				statusBadge.textContent = config.strings.syncingAction || "Syncing...";
+				statusSummary.textContent = currentJob.message || "Full Sync is running. Keep this tab open while the batches run.";
+			} else {
+				renderStatus(data.status || {});
+			}
 			applyScopeStatus(data.scopeStatus || null);
 		} catch (error) {
 			previewBadge.textContent = config.strings.error || "Error";
 			previewMessage.textContent = error.message;
-			renderStatus({
-				status: "error",
-				message: error.message,
-				at: new Date().toISOString(),
-			});
+			if (currentJob?.runMode === "full" && currentJob?.status === "running") {
+				statusBadge.textContent = config.strings.syncingAction || "Syncing...";
+				statusSummary.textContent = "Full Sync is still running. Retrying status refresh after: " + error.message;
+				window.setTimeout(pollSyncJob, 1000);
+			} else {
+				renderStatus({
+					status: "error",
+					message: error.message,
+					at: new Date().toISOString(),
+				});
+			}
 		} finally {
 			browserFullSyncDriverActive = false;
 

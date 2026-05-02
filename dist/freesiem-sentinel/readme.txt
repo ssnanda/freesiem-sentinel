@@ -3,7 +3,7 @@ Contributors: freesiem
 Requires at least: 6.4
 Tested up to: 6.8
 Requires PHP: 8.1
-Stable tag: 0.3.40
+Stable tag: 0.3.41
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -70,6 +70,11 @@ Version bumps should always have matching git tags.
 GitHub Actions publishes the ZIP automatically when a `v*` tag is pushed.
 
 == Changelog ==
+
+= 0.3.41 =
+
+* Treat destination cURL timeouts during Sync uploads as recoverable by polling the destination Sync status before failing the batch.
+* Keep the full Sync UI in a running/retry state when a transient status refresh error happens while the job is still active.
 
 = 0.3.40 =
 

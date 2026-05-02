@@ -5766,6 +5766,14 @@ function synchy_sync_remote_request(array $options, int $expected_sync_time, str
 	);
 
 	if (is_wp_error($response)) {
+		if ($expected_sync_time > 0) {
+			$recovered = synchy_wait_for_remote_sync_completion($options, $expected_sync_time, 180);
+
+			if (!is_wp_error($recovered)) {
+				return $recovered;
+			}
+		}
+
 		return new WP_Error(
 			'synchy_sync_remote_request_failed',
 			sprintf(
