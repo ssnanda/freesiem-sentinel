@@ -306,9 +306,12 @@
 	const renderFullSyncPendingHeader = () => {
 		const jobStatus = String(currentJob?.status || "");
 		const savedStatus = String(currentStatus?.status || "");
-		const hasBatchPlan = Number(currentJob?.totalBatches || latestFullSyncPlan?.totalBatches || 0) > 0
+		const hasFullSyncContext = currentJob?.runMode === "full"
+			|| latestPreviewMode === "full"
+			|| latestPreviewMode === "baseline-full";
+		const hasBatchPlan = hasFullSyncContext && (Number(currentJob?.totalBatches || latestFullSyncPlan?.totalBatches || 0) > 0
 			|| (Array.isArray(currentJob?.batches) && currentJob.batches.length > 0)
-			|| (Array.isArray(latestFullSyncPlan?.batches) && latestFullSyncPlan.batches.length > 0);
+			|| (Array.isArray(latestFullSyncPlan?.batches) && latestFullSyncPlan.batches.length > 0));
 
 		if (
 			(currentJob?.runMode !== "full" || !["running", "paused", "failed_partial"].includes(jobStatus))
@@ -1137,6 +1140,8 @@
 				window.setTimeout(pollSyncJob, 250);
 				return;
 			}
+
+			setBusy(false);
 		} catch (error) {
 			if (busy) {
 				window.setTimeout(pollSyncJob, 500);
@@ -1430,6 +1435,12 @@
 				clearPreview();
 			}
 		} catch (error) {
+			if (!getHasResumableFullSync()) {
+				currentJob = null;
+				browserFullSyncDriverActive = false;
+				renderProgress(null);
+				renderPreviewTree(latestPreview || latestFullSyncPlan);
+			}
 			renderStatus({
 				status: "error",
 				message: error.message,

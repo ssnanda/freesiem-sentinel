@@ -667,7 +667,7 @@ function synchy_get_sync_scope_definitions(): array
 			'type' => 'file',
 			'group' => 'files',
 			'label' => __('Plugins', 'synchy'),
-			'description' => __('Everything inside wp-content/plugins.', 'synchy'),
+			'description' => __('Everything inside wp-content/plugins except Sentinel itself. Use Update Live Sentinel for Sentinel updates.', 'synchy'),
 		],
 		'files_themes' => [
 			'option_key' => 'sync_scope_files_themes',
@@ -2082,6 +2082,29 @@ function synchy_is_sync_file_excluded(string $archive_path): bool
 
 	if ($archive_path === '') {
 		return true;
+	}
+
+	$protected_plugin_prefixes = [
+		'plugins/freesiem-sentinel/',
+		'plugins/synchy/',
+	];
+
+	if (defined('FREESIEM_SENTINEL_SLUG') && FREESIEM_SENTINEL_SLUG !== '') {
+		$protected_plugin_prefixes[] = 'plugins/' . trim((string) FREESIEM_SENTINEL_SLUG, '/') . '/';
+	}
+
+	if (defined('FREESIEM_SENTINEL_PLUGIN_BASENAME') && FREESIEM_SENTINEL_PLUGIN_BASENAME !== '') {
+		$plugin_root = strtok((string) FREESIEM_SENTINEL_PLUGIN_BASENAME, '/');
+
+		if (is_string($plugin_root) && $plugin_root !== '') {
+			$protected_plugin_prefixes[] = 'plugins/' . sanitize_file_name($plugin_root) . '/';
+		}
+	}
+
+	foreach (array_unique($protected_plugin_prefixes) as $prefix) {
+		if ($prefix !== '' && str_starts_with($archive_path, $prefix)) {
+			return true;
+		}
 	}
 
 	$excluded_exact = [
@@ -5840,6 +5863,46 @@ function synchy_get_sync_remote_route_url(array $options): string
 	return trailingslashit((string) $options['destination_url']) . 'wp-json/syncy/v1/sync';
 }
 
+function synchy_get_sync_remote_response_error_message(int $code, string $body, $data): string
+{
+	if (is_array($data) && !empty($data['message'])) {
+		return (string) $data['message'];
+	}
+
+	$text = function_exists('wp_strip_all_tags') ? wp_strip_all_tags($body) : strip_tags($body);
+	$text = html_entity_decode($text, ENT_QUOTES | ENT_HTML5, 'UTF-8');
+	$text = trim((string) preg_replace('/\s+/', ' ', $text));
+
+	if ($text !== '' && str_contains($text, 'There has been a critical error on this website')) {
+		return __('Destination site hit a WordPress critical error while applying Sync. Check the destination PHP error log for the fatal error.', 'synchy');
+	}
+
+	if ($text !== '') {
+		$excerpt = substr($text, 0, 240);
+
+		if ($code >= 200 && $code < 300) {
+			return sprintf(
+				/* translators: %s: cleaned response excerpt */
+				__('Destination site returned a non-JSON response during Sync: %s', 'synchy'),
+				$excerpt
+			);
+		}
+
+		return sprintf(
+			/* translators: 1: HTTP status code, 2: cleaned response excerpt */
+			__('Destination site returned HTTP %1$d during Sync: %2$s', 'synchy'),
+			$code,
+			$excerpt
+		);
+	}
+
+	if ($code >= 200 && $code < 300) {
+		return __('Destination site returned an unreadable response during Sync.', 'synchy');
+	}
+
+	return sprintf(__('Destination site returned HTTP %d during Sync.', 'synchy'), $code);
+}
+
 function synchy_sync_remote_request(array $options, int $expected_sync_time, string $zip_path, array $extra_headers = [])
 {
 	$validation = synchy_validate_site_sync_options($options);
@@ -5909,9 +5972,7 @@ function synchy_sync_remote_request(array $options, int $expected_sync_time, str
 			}
 		}
 
-		$message = is_array($data) && !empty($data['message'])
-			? (string) $data['message']
-			: sprintf(__('Destination site returned HTTP %d during Sync.', 'synchy'), $code);
+		$message = synchy_get_sync_remote_response_error_message($code, $body, $data);
 
 		return new WP_Error('synchy_sync_remote_http_error', $message);
 	}
