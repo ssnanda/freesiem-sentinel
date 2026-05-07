@@ -708,8 +708,8 @@ function synchy_get_sync_scope_definitions(): array
 			'option_key' => 'sync_scope_db_wp_formy',
 			'type' => 'db',
 			'group' => 'database',
-			'label' => __('WP Formy', 'synchy'),
-			'description' => __('WP Formy forms, entries, and entry notes stored in custom database tables.', 'synchy'),
+			'label' => __('Forms', 'synchy'),
+			'description' => __('AJ Forms, WP Formy, and Fluent Forms form data stored in custom database tables.', 'synchy'),
 		],
 	];
 }
@@ -2271,7 +2271,6 @@ function synchy_should_sync_option_name(string $option_name): bool
 	$excluded = [
 		'home',
 		'siteurl',
-		'active_plugins',
 		'auto_plugin_theme_update_emails',
 		'auto_update_core_dev',
 		'auto_update_core_major',
@@ -2418,7 +2417,7 @@ function synchy_get_sync_table_specs(): array
 {
 	global $wpdb;
 
-	return [
+	return array_merge([
 		$wpdb->posts => [
 			'key_columns' => ['ID'],
 		],
@@ -2440,16 +2439,7 @@ function synchy_get_sync_table_specs(): array
 			'key_columns' => ['object_id', 'term_taxonomy_id'],
 			'update_columns' => ['term_order'],
 		],
-		$wpdb->prefix . 'formy_forms' => [
-			'key_columns' => ['id'],
-		],
-		$wpdb->prefix . 'formy_leads' => [
-			'key_columns' => ['id'],
-		],
-		$wpdb->prefix . 'formy_lead_notes' => [
-			'key_columns' => ['id'],
-		],
-	];
+	], synchy_get_form_plugin_sync_table_specs());
 }
 
 function synchy_fetch_all_rows_from_table(string $table, array $columns = []): array
@@ -2516,19 +2506,44 @@ function synchy_get_changed_post_ids_for_sync(int $last_sync_time): array
 	return is_array($rows) ? array_values(array_map('intval', $rows)) : [];
 }
 
+function synchy_get_form_plugin_sync_table_specs(): array
+{
+	global $wpdb;
+
+	$tables = [
+		$wpdb->prefix . 'ajforms_forms',
+		$wpdb->prefix . 'ajforms_leads',
+		$wpdb->prefix . 'ajforms_lead_notes',
+		$wpdb->prefix . 'formy_forms',
+		$wpdb->prefix . 'formy_leads',
+		$wpdb->prefix . 'formy_lead_notes',
+		$wpdb->prefix . 'fluentform_entry_details',
+		$wpdb->prefix . 'fluentform_form_analytics',
+		$wpdb->prefix . 'fluentform_form_meta',
+		$wpdb->prefix . 'fluentform_forms',
+		$wpdb->prefix . 'fluentform_logs',
+		$wpdb->prefix . 'fluentform_submission_meta',
+		$wpdb->prefix . 'fluentform_submissions',
+	];
+
+	$specs = [];
+
+	foreach ($tables as $table) {
+		$specs[$table] = [
+			'key_columns' => ['id'],
+		];
+	}
+
+	return $specs;
+}
+
 function synchy_get_wp_formy_sync_tables(): array
 {
 	global $wpdb;
 
-	$candidates = [
-		$wpdb->prefix . 'formy_forms',
-		$wpdb->prefix . 'formy_leads',
-		$wpdb->prefix . 'formy_lead_notes',
-	];
-
 	$tables = [];
 
-	foreach ($candidates as $table) {
+	foreach (array_keys(synchy_get_form_plugin_sync_table_specs()) as $table) {
 		$table_exists = $wpdb->get_var(
 			$wpdb->prepare('SHOW TABLES LIKE %s', $table)
 		);
