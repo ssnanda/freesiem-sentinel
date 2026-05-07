@@ -233,6 +233,33 @@
 	const isTerminalSyncStatus = (status) =>
 		["success", "complete", "completed", "done", "error", "failed"].includes(String(status || ""));
 
+	const clearFullSyncDisplay = () => {
+		currentJob = null;
+		latestFullSyncPlan = null;
+		browserFullSyncDriverActive = false;
+
+		if (previewBatchCounter) {
+			previewBatchCounter.textContent = "";
+			previewBatchCounter.classList.add("is-hidden");
+		}
+
+		if (previewTreeContainer) {
+			previewTreeContainer.innerHTML = "";
+			previewTreeContainer.classList.add("is-hidden");
+		}
+
+		if (previewBadge) {
+			previewBadge.textContent = "";
+		}
+
+		if (previewMessage) {
+			previewMessage.textContent = config.strings.previewDefault || "Run Preview Changes to load the pending file sections and database tables.";
+		}
+
+		renderProgress(null);
+		updateActionButtons();
+	};
+
 	const renderPreviewBatchCounter = (preview) => {
 		if (!previewBatchCounter) {
 			return;
@@ -1078,6 +1105,10 @@
 		currentStatus = status || currentStatus;
 		statusBadge.textContent = getStatusBadge(status);
 		statusSummary.textContent = buildStatusSummary(status);
+
+		if (isTerminalSyncStatus(currentStatus?.status) && currentJob?.status !== "running") {
+			clearFullSyncDisplay();
+		}
 	};
 
 	const clearPreview = () => {
@@ -1143,9 +1174,7 @@
 			}
 			currentJob = mergeJobResponse(data.job) || buildSyntheticFullSyncJob() || currentJob;
 			if (isTerminalSyncStatus(currentStatus?.status) && currentJob?.status !== "running") {
-				currentJob = null;
-				latestFullSyncPlan = null;
-				browserFullSyncDriverActive = false;
+				clearFullSyncDisplay();
 			}
 			renderProgress(currentJob);
 			renderPreviewTree(latestPreview || latestFullSyncPlan);
