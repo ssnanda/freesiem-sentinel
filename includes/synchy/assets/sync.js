@@ -230,10 +230,17 @@
 			.join("");
 	};
 
+	const isTerminalSyncStatus = (status) =>
+		["success", "complete", "completed", "done", "error", "failed"].includes(String(status || ""));
+
 	const renderPreviewBatchCounter = (preview) => {
 		if (!previewBatchCounter) {
 			return;
 		}
+
+		const jobStatus = String(currentJob?.status || "");
+		const savedStatus = String(currentStatus?.status || "");
+		const syncFinished = isTerminalSyncStatus(savedStatus) && jobStatus !== "running";
 
 		const batches = Array.isArray(currentJob?.batches) && currentJob.batches.length > 0
 			? currentJob.batches
@@ -250,10 +257,10 @@
 		}
 
 		const completedBatchesSource = currentJob?.completedBatches ?? batches.filter((batch) => String(batch?.status || "") === "complete").length ?? 0;
-		const completedBatches = Number(completedBatchesSource);
+		const completedBatches = syncFinished ? totalBatches : Number(completedBatchesSource);
 		const messageBatchMatch = String(currentJob?.message || currentStatus?.message || "").match(/batch\s+(\d+)\s+of\s+(\d+)/i);
 		const currentBatchIndex = Number(currentJob?.currentBatchIndex || (messageBatchMatch ? messageBatchMatch[1] : 0));
-		const runningBatches = batches.filter((batch) => String(batch?.status || "") === "running").length
+		const runningBatches = syncFinished ? 0 : batches.filter((batch) => String(batch?.status || "") === "running").length
 			|| (currentJob?.runMode === "full" && currentJob?.status === "running" && (currentBatchIndex > completedBatches || String(currentJob?.message || "").toLowerCase().includes("syncing batch")) ? 1 : 0)
 			|| (String(currentStatus?.status || "") === "running" && String(currentStatus?.message || "").toLowerCase().includes("syncing batch") ? 1 : 0);
 
@@ -306,6 +313,11 @@
 	const renderFullSyncPendingHeader = () => {
 		const jobStatus = String(currentJob?.status || "");
 		const savedStatus = String(currentStatus?.status || "");
+
+		if (isTerminalSyncStatus(savedStatus) && !["running", "paused", "failed_partial"].includes(jobStatus)) {
+			return;
+		}
+
 		const hasFullSyncContext = currentJob?.runMode === "full"
 			|| latestPreviewMode === "full"
 			|| latestPreviewMode === "baseline-full";
@@ -1130,6 +1142,11 @@
 				renderStatus(data.status);
 			}
 			currentJob = mergeJobResponse(data.job) || buildSyntheticFullSyncJob() || currentJob;
+			if (isTerminalSyncStatus(currentStatus?.status) && currentJob?.status !== "running") {
+				currentJob = null;
+				latestFullSyncPlan = null;
+				browserFullSyncDriverActive = false;
+			}
 			renderProgress(currentJob);
 			renderPreviewTree(latestPreview || latestFullSyncPlan);
 
