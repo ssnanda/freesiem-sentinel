@@ -3446,6 +3446,63 @@ function synchy_split_full_sync_database_batch(array $base_batch, array $tables)
 	return $batches;
 }
 
+function synchy_extract_active_plugins_option_batch(array &$db_delta): array
+{
+	global $wpdb;
+
+	$options_table = (string) $wpdb->options;
+	$options_data = isset($db_delta['tables'][$options_table]) && is_array($db_delta['tables'][$options_table])
+		? $db_delta['tables'][$options_table]
+		: [];
+
+	if ($options_data === []) {
+		return [];
+	}
+
+	$rows = (array) ($options_data['rows'] ?? []);
+	$row_ids = (array) ($options_data['row_ids'] ?? []);
+	$activation_rows = [];
+	$remaining_rows = [];
+	$remaining_row_ids = [];
+
+	foreach ($rows as $index => $row) {
+		if (is_array($row) && (string) ($row['option_name'] ?? '') === 'active_plugins') {
+			$activation_rows[] = $row;
+			continue;
+		}
+
+		$remaining_rows[] = $row;
+
+		if (array_key_exists($index, $row_ids)) {
+			$remaining_row_ids[] = $row_ids[$index];
+		}
+	}
+
+	if ($activation_rows === []) {
+		return [];
+	}
+
+	if ($remaining_rows === []) {
+		unset($db_delta['tables'][$options_table], $db_delta['table_counts'][$options_table]);
+	} else {
+		$db_delta['tables'][$options_table]['rows'] = $remaining_rows;
+		$db_delta['tables'][$options_table]['row_ids'] = $remaining_row_ids;
+		$db_delta['table_counts'][$options_table] = count($remaining_rows);
+	}
+
+	$db_delta['total_rows'] = max(0, (int) ($db_delta['total_rows'] ?? 0) - count($activation_rows));
+
+	return [
+		$options_table => [
+			'scope_id' => 'db_plugin_activation',
+			'key_columns' => (array) ($options_data['key_columns'] ?? ['option_name']),
+			'rows' => $activation_rows,
+			'row_ids' => ['active_plugins'],
+			'update_columns' => (array) ($options_data['update_columns'] ?? ['option_value', 'autoload']),
+		],
+	];
+}
+
 function synchy_build_full_sync_batches(array $file_delta, array $db_delta): array
 {
 	$batches = [];
@@ -3491,8 +3548,10 @@ function synchy_build_full_sync_batches(array $file_delta, array $db_delta): arr
 		'db_content' => 'Database / Posts & Post Meta',
 		'db_options' => 'Database / Options',
 		'db_taxonomies' => 'Database / Terms & Taxonomies',
-		'db_wp_formy' => 'Database / WP Formy',
+		'db_wp_formy' => 'Database / Forms',
+		'db_plugin_activation' => 'Database / Plugin Activation',
 	];
+	$plugin_activation_tables = synchy_extract_active_plugins_option_batch($db_delta);
 	$db_scope_tables = [];
 
 	foreach ((array) ($db_delta['tables'] ?? []) as $table_name => $table_data) {
@@ -3520,6 +3579,21 @@ function synchy_build_full_sync_batches(array $file_delta, array $db_delta): arr
 					'object_path' => (string) $scope_id,
 				],
 				$tables
+			)
+		);
+	}
+
+	if ($plugin_activation_tables !== []) {
+		$batches = array_merge(
+			$batches,
+			synchy_split_full_sync_database_batch(
+				[
+					'batch_id' => 'batch-db-db_plugin_activation',
+					'scope_id' => 'db_plugin_activation',
+					'label' => $scope_labels['db_plugin_activation'],
+					'object_path' => 'db_plugin_activation',
+				],
+				$plugin_activation_tables
 			)
 		);
 	}
