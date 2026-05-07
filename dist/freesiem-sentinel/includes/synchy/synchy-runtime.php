@@ -2206,7 +2206,12 @@ function synchy_collect_sync_file_delta(array $state, array $selected_scope_ids,
 		$current_scope_paths = array_values(array_unique(array_map('strval', (array) ($current_file_paths[$scope_id] ?? []))));
 		sort($current_scope_paths);
 		$current_file_paths[$scope_id] = $current_scope_paths;
-		$previous_scope_paths = array_values(array_unique(array_map('strval', (array) ($previous_file_paths[$scope_id] ?? []))));
+		$previous_scope_paths = array_values(
+			array_filter(
+				array_unique(array_map('strval', (array) ($previous_file_paths[$scope_id] ?? []))),
+				static fn(string $path): bool => $path !== '' && !synchy_is_sync_file_excluded($path)
+			)
+		);
 
 		if (!$force_full && $scope_last_sync_time > 0 && $previous_scope_paths !== []) {
 			$deleted_scope_paths = array_values(array_diff($previous_scope_paths, $current_scope_paths));
