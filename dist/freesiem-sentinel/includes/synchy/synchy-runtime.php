@@ -2283,6 +2283,7 @@ function synchy_should_sync_option_name(string $option_name): bool
 		'initial_db_version',
 		'can_compress_scripts',
 		'db_upgraded',
+		'elementor_log',
 		'recently_edited',
 		'recently_activated',
 		'uninstall_plugins',
@@ -2359,6 +2360,23 @@ function synchy_should_sync_option_name(string $option_name): bool
 	}
 
 	return true;
+}
+
+function synchy_should_sync_option_value($option_value): bool
+{
+	$value = is_scalar($option_value) || $option_value === null ? (string) $option_value : maybe_serialize($option_value);
+
+	if ($value === '') {
+		return true;
+	}
+
+	return !preg_match('/(^|[;:{])O:\d+:"[^"]+":/', $value);
+}
+
+function synchy_should_sync_option_row(array $row): bool
+{
+	return synchy_should_sync_option_name((string) ($row['option_name'] ?? ''))
+		&& synchy_should_sync_option_value($row['option_value'] ?? '');
 }
 
 function synchy_get_sync_row_key(array $row, array $key_columns): string
@@ -2563,7 +2581,7 @@ function synchy_get_sync_option_rows(): array
 	return array_values(
 		array_filter(
 			$rows,
-			static fn(array $row): bool => synchy_should_sync_option_name((string) ($row['option_name'] ?? ''))
+			static fn(array $row): bool => synchy_should_sync_option_row($row)
 		)
 	);
 }
@@ -6676,6 +6694,10 @@ function synchy_apply_sync_option_rows(array $rows)
 		$option_name = isset($row['option_name']) ? (string) $row['option_name'] : '';
 
 		if ($option_name === '') {
+			continue;
+		}
+
+		if (!synchy_should_sync_option_row($row)) {
 			continue;
 		}
 
