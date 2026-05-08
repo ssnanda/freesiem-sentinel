@@ -981,6 +981,152 @@
 	color: #517075 !important;
 }
 
+.synchy-sync-workflow-grid {
+	grid-template-columns: minmax(460px, 0.9fr) minmax(560px, 1.15fr);
+	align-items: start;
+	margin-bottom: 16px;
+}
+
+.synchy-admin .is-hidden {
+	display: none !important;
+}
+
+.synchy-admin .synchy-hero {
+	margin-bottom: 18px;
+}
+
+.synchy-admin .synchy-hero h1 {
+	font-size: 36px;
+}
+
+.synchy-admin .synchy-description {
+	margin-top: 8px;
+}
+
+.synchy-sync-workflow-grid .synchy-panel h2 {
+	margin-bottom: 0;
+}
+
+.synchy-sync-connection-form {
+	display: grid;
+	grid-template-columns: minmax(0, 1fr) minmax(160px, 0.45fr);
+	gap: 12px 14px;
+	align-items: end;
+	margin-top: 14px;
+}
+
+.synchy-sync-connection-form .synchy-field {
+	margin: 0;
+}
+
+.synchy-sync-connection-form input.regular-text {
+	width: 100%;
+	max-width: none;
+}
+
+.synchy-sync-password-field {
+	grid-column: 1 / -1;
+}
+
+.synchy-sync-connection-actions {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 8px;
+	align-items: center;
+}
+
+.synchy-sync-connection-actions .button,
+.synchy-sync-action-row .button {
+	min-height: 34px;
+}
+
+.synchy-sync-action-row .button-primary {
+	min-height: 38px;
+}
+
+.synchy-connection-summary {
+	margin-top: 16px;
+	padding-top: 14px;
+	border-top: 1px solid #d7e1da;
+}
+
+.synchy-detail-grid {
+	grid-template-columns: minmax(0, 1fr);
+	gap: 0;
+	border-top: 1px solid #e2ebe5;
+}
+
+.synchy-detail-grid div {
+	display: grid;
+	grid-template-columns: minmax(130px, 0.44fr) minmax(0, 1fr);
+	gap: 10px;
+	align-items: baseline;
+	padding: 9px 0;
+	border: 0;
+	border-bottom: 1px solid #e2ebe5;
+	border-radius: 0;
+	background: transparent;
+}
+
+.synchy-detail-grid span,
+.synchy-detail-grid strong {
+	margin: 0;
+	font-size: 13px;
+	overflow-wrap: anywhere;
+}
+
+.synchy-update-row {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 10px;
+	align-items: center;
+	margin-top: 12px;
+}
+
+.synchy-update-row .synchy-field-note {
+	margin: 0;
+}
+
+.synchy-sync-action-row {
+	margin: 14px 0 8px;
+}
+
+.synchy-status-pending-grid {
+	display: grid;
+	grid-template-columns: minmax(0, 0.92fr) minmax(0, 1.08fr);
+	gap: 16px;
+	margin-top: 14px;
+}
+
+.synchy-pending-summary {
+	min-width: 0;
+	padding-left: 16px;
+	border-left: 1px solid #d7e1da;
+}
+
+.synchy-pending-summary > .synchy-sync-tree {
+	margin-top: 10px;
+	max-height: 420px;
+	overflow: auto;
+	padding-right: 4px;
+}
+
+.synchy-sync-control-panel .synchy-export-stages--inline {
+	margin-top: 0;
+}
+
+.synchy-sync-control-panel .synchy-export-stages--inline .synchy-export-stage {
+	padding: 9px 11px;
+}
+
+.synchy-sync-scope-panel {
+	margin-top: 16px;
+}
+
+.synchy-sync-scope-panel .synchy-sync-scope-table {
+	grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
 @media (max-width: 900px) {
 	.synchy-shell {
 		padding: 20px;
@@ -992,6 +1138,18 @@
 
 	.synchy-grid {
 		grid-template-columns: minmax(0, 1fr);
+	}
+
+	.synchy-sync-workflow-grid,
+	.synchy-status-pending-grid,
+	.synchy-sync-scope-panel .synchy-sync-scope-table,
+	.synchy-sync-connection-form {
+		grid-template-columns: minmax(0, 1fr);
+	}
+
+	.synchy-pending-summary {
+		padding-left: 0;
+		border-left: 0;
 	}
 
 	.synchy-filter-list {
