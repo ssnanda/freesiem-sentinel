@@ -10363,8 +10363,18 @@ function synchy_render_incremental_site_sync_page(array $current): void
 		$status_badge = __('Delta ready', 'synchy');
 	}
 
+	$connection_remote_version = (string) ($connection_remote_site['sentinelVersion'] ?? $connection_remote_site['pluginVersion'] ?? '');
+	$connection_local_version = synchy_get_display_version();
+	$connection_needs_update = $connection_state_status === 'connected' && $connection_remote_version !== '' && $connection_local_version !== '' && version_compare($connection_remote_version, $connection_local_version, '<');
+
 	if ($connection_state_status === 'connected') {
-		$connection_badge = __('Connection ready', 'synchy');
+		$connection_badge = $connection_needs_update
+			? sprintf(
+				/* translators: %s: destination plugin version */
+				__('Live Sentinel %s', 'synchy'),
+				$connection_remote_version
+			)
+			: __('Connection ready', 'synchy');
 		$connection_message = (string) ($connection_state['message'] ?? __('Destination site is ready for Sync.', 'synchy'));
 		$connection_inline_badge = __('Connected', 'synchy');
 		$connection_inline_class = 'synchy-badge synchy-badge--connected';
@@ -10387,6 +10397,59 @@ function synchy_render_incremental_site_sync_page(array $current): void
 				<input type="hidden" name="<?php echo esc_attr(SYNCHY_SITE_SYNC_OPTIONS); ?>[sync_scope_selection_present]" value="1" />
 
 				<div class="synchy-grid synchy-sync-workflow-grid">
+					<div class="synchy-panel synchy-sync-control-panel" data-synchy-sync-status-panel data-synchy-sync-pending-panel>
+						<div class="synchy-stack__split">
+							<h2><?php esc_html_e('Workflow', 'synchy'); ?></h2>
+							<span class="synchy-badge" data-synchy-sync-status-badge><?php echo esc_html($status_badge); ?></span>
+						</div>
+						<p class="synchy-status-line" data-synchy-sync-status-summary><?php echo esc_html($status_summary); ?></p>
+
+						<div class="synchy-input-row synchy-sync-action-row">
+							<button type="button" class="button synchy-action-button synchy-action-button--preview" data-synchy-preview-sync><?php esc_html_e('Preview', 'synchy'); ?></button>
+							<button type="button" class="button button-primary button-large synchy-action-button synchy-action-button--push" data-synchy-run-sync disabled><?php echo esc_html($run_button_label); ?></button>
+							<button type="button" class="button synchy-action-button synchy-action-button--full" data-synchy-run-full-sync disabled><?php esc_html_e('Full Sync', 'synchy'); ?></button>
+							<button type="button" class="button synchy-action-button synchy-action-button--muted" data-synchy-pause-sync disabled><?php esc_html_e('Pause Sync', 'synchy'); ?></button>
+							<button type="button" class="button synchy-action-button synchy-action-button--muted" data-synchy-resume-sync disabled><?php esc_html_e('Resume Sync', 'synchy'); ?></button>
+							<button type="button" class="button button-link-delete synchy-action-button synchy-action-button--danger" data-synchy-reset-sync><?php esc_html_e('Cancel', 'synchy'); ?></button>
+							<button type="button" class="button synchy-action-button synchy-action-button--baseline" data-synchy-mark-baseline><?php esc_html_e('Set Baseline', 'synchy'); ?></button>
+						</div>
+						<p class="synchy-field-note" data-synchy-sync-target-note>
+							<?php
+							printf(
+								/* translators: %s: destination URL */
+								esc_html__('Sync sends changes only to %s.', 'synchy'),
+								esc_html((string) ($options['destination_url'] ?: __('the destination URL above', 'synchy')))
+							);
+							?>
+						</p>
+
+						<div class="synchy-status-pending-grid">
+							<div class="synchy-stage-status synchy-stage-status--compact">
+								<p class="synchy-stage-status__label"><?php esc_html_e('Sync Stage Status', 'synchy'); ?></p>
+								<div class="synchy-export-stages synchy-export-stages--inline" data-synchy-sync-stages>
+									<?php foreach ($sync_stage_items as $stage) : ?>
+										<div class="synchy-export-stage is-<?php echo esc_attr((string) $stage['state']); ?>">
+											<span class="synchy-export-stage__indicator" aria-hidden="true"></span>
+											<div class="synchy-export-stage__content">
+												<strong><?php echo esc_html((string) $stage['label']); ?></strong>
+											</div>
+										</div>
+									<?php endforeach; ?>
+								</div>
+							</div>
+
+							<div class="synchy-pending-summary">
+								<div class="synchy-stack__split">
+									<strong><?php esc_html_e('Pending Changes', 'synchy'); ?></strong>
+									<span class="synchy-badge" data-synchy-sync-preview-badge><?php echo esc_html($pending_badge); ?></span>
+								</div>
+								<p class="synchy-field-note" data-synchy-sync-preview-message><?php echo esc_html($pending_message); ?></p>
+								<p class="synchy-field-note<?php echo $pending_batch_counter === '' ? ' is-hidden' : ''; ?>" data-synchy-sync-batch-counter><?php echo esc_html($pending_batch_counter); ?></p>
+								<div class="<?php echo esc_attr($pending_tree_classes); ?>" data-synchy-sync-preview-tree><?php echo wp_kses_post($pending_tree_html); ?></div>
+							</div>
+						</div>
+					</div>
+
 					<div class="synchy-panel synchy-panel--muted synchy-sync-connection-panel">
 						<div class="synchy-stack__split">
 							<h2><?php esc_html_e('Destination & Connection', 'synchy'); ?></h2>
@@ -10459,85 +10522,23 @@ function synchy_render_incremental_site_sync_page(array $current): void
 							</div>
 							<p class="synchy-field-note" data-synchy-sync-connection-message><?php echo esc_html($connection_message); ?></p>
 							<div class="synchy-export-meta synchy-detail-grid" data-synchy-sync-connection-meta>
-								<?php if ($connection_state_status === 'connected') : ?>
-									<div>
-										<span class="synchy-export-meta__label"><?php esc_html_e('Site', 'synchy'); ?></span>
-										<strong><?php echo esc_html((string) ($connection_remote_site['name'] ?? '')); ?></strong>
-									</div>
-									<div>
-										<span class="synchy-export-meta__label"><?php esc_html_e('Destination', 'synchy'); ?></span>
-										<strong><?php echo esc_html((string) ($connection_remote_site['siteUrl'] ?? '')); ?></strong>
-									</div>
-									<div>
-										<span class="synchy-export-meta__label"><?php esc_html_e('Local Sentinel version', 'synchy'); ?></span>
-										<strong><?php echo esc_html(synchy_get_display_version()); ?></strong>
-									</div>
-									<div>
-										<span class="synchy-export-meta__label"><?php esc_html_e('Live Sentinel version', 'synchy'); ?></span>
-										<strong><?php echo esc_html((string) ($connection_remote_site['sentinelVersion'] ?? $connection_remote_site['pluginVersion'] ?? '')); ?></strong>
-									</div>
-									<div>
-										<span class="synchy-export-meta__label"><?php esc_html_e('Authenticated as', 'synchy'); ?></span>
-										<strong><?php echo esc_html((string) ($connection_remote_site['authenticatedAs'] ?? '')); ?></strong>
-									</div>
-								<?php endif; ?>
 							</div>
 							<div class="synchy-update-row">
-								<button type="button" class="button is-hidden" data-synchy-update-remote-synchy><?php esc_html_e('Update Live Sentinel', 'synchy'); ?></button>
-								<p class="synchy-field-note" data-synchy-update-remote-note><?php esc_html_e('Run or wait for the connection check to compare Sentinel versions.', 'synchy'); ?></p>
-							</div>
-						</div>
-					</div>
-
-					<div class="synchy-panel synchy-sync-control-panel" data-synchy-sync-status-panel data-synchy-sync-pending-panel>
-						<div class="synchy-stack__split">
-							<h2><?php esc_html_e('Workflow', 'synchy'); ?></h2>
-							<span class="synchy-badge" data-synchy-sync-status-badge><?php echo esc_html($status_badge); ?></span>
-						</div>
-						<p class="synchy-status-line" data-synchy-sync-status-summary><?php echo esc_html($status_summary); ?></p>
-
-						<div class="synchy-input-row synchy-sync-action-row">
-							<button type="button" class="button synchy-action-button synchy-action-button--preview" data-synchy-preview-sync><?php esc_html_e('Preview', 'synchy'); ?></button>
-							<button type="button" class="button button-primary button-large synchy-action-button synchy-action-button--push" data-synchy-run-sync disabled><?php echo esc_html($run_button_label); ?></button>
-							<button type="button" class="button synchy-action-button synchy-action-button--full" data-synchy-run-full-sync disabled><?php esc_html_e('Full Sync', 'synchy'); ?></button>
-							<button type="button" class="button synchy-action-button synchy-action-button--muted" data-synchy-pause-sync disabled><?php esc_html_e('Pause Sync', 'synchy'); ?></button>
-							<button type="button" class="button synchy-action-button synchy-action-button--muted" data-synchy-resume-sync disabled><?php esc_html_e('Resume Sync', 'synchy'); ?></button>
-							<button type="button" class="button button-link-delete synchy-action-button synchy-action-button--danger" data-synchy-reset-sync><?php esc_html_e('Cancel', 'synchy'); ?></button>
-							<button type="button" class="button synchy-action-button synchy-action-button--baseline" data-synchy-mark-baseline><?php esc_html_e('Set Baseline', 'synchy'); ?></button>
-						</div>
-						<p class="synchy-field-note" data-synchy-sync-target-note>
-							<?php
-							printf(
-								/* translators: %s: destination URL */
-								esc_html__('Sync sends changes only to %s.', 'synchy'),
-								esc_html((string) ($options['destination_url'] ?: __('the destination URL above', 'synchy')))
-							);
-							?>
-						</p>
-
-						<div class="synchy-status-pending-grid">
-							<div class="synchy-stage-status synchy-stage-status--compact">
-								<p class="synchy-stage-status__label"><?php esc_html_e('Sync Stage Status', 'synchy'); ?></p>
-								<div class="synchy-export-stages synchy-export-stages--inline" data-synchy-sync-stages>
-									<?php foreach ($sync_stage_items as $stage) : ?>
-										<div class="synchy-export-stage is-<?php echo esc_attr((string) $stage['state']); ?>">
-											<span class="synchy-export-stage__indicator" aria-hidden="true"></span>
-											<div class="synchy-export-stage__content">
-												<strong><?php echo esc_html((string) $stage['label']); ?></strong>
-											</div>
-										</div>
-									<?php endforeach; ?>
-								</div>
-							</div>
-
-							<div class="synchy-pending-summary">
-								<div class="synchy-stack__split">
-									<strong><?php esc_html_e('Pending Changes', 'synchy'); ?></strong>
-									<span class="synchy-badge" data-synchy-sync-preview-badge><?php echo esc_html($pending_badge); ?></span>
-								</div>
-								<p class="synchy-field-note" data-synchy-sync-preview-message><?php echo esc_html($pending_message); ?></p>
-								<p class="synchy-field-note<?php echo $pending_batch_counter === '' ? ' is-hidden' : ''; ?>" data-synchy-sync-batch-counter><?php echo esc_html($pending_batch_counter); ?></p>
-								<div class="<?php echo esc_attr($pending_tree_classes); ?>" data-synchy-sync-preview-tree><?php echo wp_kses_post($pending_tree_html); ?></div>
+								<button type="button" class="button<?php echo $connection_needs_update ? '' : ' is-hidden'; ?>" data-synchy-update-remote-synchy><?php esc_html_e('Update Live Sentinel', 'synchy'); ?></button>
+								<p class="synchy-field-note<?php echo !$connection_needs_update && $connection_state_status === 'connected' ? ' is-hidden' : ''; ?>" data-synchy-update-remote-note>
+									<?php
+									echo esc_html(
+										$connection_needs_update
+											? sprintf(
+												/* translators: 1: destination plugin version, 2: local plugin version */
+												__('Destination update available: %1$s -> %2$s', 'synchy'),
+												$connection_remote_version,
+												$connection_local_version
+											)
+											: __('Run or wait for the connection check to compare Sentinel versions.', 'synchy')
+									);
+									?>
+								</p>
 							</div>
 						</div>
 					</div>

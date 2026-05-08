@@ -707,8 +707,14 @@
 			return;
 		}
 
+		const remoteVersion = getRemotePluginVersion(payload);
+		const localVersion = String(config.localPluginVersion || "");
+		const remoteIsOlder = !isError && remoteVersion !== "" && localVersion !== "" && compareVersions(remoteVersion, localVersion) < 0;
+
 		connectionPanel.classList.remove("is-hidden");
-		connectionBadge.textContent = isError ? (config.strings.connectionError || "Connection failed") : (config.strings.connectionReady || "Connection ready");
+		connectionBadge.textContent = isError
+			? (config.strings.connectionError || "Connection failed")
+			: (remoteIsOlder ? `Live Sentinel ${remoteVersion}` : (config.strings.connectionReady || "Connection ready"));
 		connectionMessage.textContent = isError
 			? payload.message || config.strings.unknownError || "Backup & Restore hit an unexpected Sync error."
 			: payload.message || "Destination site is ready for Sync.";
@@ -718,13 +724,7 @@
 			return;
 		}
 
-		renderMeta(connectionMeta, [
-			{ label: config.strings.site || "Site", value: payload.name || "" },
-			{ label: config.strings.destination || "Destination", value: payload.siteUrl || "" },
-			{ label: config.strings.localPluginVersion || "Local Sentinel version", value: config.localPluginVersion || "" },
-			{ label: config.strings.pluginVersion || "Sentinel version", value: getRemotePluginVersion(payload) },
-			{ label: config.strings.authenticatedAs || "Authenticated as", value: payload.authenticatedAs || "" },
-		]);
+		renderMeta(connectionMeta, []);
 	};
 
 	const updateRemoteUpdateControls = () => {
@@ -739,6 +739,7 @@
 
 		updateRemoteButton.classList.toggle("is-hidden", !remoteIsOlder);
 		updateRemoteButton.disabled = busy || !remoteIsOlder;
+		updateRemoteNote.classList.toggle("is-hidden", !remoteIsOlder && canCompare);
 		updateRemoteNote.textContent = remoteIsOlder
 			? `${config.strings.updateAvailable || "Destination update available"} ${remoteVersion} -> ${localVersion}`
 			: (canCompare

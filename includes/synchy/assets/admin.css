@@ -59,8 +59,20 @@
 	border-radius: 16px;
 	background:
 		radial-gradient(circle at 64% 30%, rgba(255, 255, 255, 0.95) 0 6px, transparent 7px),
-		conic-gradient(from 210deg, #1f8f5f, #1d70b8, #7c3aed, #ffb020, #1f8f5f);
-	box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.58), 0 12px 22px rgba(29, 112, 184, 0.24);
+		conic-gradient(from 210deg, #19cb78, #06b6d4, #2563eb, #7c3aed, #ec4899, #ffb020, #19cb78);
+	box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.58), 0 12px 22px rgba(124, 58, 237, 0.24);
+}
+
+.freesiem-synchy-title__mark::before {
+	position: absolute;
+	inset: 5px;
+	content: "";
+	border-radius: 12px;
+	background:
+		linear-gradient(135deg, rgba(255, 255, 255, 0.22), transparent 48%),
+		radial-gradient(circle at 25% 78%, rgba(25, 203, 120, 0.9), transparent 18px),
+		radial-gradient(circle at 78% 70%, rgba(236, 72, 153, 0.72), transparent 17px);
+	mix-blend-mode: screen;
 }
 
 .freesiem-synchy-title__mark::after {
@@ -1092,7 +1104,7 @@
 }
 
 .synchy-sync-workflow-grid {
-	grid-template-columns: minmax(430px, 0.78fr) minmax(620px, 1.22fr);
+	grid-template-columns: minmax(620px, 1.22fr) minmax(380px, 0.78fr);
 	align-items: start;
 	margin-bottom: 16px;
 }
@@ -1144,10 +1156,10 @@
 
 .synchy-sync-connection-form {
 	display: grid;
-	grid-template-columns: minmax(0, 1fr) minmax(160px, 0.45fr);
-	gap: 12px 14px;
+	grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+	gap: 9px 12px;
 	align-items: end;
-	margin-top: 14px;
+	margin-top: 12px;
 }
 
 .synchy-sync-connection-form .synchy-field {
@@ -1159,8 +1171,14 @@
 	max-width: none;
 }
 
-.synchy-sync-password-field {
+.synchy-sync-connection-form .synchy-field:first-child {
 	grid-column: 1 / -1;
+}
+
+.synchy-sync-password-field .synchy-field-note {
+	margin-top: 5px;
+	font-size: 12px;
+	line-height: 1.25;
 }
 
 .synchy-sync-connection-actions {
@@ -1188,8 +1206,8 @@
 }
 
 .synchy-connection-summary {
-	margin-top: 14px;
-	padding: 11px 12px;
+	margin-top: 12px;
+	padding: 10px 12px;
 	border: 1px solid rgba(29, 112, 184, 0.12);
 	border-radius: 16px;
 	background: rgba(255, 255, 255, 0.52);
@@ -1201,7 +1219,7 @@
 }
 
 .synchy-connection-summary > .synchy-field-note {
-	margin: 6px 0 0;
+	margin: 5px 0 0;
 	font-size: 13px;
 	line-height: 1.35;
 }
@@ -1212,6 +1230,10 @@
 	gap: 7px;
 	margin-top: 8px;
 	border-top: 0;
+}
+
+.synchy-detail-grid:empty {
+	display: none;
 }
 
 .synchy-detail-grid div {
@@ -1247,7 +1269,7 @@
 	flex-wrap: wrap;
 	gap: 10px;
 	align-items: center;
-	margin-top: 8px;
+	margin-top: 6px;
 }
 
 .synchy-update-row .synchy-field-note {
