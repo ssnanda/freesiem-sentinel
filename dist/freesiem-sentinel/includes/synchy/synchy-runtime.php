@@ -1589,15 +1589,17 @@ function synchy_get_sync_current_content_scope_time(): int
 	global $wpdb;
 
 	$value = $wpdb->get_var(
-		'SELECT MAX(GREATEST(UNIX_TIMESTAMP(`post_modified_gmt`), UNIX_TIMESTAMP(`post_date_gmt`))) FROM `' . str_replace('`', '``', $wpdb->posts) . '`'
+		'SELECT MAX(UNIX_TIMESTAMP(`post_modified_gmt`)) FROM `' . str_replace('`', '``', $wpdb->posts) . '`'
 	);
 
-	return max(0, (int) $value);
+	return min(time(), max(0, (int) $value));
 }
 
 function synchy_build_sync_scope_time_watermarks(array $selected_scope_ids, int $fallback_time): array
 {
 	$scope_times = [];
+	$now = time();
+	$fallback_time = min($now, max(0, $fallback_time));
 
 	foreach ($selected_scope_ids as $scope_id) {
 		$scope_id = (string) $scope_id;
@@ -1608,11 +1610,11 @@ function synchy_build_sync_scope_time_watermarks(array $selected_scope_ids, int 
 	}
 
 	foreach (synchy_get_sync_current_file_scope_times(array_values(array_intersect($selected_scope_ids, ['files_plugins', 'files_themes', 'files_uploads']))) as $scope_id => $time) {
-		$scope_times[(string) $scope_id] = max((int) ($scope_times[(string) $scope_id] ?? 0), (int) $time, $fallback_time);
+		$scope_times[(string) $scope_id] = min($now, max((int) ($scope_times[(string) $scope_id] ?? 0), (int) $time, $fallback_time));
 	}
 
 	if (in_array('db_content', $selected_scope_ids, true)) {
-		$scope_times['db_content'] = max((int) ($scope_times['db_content'] ?? 0), synchy_get_sync_current_content_scope_time(), $fallback_time);
+		$scope_times['db_content'] = min($now, max((int) ($scope_times['db_content'] ?? 0), synchy_get_sync_current_content_scope_time(), $fallback_time));
 	}
 
 	return $scope_times;
@@ -6185,7 +6187,7 @@ function synchy_build_sync_batch_package(array $options, array $job, array $batc
 		'baseline_scopes' => [(string) ($batch['scope_id'] ?? '')],
 		'selected_scopes' => [(string) ($batch['scope_id'] ?? '')],
 	];
-	$sync_time = max(0, (int) ($job['sync_time_base'] ?? time())) + max(1, (int) ($batch['sequence'] ?? 1));
+	$sync_time = min(time(), max(0, (int) ($job['sync_time_base'] ?? time())) + max(1, (int) ($batch['sequence'] ?? 1)));
 	$written = synchy_write_sync_package_from_parts($file_delta, $db_delta, $sync_time, $options, $temp_dir);
 
 	if (is_wp_error($written)) {
@@ -7848,7 +7850,7 @@ function synchy_run_sync_changes(array $raw_options)
 			return $job;
 		}
 
-		$job['sync_time_base'] = (int) (($payload['summary']['syncedAt'] ?? time()) * 100);
+		$job['sync_time_base'] = (int) ($payload['summary']['syncedAt'] ?? time());
 		$job = synchy_update_sync_job($job);
 		$status = [
 			'status' => 'running',
