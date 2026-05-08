@@ -1870,12 +1870,18 @@ class Freesiem_Admin
 	public function render_about_page(): void
 	{
 		$settings = freesiem_sentinel_get_settings();
-		$release = $this->plugin->get_updater()->get_github_release_data();
+		$updater = $this->plugin->get_updater();
+		$update_check = $updater->refresh_plugin_update_state();
+		$update_check_error = is_wp_error($update_check) ? $update_check : null;
+		$release = is_array($update_check) && is_array($update_check['release'] ?? null)
+			? $update_check['release']
+			: (is_array($settings['updater_cache'] ?? null) ? $settings['updater_cache'] : []);
 		$release = is_wp_error($release) ? [] : freesiem_sentinel_safe_array($release);
 		$release_body = trim(safe($release['body'] ?? ''));
 		$release_available = !empty($release['available']);
 		$release_version = safe($release['version'] ?? '');
 		$update_available = $release_available && version_compare($release_version, FREESIEM_SENTINEL_VERSION, '>');
+		$update_button_url = $updater->get_update_plugin_url(freesiem_sentinel_admin_page_url('freesiem-about'));
 
 		echo '<div class="wrap">';
 		echo '<h1>' . esc_html__('About freeSIEM Sentinel', 'freesiem-sentinel') . '</h1>';
@@ -1889,16 +1895,18 @@ class Freesiem_Admin
 		echo '<div style="background:#fff;padding:20px;border:1px solid #dcdcde;border-radius:12px;margin-top:20px;">';
 		echo '<h2 style="margin-top:0;">' . esc_html__('Updates & Credentials', 'freesiem-sentinel') . '</h2>';
 		echo '<p><strong>' . esc_html__('Plugin Updates', 'freesiem-sentinel') . ':</strong> ' . esc_html($update_available ? sprintf(__('Version %s is available.', 'freesiem-sentinel'), $release_version) : __('You are on the latest available version.', 'freesiem-sentinel')) . '</p>';
+		if ($update_check_error instanceof WP_Error) {
+			echo '<p style="color:#b32d2e;">' . esc_html(sprintf(__('The automatic update check could not complete: %s', 'freesiem-sentinel'), $update_check_error->get_error_message())) . '</p>';
+		}
 		if ($update_available) {
-			echo '<p><a class="button button-primary" href="' . esc_url($this->plugin->get_updater()->get_plugin_upgrade_url()) . '">' . esc_html__('Update Plugin', 'freesiem-sentinel') . '</a></p>';
+			echo '<p><a class="button button-primary" href="' . esc_url($update_button_url) . '">' . esc_html__('Update Plugin', 'freesiem-sentinel') . '</a></p>';
 		} else {
-			echo '<p><button type="button" class="button button-secondary" disabled="disabled">' . esc_html__('Update Plugin', 'freesiem-sentinel') . '</button></p>';
+			echo '<p><a class="button button-secondary" href="' . esc_url($update_button_url) . '">' . esc_html__('Update Plugin', 'freesiem-sentinel') . '</a></p>';
 		}
 		echo '<p><strong>' . esc_html__('Automatic Updates', 'freesiem-sentinel') . ':</strong> ' . esc_html__('Enabled by default for this plugin.', 'freesiem-sentinel') . '</p>';
-		echo '<p style="color:#50575e;">' . esc_html__('WordPress checks for plugin updates on its normal update schedule, roughly every 12 hours, and also whenever you click Check for Updates here. If a newer GitHub release is found, the Update Plugin button appears immediately on this page. Automatic updates are then applied during WordPress background update runs.', 'freesiem-sentinel') . '</p>';
+		echo '<p style="color:#50575e;">' . esc_html__('This page checks GitHub for the latest packaged release every time it loads. Click Update Plugin to check again and install immediately when an update is available. Automatic updates are also enabled by default for WordPress background update runs.', 'freesiem-sentinel') . '</p>';
 		echo '<p><strong>' . esc_html__('API Key:', 'freesiem-sentinel') . '</strong> <code>' . esc_html(freesiem_sentinel_mask_secret((string) ($settings['api_key'] ?? ''))) . '</code></p>';
 		echo '<p><strong>' . esc_html__('HMAC Secret:', 'freesiem-sentinel') . '</strong> <code>' . esc_html(freesiem_sentinel_mask_secret((string) ($settings['hmac_secret'] ?? ''))) . '</code></p>';
-		echo '<p><strong>' . esc_html__('Check for Updates:', 'freesiem-sentinel') . '</strong> <a class="button button-secondary" href="' . esc_url(freesiem_sentinel_safe_string($this->plugin->get_updater()->get_check_updates_url(freesiem_sentinel_admin_page_url('freesiem-about')))) . '">' . esc_html__('Check for Updates', 'freesiem-sentinel') . '</a></p>';
 		if (!empty($release['published_at'])) {
 			echo '<p><strong>' . esc_html__('Release Published:', 'freesiem-sentinel') . '</strong> ' . esc_html(freesiem_sentinel_format_datetime((string) ($release['published_at'] ?? ''))) . '</p>';
 		}

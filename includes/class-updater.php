@@ -13,6 +13,7 @@ class Freesiem_Updater
 		add_filter('plugin_action_links_' . freesiem_sentinel_get_plugin_basename(), [$this, 'plugin_action_links']);
 		add_filter('auto_update_plugin', [$this, 'filter_auto_update_plugin'], 20, 2);
 		add_action('admin_post_freesiem_sentinel_check_updates', [$this, 'handle_manual_update_check']);
+		add_action('admin_post_freesiem_sentinel_update_plugin', [$this, 'handle_update_plugin']);
 		add_action('upgrader_process_complete', [$this, 'clear_after_upgrade'], 10, 2);
 	}
 
@@ -232,6 +233,43 @@ class Freesiem_Updater
 		exit;
 	}
 
+	public function handle_update_plugin(): void
+	{
+		if (!freesiem_sentinel_current_user_can_manage()) {
+			wp_die(esc_html__('You are not allowed to update this plugin.', 'freesiem-sentinel'));
+		}
+
+		freesiem_sentinel_require_admin_post_nonce();
+
+		$redirect_to = isset($_GET['redirect_to']) ? wp_unslash((string) $_GET['redirect_to']) : '';
+		$redirect_to = wp_validate_redirect($redirect_to, freesiem_sentinel_admin_page_url('freesiem-about'));
+		$result = $this->refresh_plugin_update_state();
+
+		if (is_wp_error($result)) {
+			freesiem_sentinel_set_notice('error', $result->get_error_message());
+			wp_safe_redirect($redirect_to);
+			exit;
+		}
+
+		$release = is_array($result['release'] ?? null) ? $result['release'] : [];
+		$version = safe($release['version'] ?? '');
+
+		if (empty($result['update_available']) || $version === '') {
+			freesiem_sentinel_set_notice(
+				'success',
+				!empty($release['available'])
+					? sprintf(__('freeSIEM Sentinel is already on the latest GitHub release (v%s).', 'freesiem-sentinel'), FREESIEM_SENTINEL_VERSION)
+					: __('No packaged GitHub release is available for freeSIEM Sentinel.', 'freesiem-sentinel')
+			);
+			wp_safe_redirect($redirect_to);
+			exit;
+		}
+
+		freesiem_sentinel_set_notice('success', sprintf(__('Updating freeSIEM Sentinel to v%s.', 'freesiem-sentinel'), $version));
+		wp_safe_redirect($this->get_plugin_upgrade_url());
+		exit;
+	}
+
 	public function clear_after_upgrade($upgrader, array $hook_extra): void
 	{
 		if (($hook_extra['type'] ?? '') !== 'plugin' || empty($hook_extra['plugins']) || !is_array($hook_extra['plugins'])) {
@@ -264,6 +302,24 @@ class Freesiem_Updater
 	{
 		$url = add_query_arg(
 			freesiem_sentinel_safe_query_args(['action' => 'freesiem_sentinel_check_updates']),
+			admin_url('admin-post.php')
+		);
+		$redirect_to = safe($redirect_to);
+
+		if ($redirect_to !== '') {
+			$url = add_query_arg(
+				freesiem_sentinel_safe_query_args(['redirect_to' => $redirect_to]),
+				(string) $url
+			);
+		}
+
+		return wp_nonce_url((string) $url, FREESIEM_SENTINEL_NONCE_ACTION);
+	}
+
+	public function get_update_plugin_url(string $redirect_to = ''): string
+	{
+		$url = add_query_arg(
+			freesiem_sentinel_safe_query_args(['action' => 'freesiem_sentinel_update_plugin']),
 			admin_url('admin-post.php')
 		);
 		$redirect_to = safe($redirect_to);
