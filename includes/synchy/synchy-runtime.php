@@ -10382,24 +10382,6 @@ function synchy_render_incremental_site_sync_page(array $current): void
 	<div class="wrap synchy-admin">
 		<?php synchy_render_notice(); ?>
 		<div class="synchy-shell">
-			<div class="synchy-hero">
-				<div>
-					<p class="synchy-eyebrow"><?php esc_html_e('Selective Delta Workflow', 'synchy'); ?></p>
-					<h1><?php echo esc_html($current['headline']); ?></h1>
-					<p class="synchy-description"><?php echo esc_html($current['description']); ?></p>
-				</div>
-				<div class="synchy-status">
-					<span class="synchy-status__dot" aria-hidden="true"></span>
-					<?php
-					echo esc_html(
-						$running_job !== []
-							? __('Sync running', 'synchy')
-							: ($scope_status['hasPendingBaseline'] ? __('Baseline ready', 'synchy') : __('Delta ready', 'synchy'))
-					);
-					?>
-				</div>
-			</div>
-
 			<form method="post" action="<?php echo esc_url(synchy_get_site_sync_save_url()); ?>" class="synchy-form" data-synchy-sync-form>
 				<?php synchy_render_site_sync_save_fields(); ?>
 				<input type="hidden" name="<?php echo esc_attr(SYNCHY_SITE_SYNC_OPTIONS); ?>[sync_scope_selection_present]" value="1" />
@@ -10515,13 +10497,13 @@ function synchy_render_incremental_site_sync_page(array $current): void
 						<p class="synchy-status-line" data-synchy-sync-status-summary><?php echo esc_html($status_summary); ?></p>
 
 						<div class="synchy-input-row synchy-sync-action-row">
-							<button type="button" class="button" data-synchy-preview-sync><?php esc_html_e('Preview Changes', 'synchy'); ?></button>
-							<button type="button" class="button button-primary button-large" data-synchy-run-sync disabled><?php echo esc_html($run_button_label); ?></button>
-							<button type="button" class="button" data-synchy-run-full-sync disabled><?php esc_html_e('Preview Full Sync', 'synchy'); ?></button>
-							<button type="button" class="button" data-synchy-pause-sync disabled><?php esc_html_e('Pause Sync', 'synchy'); ?></button>
-							<button type="button" class="button" data-synchy-resume-sync disabled><?php esc_html_e('Resume Sync', 'synchy'); ?></button>
-							<button type="button" class="button button-link-delete" data-synchy-reset-sync><?php esc_html_e('Cancel / Reset Sync', 'synchy'); ?></button>
-							<button type="button" class="button" data-synchy-mark-baseline><?php esc_html_e('Mark Manual Baseline Complete', 'synchy'); ?></button>
+							<button type="button" class="button synchy-action-button synchy-action-button--preview" data-synchy-preview-sync><?php esc_html_e('Preview Changes', 'synchy'); ?></button>
+							<button type="button" class="button button-primary button-large synchy-action-button synchy-action-button--push" data-synchy-run-sync disabled><?php echo esc_html($run_button_label); ?></button>
+							<button type="button" class="button synchy-action-button synchy-action-button--full" data-synchy-run-full-sync disabled><?php esc_html_e('Preview Full Sync', 'synchy'); ?></button>
+							<button type="button" class="button synchy-action-button synchy-action-button--muted" data-synchy-pause-sync disabled><?php esc_html_e('Pause Sync', 'synchy'); ?></button>
+							<button type="button" class="button synchy-action-button synchy-action-button--muted" data-synchy-resume-sync disabled><?php esc_html_e('Resume Sync', 'synchy'); ?></button>
+							<button type="button" class="button button-link-delete synchy-action-button synchy-action-button--danger" data-synchy-reset-sync><?php esc_html_e('Cancel / Reset Sync', 'synchy'); ?></button>
+							<button type="button" class="button synchy-action-button synchy-action-button--baseline" data-synchy-mark-baseline><?php esc_html_e('Mark Manual Baseline Complete', 'synchy'); ?></button>
 						</div>
 						<p class="synchy-field-note" data-synchy-sync-target-note>
 							<?php

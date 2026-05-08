@@ -104,7 +104,9 @@ class Freesiem_Admin
 		foreach (synchy_get_pages() as $page) {
 			$slug = sanitize_key((string) ($page['slug'] ?? ''));
 			if ($slug !== '') {
+				remove_menu_page($slug);
 				remove_submenu_page('synchy', $slug);
+				remove_submenu_page($slug, $slug);
 			}
 		}
 	}
@@ -1231,9 +1233,9 @@ class Freesiem_Admin
 		$tabs = $this->get_synchy_tabs();
 
 		echo '<div class="wrap">';
-		echo '<h1>' . esc_html__('Backup & Restore', 'freesiem-sentinel') . '</h1>';
-		echo '<p>' . esc_html(sprintf(__('Backup, restore, upload-to-live, and sync capabilities are included in freeSIEM Sentinel v%s.', 'freesiem-sentinel'), FREESIEM_SENTINEL_VERSION)) . '</p>';
-		echo '<h2 class="nav-tab-wrapper" style="margin-bottom:16px;">';
+		echo '<div class="freesiem-synchy-header">';
+		echo '<div class="freesiem-synchy-title"><span class="freesiem-synchy-title__mark" aria-hidden="true"></span><h1>' . esc_html__('Backup & Restore', 'freesiem-sentinel') . '</h1></div>';
+		echo '<h2 class="nav-tab-wrapper freesiem-synchy-tabs">';
 		foreach ($tabs as $tab => $config) {
 			$url = add_query_arg(
 				[
@@ -1245,6 +1247,7 @@ class Freesiem_Admin
 			echo '<a class="nav-tab ' . esc_attr($tab === $current_tab ? 'nav-tab-active' : '') . '" href="' . esc_url($url) . '">' . esc_html((string) ($config['label'] ?? $tab)) . '</a>';
 		}
 		echo '</h2>';
+		echo '</div>';
 		echo '</div>';
 
 		ob_start();
@@ -3529,7 +3532,7 @@ class Freesiem_Admin
 				'legacy_slug' => 'synchy-scheduled-backups',
 			],
 			'upload-live' => [
-				'label' => __('Upload to Live', 'freesiem-sentinel'),
+				'label' => __('Update to Live', 'freesiem-sentinel'),
 				'legacy_slug' => 'synchy-push-live-site',
 			],
 		];
