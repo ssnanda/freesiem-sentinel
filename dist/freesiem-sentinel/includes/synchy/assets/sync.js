@@ -773,9 +773,9 @@
 		}
 	};
 
-	const updateRemoteSynchy = async () => {
-		if (!window.confirm(config.strings.confirmUpdateRemoteSynchy || "Update Sentinel on the destination site from this local plugin copy now?")) {
-			return;
+	const updateRemoteSynchy = async (confirmFirst = true) => {
+		if (confirmFirst && !window.confirm(config.strings.confirmUpdateRemoteSynchy || "Update Sentinel on the destination site from this local plugin copy now?")) {
+			return { ok: false, cancelled: true };
 		}
 
 		setBusy(true);
@@ -804,12 +804,15 @@
 				updateRemoteUpdateControls();
 				refreshRemoteVersionUntilCurrent();
 			}
+
+			return { ok: true, remoteSite: data.remoteSite || {}, message: successMessage };
 		} catch (error) {
 			updateRemoteNote.textContent = error.message;
 			previewBadge.textContent = config.strings.error || "Error";
 			previewMessage.textContent = error.message;
 			renderConnectionResult({ message: error.message }, true);
 			updateRemoteUpdateControls();
+			return { ok: false, message: error.message };
 		} finally {
 			if (currentJob?.status === "running") {
 				setBusy(true);
@@ -1257,6 +1260,12 @@
 			const connectionCheck = await performConnectionTest();
 
 			if (connectionCheck.ok) {
+				const updateCheck = await updateRemoteSynchy(false);
+
+				if (!updateCheck.ok) {
+					return;
+				}
+
 				await runPreview("delta");
 				return;
 			}
