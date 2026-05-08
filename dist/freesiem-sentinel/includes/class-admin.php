@@ -3512,6 +3512,10 @@ class Freesiem_Admin
 	private function get_synchy_tabs(): array
 	{
 		return [
+			'sync' => [
+				'label' => __('Sync', 'freesiem-sentinel'),
+				'legacy_slug' => 'synchy-site-sync',
+			],
 			'export' => [
 				'label' => __('Export', 'freesiem-sentinel'),
 				'legacy_slug' => 'synchy-export',
@@ -3528,36 +3532,32 @@ class Freesiem_Admin
 				'label' => __('Upload to Live', 'freesiem-sentinel'),
 				'legacy_slug' => 'synchy-push-live-site',
 			],
-			'sync' => [
-				'label' => __('Sync', 'freesiem-sentinel'),
-				'legacy_slug' => 'synchy-site-sync',
-			],
 		];
 	}
 
 	private function get_synchy_current_tab(): string
 	{
-		$tab = isset($_GET['tab']) ? sanitize_key((string) wp_unslash($_GET['tab'])) : 'export';
+		$tab = isset($_GET['tab']) ? sanitize_key((string) wp_unslash($_GET['tab'])) : 'sync';
 		$tabs = $this->get_synchy_tabs();
 
-		return isset($tabs[$tab]) ? $tab : 'export';
+		return isset($tabs[$tab]) ? $tab : 'sync';
 	}
 
 	private function get_synchy_legacy_page_slug(string $tab): string
 	{
 		$tabs = $this->get_synchy_tabs();
 
-		return isset($tabs[$tab]['legacy_slug']) ? (string) $tabs[$tab]['legacy_slug'] : 'synchy-export';
+		return isset($tabs[$tab]['legacy_slug']) ? (string) $tabs[$tab]['legacy_slug'] : 'synchy-site-sync';
 	}
 
 	private function get_synchy_tab_for_legacy_page(string $page): string
 	{
 		if ($page === 'synchy') {
-			return 'export';
+			return 'sync';
 		}
 
 		if ($page === 'synchy-settings') {
-			return 'export';
+			return 'sync';
 		}
 
 		foreach ($this->get_synchy_tabs() as $tab => $config) {

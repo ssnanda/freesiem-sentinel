@@ -1254,7 +1254,12 @@
 		setBusy(true);
 
 		try {
-			await performConnectionTest();
+			const connectionCheck = await performConnectionTest();
+
+			if (connectionCheck.ok) {
+				await runPreview("delta");
+				return;
+			}
 		} finally {
 			if (currentJob?.status === "running") {
 				setBusy(true);

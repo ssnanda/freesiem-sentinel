@@ -454,6 +454,13 @@ function synchy_get_pages(): array
 {
 	return [
 		[
+			'slug' => 'synchy-site-sync',
+			'title' => __('Sync', 'synchy'),
+			'menu_title' => __('Sync', 'synchy'),
+			'headline' => __('Sync', 'synchy'),
+			'description' => __('Sync only changed files and selected database deltas after the first baseline.', 'synchy'),
+		],
+		[
 			'slug' => SYNCHY_SLUG,
 			'title' => __('Overview', 'synchy'),
 			'menu_title' => __('Overview', 'synchy'),
@@ -488,13 +495,6 @@ function synchy_get_pages(): array
 			'headline' => __('Upload to Live', 'synchy'),
 			'description' => __('Upload a full Backup & Restore package to another WordPress site and launch the manual restore there.', 'synchy'),
 		],
-			[
-				'slug' => 'synchy-site-sync',
-				'title' => __('Sync', 'synchy'),
-				'menu_title' => __('Sync', 'synchy'),
-				'headline' => __('Sync', 'synchy'),
-				'description' => __('Sync only changed files and selected database deltas after the first baseline.', 'synchy'),
-			],
 	];
 }
 
