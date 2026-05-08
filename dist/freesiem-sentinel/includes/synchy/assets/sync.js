@@ -253,7 +253,7 @@
 		}
 
 		if (previewMessage) {
-			previewMessage.textContent = config.strings.previewDefault || "Run Preview Changes to load the pending file sections and database tables.";
+			previewMessage.textContent = config.strings.previewDefault || "Run Preview to load the pending file sections and database tables.";
 		}
 
 		renderProgress(null);
@@ -554,7 +554,7 @@
 	const getRunActionLabel = () =>
 		getHasPendingBaselineSelection()
 			? (config.strings.startBaseline || "Start Baseline")
-			: (config.strings.pushChanges || "Push Changes");
+			: (config.strings.pushChanges || "Push");
 
 	const updateTargetNote = () => {
 		if (!targetNote) {
@@ -674,11 +674,11 @@
 		resetSyncButton.disabled = busy;
 		runButton.textContent = busy ? (config.strings.syncingAction || "Syncing...") : runLabel;
 		fullSyncButton.textContent = hasFullSyncPreview
-			? (busy ? (config.strings.syncingAction || "Syncing...") : (config.strings.startFullSync || "Start Full Sync"))
-			: (config.strings.fullSync || "Preview Full Sync");
+			? (busy ? (config.strings.syncingAction || "Syncing...") : (config.strings.startFullSync || "Run Full Sync"))
+			: (config.strings.fullSync || "Full Sync");
 		pauseSyncButton.textContent = currentJob?.pauseRequested ? (config.strings.pausePending || "Pause requested") : (config.strings.pauseSync || "Pause Sync");
 		resumeSyncButton.textContent = config.strings.resumeSync || "Resume Sync";
-		resetSyncButton.textContent = config.strings.resetSync || "Cancel / Reset Sync";
+		resetSyncButton.textContent = config.strings.resetSync || "Cancel";
 
 		if (manualBaselineButton) {
 			manualBaselineButton.disabled = busy || !hasSelection;
@@ -1026,11 +1026,11 @@
 				updateActionButtons();
 				return;
 			} else if (getIsRunningFullSync() || getHasResumableFullSync()) {
-				previewBadge.textContent = config.strings.fullSync || "Preview Full Sync";
-				previewMessage.textContent = currentJob?.message || (config.strings.previewDefault || "Run Preview Changes to load the pending file sections and database tables.");
+				previewBadge.textContent = config.strings.fullSync || "Full Sync";
+				previewMessage.textContent = currentJob?.message || (config.strings.previewDefault || "Run Preview to load the pending file sections and database tables.");
 			} else {
 				previewBadge.textContent = "";
-				previewMessage.textContent = config.strings.previewDefault || "Run Preview Changes to load the pending file sections and database tables.";
+				previewMessage.textContent = config.strings.previewDefault || "Run Preview to load the pending file sections and database tables.";
 			}
 			renderPreviewBatchCounter(null);
 			renderPreviewTree(null);
@@ -1322,7 +1322,7 @@
 			if (effectiveMode === "full" && latestPreview !== null) {
 				statusBadge.textContent = config.strings.previewReady || "Preview ready";
 				statusSummary.textContent = getHasPreviewChanges()
-					? (baselinePreview ? "Baseline preview is ready. Click Start Baseline to begin the batched sync." : "Full Sync preview is ready. Click Start Full Sync to begin.")
+					? (baselinePreview ? "Baseline preview is ready. Click Start Baseline to begin the batched sync." : "Full Sync preview is ready. Click Run Full Sync to begin.")
 					: (baselinePreview ? "Baseline preview found nothing to send for the selected scopes." : "Full Sync preview found nothing to send for the selected scopes.");
 			}
 		} catch (error) {
@@ -1340,7 +1340,7 @@
 		}
 
 		setBusy(true);
-		const resetMessage = config.strings.resetComplete || "Sync state reset. Run Preview Full Sync to start fresh.";
+		const resetMessage = config.strings.resetComplete || "Sync state reset. Run Full Sync to start fresh.";
 
 		try {
 			const data = await sendAjax("synchy_reset_sync_state");

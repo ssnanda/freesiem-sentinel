@@ -10240,7 +10240,7 @@ function synchy_render_incremental_site_sync_page(array $current): void
 	$status_mode = ucfirst((string) ($status['mode'] ?? ($last_sync_time > 0 ? 'delta' : 'baseline')));
 	$status_duration = !empty($status['durationSeconds']) ? synchy_format_sync_duration((float) $status['durationSeconds']) : __('N/A', 'synchy');
 	$pending_badge = $last_sync_time > 0 ? __('Delta', 'synchy') : __('Baseline', 'synchy');
-	$pending_message = __('Run Preview Changes to see how many files and database rows Backup & Restore will sync before anything is sent.', 'synchy');
+	$pending_message = __('Run Preview to see how many files and database rows Backup & Restore will sync before anything is sent.', 'synchy');
 	$pending_batch_counter = '';
 	$pending_tree_classes = 'synchy-sync-tree is-hidden';
 	$pending_tree_html = '';
@@ -10347,7 +10347,7 @@ function synchy_render_incremental_site_sync_page(array $current): void
 		$status_mode,
 		$status_duration
 	);
-	$run_button_label = $scope_status['hasPendingBaseline'] ? __('Start Baseline', 'synchy') : __('Push Changes', 'synchy');
+	$run_button_label = $scope_status['hasPendingBaseline'] ? __('Start Baseline', 'synchy') : __('Push', 'synchy');
 
 	if ($status_state === 'success') {
 		$status_badge = __('Success', 'synchy');
@@ -10497,13 +10497,13 @@ function synchy_render_incremental_site_sync_page(array $current): void
 						<p class="synchy-status-line" data-synchy-sync-status-summary><?php echo esc_html($status_summary); ?></p>
 
 						<div class="synchy-input-row synchy-sync-action-row">
-							<button type="button" class="button synchy-action-button synchy-action-button--preview" data-synchy-preview-sync><?php esc_html_e('Preview Changes', 'synchy'); ?></button>
+							<button type="button" class="button synchy-action-button synchy-action-button--preview" data-synchy-preview-sync><?php esc_html_e('Preview', 'synchy'); ?></button>
 							<button type="button" class="button button-primary button-large synchy-action-button synchy-action-button--push" data-synchy-run-sync disabled><?php echo esc_html($run_button_label); ?></button>
-							<button type="button" class="button synchy-action-button synchy-action-button--full" data-synchy-run-full-sync disabled><?php esc_html_e('Preview Full Sync', 'synchy'); ?></button>
+							<button type="button" class="button synchy-action-button synchy-action-button--full" data-synchy-run-full-sync disabled><?php esc_html_e('Full Sync', 'synchy'); ?></button>
 							<button type="button" class="button synchy-action-button synchy-action-button--muted" data-synchy-pause-sync disabled><?php esc_html_e('Pause Sync', 'synchy'); ?></button>
 							<button type="button" class="button synchy-action-button synchy-action-button--muted" data-synchy-resume-sync disabled><?php esc_html_e('Resume Sync', 'synchy'); ?></button>
-							<button type="button" class="button button-link-delete synchy-action-button synchy-action-button--danger" data-synchy-reset-sync><?php esc_html_e('Cancel / Reset Sync', 'synchy'); ?></button>
-							<button type="button" class="button synchy-action-button synchy-action-button--baseline" data-synchy-mark-baseline><?php esc_html_e('Mark Manual Baseline Complete', 'synchy'); ?></button>
+							<button type="button" class="button button-link-delete synchy-action-button synchy-action-button--danger" data-synchy-reset-sync><?php esc_html_e('Cancel', 'synchy'); ?></button>
+							<button type="button" class="button synchy-action-button synchy-action-button--baseline" data-synchy-mark-baseline><?php esc_html_e('Set Baseline', 'synchy'); ?></button>
 						</div>
 						<p class="synchy-field-note" data-synchy-sync-target-note>
 							<?php
@@ -11226,11 +11226,11 @@ add_action('wp_ajax_synchy_reset_sync_state', function (): void {
 	wp_send_json_success([
 		'status' => [
 			'status' => 'idle',
-			'message' => __('Sync state reset. Run Preview Full Sync to start fresh.', 'synchy'),
+			'message' => __('Sync state reset. Run Full Sync to start fresh.', 'synchy'),
 		],
 		'job' => synchy_build_sync_job_response([]),
 		'scopeStatus' => synchy_get_sync_scope_status($options),
-		'message' => __('Sync state reset. Run Preview Full Sync to start fresh.', 'synchy'),
+		'message' => __('Sync state reset. Run Full Sync to start fresh.', 'synchy'),
 	]);
 });
 
@@ -11784,15 +11784,15 @@ add_action('admin_enqueue_scripts', function (string $hook_suffix): void {
 					'previewReady' => __('Preview ready', 'synchy'),
 					'previewError' => __('Preview failed', 'synchy'),
 					'startBaseline' => __('Start Baseline', 'synchy'),
-					'startFullSync' => __('Start Full Sync', 'synchy'),
-					'pushChanges' => __('Push Changes', 'synchy'),
-					'fullSync' => __('Preview Full Sync', 'synchy'),
+					'startFullSync' => __('Run Full Sync', 'synchy'),
+					'pushChanges' => __('Push', 'synchy'),
+					'fullSync' => __('Full Sync', 'synchy'),
 					'pauseSync' => __('Pause Sync', 'synchy'),
 					'resumeSync' => __('Resume Sync', 'synchy'),
-					'resetSync' => __('Cancel / Reset Sync', 'synchy'),
-					'markManualBaseline' => __('Mark Manual Baseline Complete', 'synchy'),
+					'resetSync' => __('Cancel', 'synchy'),
+					'markManualBaseline' => __('Set Baseline', 'synchy'),
 					'confirmResetSync' => __('Cancel the saved Sync job and clear local Sync baseline state? This does not change the destination site.', 'synchy'),
-					'resetComplete' => __('Sync state reset. Run Preview Full Sync to start fresh.', 'synchy'),
+					'resetComplete' => __('Sync state reset. Run Full Sync to start fresh.', 'synchy'),
 					'preparingPreview' => __('Preparing preview...', 'synchy'),
 					'preparingFullPreview' => __('Preparing full Sync preview...', 'synchy'),
 					'syncingAction' => __('Syncing...', 'synchy'),
@@ -11831,7 +11831,7 @@ add_action('admin_enqueue_scripts', function (string $hook_suffix): void {
 					'sampleFiles' => __('Sample files', 'synchy'),
 					'never' => __('Never', 'synchy'),
 					'na' => __('N/A', 'synchy'),
-					'previewDefault' => __('Run Preview Changes to review changed files and database rows before syncing.', 'synchy'),
+					'previewDefault' => __('Run Preview to review changed files and database rows before syncing.', 'synchy'),
 					'unknownError' => __('Backup & Restore hit an unexpected Sync error.', 'synchy'),
 					'confirmSync' => __('Sync the previewed changes to the destination site now?', 'synchy'),
 					'confirmFullSync' => __('Run a full Sync for the selected scopes and send all tracked files and rows to the destination site now?', 'synchy'),
