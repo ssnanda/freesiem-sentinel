@@ -2113,6 +2113,9 @@ function synchy_is_sync_file_excluded(string $archive_path): bool
 
 	$protected_plugin_prefixes = [
 		'plugins/freesiem-sentinel/',
+		'plugins/hostinger/',
+		'plugins/hostinger-ai-assistant/',
+		'plugins/hostinger-easy-onboarding/',
 		'plugins/synchy/',
 	];
 
