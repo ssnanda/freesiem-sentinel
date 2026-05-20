@@ -673,8 +673,8 @@ function synchy_get_sync_scope_definitions(): array
 			'option_key' => 'sync_scope_files_themes',
 			'type' => 'file',
 			'group' => 'files',
-			'label' => __('Active Theme', 'synchy'),
-			'description' => __('The active theme plus its parent theme when one is active.', 'synchy'),
+			'label' => __('Themes', 'synchy'),
+			'description' => __('Everything inside wp-content/themes. Extra inactive destination themes are removed during Sync.', 'synchy'),
 		],
 		'files_uploads' => [
 			'option_key' => 'sync_scope_files_uploads',
@@ -768,6 +768,36 @@ function synchy_get_sync_top_level_entries(string $path, array $excluded = []): 
 	return array_values($entries);
 }
 
+function synchy_get_sync_top_level_directories(string $path, array $excluded = []): array
+{
+	if ($path === '' || !is_dir($path)) {
+		return [];
+	}
+
+	$items = scandir($path);
+
+	if (!is_array($items)) {
+		return [];
+	}
+
+	$excluded_lookup = array_fill_keys($excluded, true);
+	$entries = [];
+
+	foreach ($items as $item) {
+		if ($item === '.' || $item === '..' || isset($excluded_lookup[$item])) {
+			continue;
+		}
+
+		if (is_dir(trailingslashit($path) . $item)) {
+			$entries[] = (string) $item;
+		}
+	}
+
+	natcasesort($entries);
+
+	return array_values($entries);
+}
+
 function synchy_get_sync_scope_tracked_items(string $scope_id): array
 {
 	global $wpdb;
@@ -779,8 +809,8 @@ function synchy_get_sync_scope_tracked_items(string $scope_id): array
 		),
 		'files_themes' => array_map(
 			static fn(string $slug): string => 'wp-content/themes/' . $slug,
-			synchy_get_sync_active_theme_slugs()
-		) ?: [__('No active theme directories detected.', 'synchy')],
+			synchy_get_sync_top_level_directories(WP_CONTENT_DIR . '/themes')
+		) ?: [__('No theme directories detected.', 'synchy')],
 		'files_uploads' => array_merge(
 			['wp-content/uploads/**'],
 			array_map(
@@ -2045,17 +2075,12 @@ function synchy_get_sync_file_targets(array $selected_scope_ids = []): array
 	}
 
 	if (in_array('files_themes', $selected_scope_ids, true)) {
-		foreach (synchy_get_sync_active_theme_slugs() as $slug) {
-		$theme_dir = wp_normalize_path(WP_CONTENT_DIR . '/themes/' . $slug);
-
-			if (!is_dir($theme_dir)) {
-				continue;
-			}
-
+		$themes_dir = wp_normalize_path(WP_CONTENT_DIR . '/themes');
+		if (is_dir($themes_dir)) {
 			$targets[] = [
 				'scope_id' => 'files_themes',
-				'path' => $theme_dir,
-				'archive_prefix' => 'themes/' . $slug,
+				'path' => $themes_dir,
+				'archive_prefix' => 'themes',
 			];
 		}
 	}
@@ -2157,6 +2182,13 @@ function synchy_collect_sync_file_delta(array $state, array $selected_scope_ids,
 	foreach (synchy_get_sync_file_targets($selected_scope_ids) as $target) {
 		$scope_id = (string) ($target['scope_id'] ?? '');
 		$scope_last_sync_time = max(0, (int) ($scope_sync_times[$scope_id] ?? 0));
+		$previous_scope_paths = array_values(
+			array_filter(
+				array_unique(array_map('strval', (array) ($previous_file_paths[$scope_id] ?? []))),
+				static fn(string $path): bool => $path !== '' && !synchy_is_sync_file_excluded($path)
+			)
+		);
+		$previous_scope_path_lookup = array_fill_keys($previous_scope_paths, true);
 
 		if (($force_full || $scope_last_sync_time <= 0) && $scope_id !== '') {
 			$baseline_scopes[$scope_id] = true;
@@ -2188,7 +2220,7 @@ function synchy_collect_sync_file_delta(array $state, array $selected_scope_ids,
 
 			$mtime = (int) $item->getMTime();
 
-			if (!$force_full && $scope_last_sync_time > 0 && $mtime <= $scope_last_sync_time) {
+			if (!$force_full && $scope_last_sync_time > 0 && $mtime <= $scope_last_sync_time && isset($previous_scope_path_lookup[$archive_path])) {
 				continue;
 			}
 
@@ -2208,12 +2240,6 @@ function synchy_collect_sync_file_delta(array $state, array $selected_scope_ids,
 		$current_scope_paths = array_values(array_unique(array_map('strval', (array) ($current_file_paths[$scope_id] ?? []))));
 		sort($current_scope_paths);
 		$current_file_paths[$scope_id] = $current_scope_paths;
-		$previous_scope_paths = array_values(
-			array_filter(
-				array_unique(array_map('strval', (array) ($previous_file_paths[$scope_id] ?? []))),
-				static fn(string $path): bool => $path !== '' && !synchy_is_sync_file_excluded($path)
-			)
-		);
 
 		if (!$force_full && $scope_last_sync_time > 0 && $previous_scope_paths !== []) {
 			$deleted_scope_paths = array_values(array_diff($previous_scope_paths, $current_scope_paths));
@@ -2849,6 +2875,32 @@ function synchy_write_sync_sql_file(array $tables, string $path)
 	return true;
 }
 
+function synchy_get_sync_file_scope_top_level_entries(array $file_delta): array
+{
+	$entries = [];
+	$current_file_paths = (array) ($file_delta['current_file_paths'] ?? []);
+
+	foreach ($current_file_paths as $scope_id => $paths) {
+		$scope_id = (string) $scope_id;
+
+		foreach ((array) $paths as $path) {
+			$segments = array_values(array_filter(explode('/', ltrim(wp_normalize_path((string) $path), '/')), 'strlen'));
+
+			if ($scope_id === 'files_themes' && ($segments[0] ?? '') === 'themes' && count($segments) > 2 && !empty($segments[1])) {
+				$entries['themes'][] = (string) $segments[1];
+			}
+		}
+	}
+
+	foreach ($entries as $key => $values) {
+		$values = array_values(array_unique(array_map('strval', (array) $values)));
+		natcasesort($values);
+		$entries[$key] = array_values($values);
+	}
+
+	return $entries;
+}
+
 function synchy_build_sync_manifest(array $file_delta, array $db_delta, int $sync_time, array $options): array
 {
 	global $wpdb;
@@ -2901,6 +2953,7 @@ function synchy_build_sync_manifest(array $file_delta, array $db_delta, int $syn
 			'count' => (int) ($file_delta['count'] ?? 0),
 			'bytes' => (int) ($file_delta['bytes'] ?? 0),
 			'paths' => array_values(array_map(static fn(array $file): string => (string) $file['archive_path'], (array) ($file_delta['files'] ?? []))),
+			'managedTopLevelEntries' => synchy_get_sync_file_scope_top_level_entries($file_delta),
 			'deletedPaths' => (static function () use ($file_delta, &$deleted_paths): array {
 				foreach ((array) ($file_delta['deleted_paths'] ?? []) as $paths) {
 					foreach ((array) $paths as $path) {
@@ -7603,6 +7656,96 @@ function synchy_prune_empty_sync_deleted_parent_dirs(array $deleted_paths): int
 	return $removed;
 }
 
+function synchy_count_files_in_directory(string $path): int
+{
+	if ($path === '' || !is_dir($path)) {
+		return 0;
+	}
+
+	$count = 0;
+	$iterator = new RecursiveIteratorIterator(
+		new RecursiveDirectoryIterator($path, FilesystemIterator::SKIP_DOTS),
+		RecursiveIteratorIterator::SELF_FIRST
+	);
+
+	foreach ($iterator as $item) {
+		if ($item->isFile()) {
+			$count++;
+		}
+	}
+
+	return $count;
+}
+
+function synchy_prune_unmanaged_sync_theme_directories(array $manifest): array|WP_Error
+{
+	$selected_scopes = array_map('strval', (array) ($manifest['scopes']['selected'] ?? []));
+
+	if (!in_array('files_themes', $selected_scopes, true)) {
+		return [
+			'deletedFiles' => 0,
+			'deletedDirs' => 0,
+			'deletedThemeDirs' => [],
+		];
+	}
+
+	$managed_themes = array_values(array_unique(array_filter(array_map(
+		static fn($theme): string => sanitize_file_name((string) $theme),
+		(array) ($manifest['files']['managedTopLevelEntries']['themes'] ?? [])
+	), static fn(string $theme): bool => $theme !== '')));
+
+	if ($managed_themes === []) {
+		return [
+			'deletedFiles' => 0,
+			'deletedDirs' => 0,
+			'deletedThemeDirs' => [],
+		];
+	}
+
+	$themes_root = wp_normalize_path(WP_CONTENT_DIR . '/themes');
+	$destination_themes = synchy_get_sync_top_level_directories($themes_root);
+	$managed_lookup = array_fill_keys($managed_themes, true);
+	$active_themes = array_fill_keys(synchy_get_sync_active_theme_slugs(), true);
+	$deleted_files = 0;
+	$deleted_dirs = 0;
+	$deleted_theme_dirs = [];
+
+	foreach ($destination_themes as $theme) {
+		if (isset($managed_lookup[$theme]) || isset($active_themes[$theme])) {
+			continue;
+		}
+
+		$absolute_path = wp_normalize_path(trailingslashit($themes_root) . $theme);
+
+		if ($absolute_path === $themes_root || !is_dir($absolute_path)) {
+			continue;
+		}
+
+		$deleted_files += synchy_count_files_in_directory($absolute_path);
+		synchy_rrmdir($absolute_path);
+
+		if (is_dir($absolute_path)) {
+			return new WP_Error(
+				'synchy_sync_theme_prune_failed',
+				sprintf(
+					/* translators: %s: theme directory */
+					__('Synchy could not remove the unmanaged destination theme directory %s.', 'synchy'),
+					$theme
+				)
+			);
+		}
+
+		$deleted_dirs++;
+		$deleted_theme_dirs[] = $theme;
+	}
+
+	return [
+		'deletedFiles' => $deleted_files,
+		'deletedDirs' => $deleted_dirs,
+		'deletedThemeDirs' => $deleted_theme_dirs,
+	];
+}
+
 function synchy_apply_sync_deleted_paths(array $manifest): array|WP_Error
 {
 	$deleted_paths = array_values(array_unique(array_filter(array_map(
@@ -7630,11 +7773,17 @@ function synchy_apply_sync_deleted_paths(array $manifest): array|WP_Error
 	}
 
 	$deleted_dirs = synchy_prune_empty_sync_deleted_parent_dirs($deleted_paths);
+	$theme_prune = synchy_prune_unmanaged_sync_theme_directories($manifest);
+
+	if (is_wp_error($theme_prune)) {
+		return $theme_prune;
+	}
 
 	return [
-		'deletedFiles' => $deleted_files,
-		'deletedDirs' => $deleted_dirs,
+		'deletedFiles' => $deleted_files + (int) ($theme_prune['deletedFiles'] ?? 0),
+		'deletedDirs' => $deleted_dirs + (int) ($theme_prune['deletedDirs'] ?? 0),
 		'deletedPaths' => $deleted_paths,
+		'deletedThemeDirs' => (array) ($theme_prune['deletedThemeDirs'] ?? []),
 	];
 }
 
