@@ -708,8 +708,8 @@ function synchy_get_sync_scope_definitions(): array
 			'option_key' => 'sync_scope_db_wp_formy',
 			'type' => 'db',
 			'group' => 'database',
-			'label' => __('Forms', 'synchy'),
-			'description' => __('AJ Forms, WP Formy, and Fluent Forms form data stored in custom database tables.', 'synchy'),
+			'label' => __('Forms & Client Portal', 'synchy'),
+			'description' => __('AJ Core forms, client portal, Stripe cache, WP Formy, and Fluent Forms custom database tables.', 'synchy'),
 		],
 	];
 }
@@ -2545,6 +2545,15 @@ function synchy_get_form_plugin_sync_table_specs(): array
 		$wpdb->prefix . 'ajforms_forms',
 		$wpdb->prefix . 'ajforms_leads',
 		$wpdb->prefix . 'ajforms_lead_notes',
+		$wpdb->prefix . 'aj_portal_files',
+		$wpdb->prefix . 'aj_portal_file_users',
+		$wpdb->prefix . 'aj_portal_stripe_customers',
+		$wpdb->prefix . 'aj_portal_stripe_products',
+		$wpdb->prefix . 'aj_portal_stripe_subscriptions',
+		$wpdb->prefix . 'aj_portal_stripe_transactions',
+		$wpdb->prefix . 'aj_portal_user_mappings',
+		$wpdb->prefix . 'aj_portal_entity_mappings',
+		$wpdb->prefix . 'aj_portal_ledger',
 		$wpdb->prefix . 'formy_forms',
 		$wpdb->prefix . 'formy_leads',
 		$wpdb->prefix . 'formy_lead_notes',
@@ -2564,6 +2573,14 @@ function synchy_get_form_plugin_sync_table_specs(): array
 			'key_columns' => ['id'],
 		];
 	}
+
+	$specs[$wpdb->prefix . 'aj_portal_stripe_customers']['key_columns'] = ['stripe_customer_id'];
+	$specs[$wpdb->prefix . 'aj_portal_stripe_products']['key_columns'] = ['stripe_price_id'];
+	$specs[$wpdb->prefix . 'aj_portal_stripe_subscriptions']['key_columns'] = ['stripe_subscription_id'];
+	$specs[$wpdb->prefix . 'aj_portal_stripe_transactions']['key_columns'] = ['stripe_object_id'];
+	$specs[$wpdb->prefix . 'aj_portal_user_mappings']['key_columns'] = ['stripe_customer_id'];
+	$specs[$wpdb->prefix . 'aj_portal_entity_mappings']['key_columns'] = ['stripe_customer_id', 'entity_key'];
+	$specs[$wpdb->prefix . 'aj_portal_ledger']['key_columns'] = ['source_object_id'];
 
 	return $specs;
 }
