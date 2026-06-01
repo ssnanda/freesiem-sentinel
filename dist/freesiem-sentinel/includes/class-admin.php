@@ -1269,7 +1269,7 @@ class Freesiem_Admin
 
 		echo '<div class="wrap">';
 		echo '<h1>' . esc_html__('Stealth Mode', 'freesiem-sentinel') . '</h1>';
-		echo '<p>' . esc_html__('Configure a safer login entry URL without introducing fragile rewrite-rule changes.', 'freesiem-sentinel') . '</p>';
+		echo '<p>' . esc_html__('Configure a safer login entry URL for visitors while keeping the hardened wp-login.php token fallback in place.', 'freesiem-sentinel') . '</p>';
 		echo '<div class="notice notice-warning inline"><p>' . esc_html__('Changing login access can lock you out. Keep another administrator session open before enabling Stealth Mode changes.', 'freesiem-sentinel') . '</p></div>';
 		if ($override_active) {
 			echo '<div class="notice notice-error inline"><p><strong>' . esc_html__('Stealth Mode override active.', 'freesiem-sentinel') . '</strong> ' . esc_html__('Stealth Mode is currently disabled by the wp-config.php recovery override, so normal WordPress login behavior is being used.', 'freesiem-sentinel') . '</p></div>';
@@ -1280,7 +1280,7 @@ class Freesiem_Admin
 		echo '<input type="hidden" name="action" value="freesiem_sentinel_save_stealth_mode" />';
 		echo '<table class="form-table" role="presentation">';
 		$this->render_ssl_checkbox_field('enabled', __('Enable stealth mode', 'freesiem-sentinel'), !empty($settings['enabled']), __('Turns on Sentinel login obfuscation handling for the custom login URL below.', 'freesiem-sentinel'));
-		echo '<tr><th scope="row"><label for="freesiem-stealth-slug">' . esc_html__('Custom login slug', 'freesiem-sentinel') . '</label></th><td><input id="freesiem-stealth-slug" type="text" name="custom_login_slug" value="' . esc_attr((string) ($settings['custom_login_slug'] ?? 'sentinel-login')) . '" class="regular-text" /><p class="description">' . esc_html__('Sentinel uses this as a safe query-based login token rather than adding rewrite rules.', 'freesiem-sentinel') . '</p></td></tr>';
+		echo '<tr><th scope="row"><label for="freesiem-stealth-slug">' . esc_html__('Custom login slug', 'freesiem-sentinel') . '</label></th><td><input id="freesiem-stealth-slug" type="text" name="custom_login_slug" value="' . esc_attr((string) ($settings['custom_login_slug'] ?? 'sentinel-login')) . '" class="regular-text" /><p class="description">' . esc_html__('Sentinel publishes this as a friendly login path, such as /clogin/, and keeps the secure token fallback behind the scenes.', 'freesiem-sentinel') . '</p></td></tr>';
 		$this->render_ssl_checkbox_field('block_direct_wp_login', __('Block direct wp-login.php access', 'freesiem-sentinel'), !empty($settings['block_direct_wp_login']), __('When enabled, direct wp-login.php requests without the Sentinel login token are redirected away.', 'freesiem-sentinel'));
 		$this->render_ssl_checkbox_field('redirect_wp_admin_guests', __('Redirect unauthenticated wp-admin users', 'freesiem-sentinel'), !empty($settings['redirect_wp_admin_guests']), __('When enabled, guests trying to access wp-admin are sent to the Sentinel login URL.', 'freesiem-sentinel'));
 		echo '</table>';
@@ -1289,7 +1289,7 @@ class Freesiem_Admin
 		echo '<p><strong>' . esc_html__('Current login URL', 'freesiem-sentinel') . ':</strong> <code>' . esc_html($current_login_url) . '</code></p>';
 		echo '<p><strong>' . esc_html__('Recovery override', 'freesiem-sentinel') . ':</strong> ' . esc_html__('Add this to wp-config.php to disable Stealth Mode enforcement without changing the saved settings:', 'freesiem-sentinel') . '</p>';
 		echo '<pre style="padding:12px 14px;background:#f6f7f7;border:1px solid #dcdcde;border-radius:6px;overflow:auto;"><code>define(\'FREESIEM_SENTINEL_DISABLE_STEALTH_MODE\', true);</code></pre>';
-		echo '<p style="color:#646970;">' . esc_html__('Stealth Mode currently uses a query-based login URL for safety. This avoids rewrite-rule complexity while still allowing direct wp-login.php blocking and guest wp-admin redirects.', 'freesiem-sentinel') . '</p>';
+		echo '<p style="color:#646970;">' . esc_html__('Stealth Mode publishes a friendly login path and internally validates the same secure login token, so plugins using wp_login_url() can link to the cleaner URL.', 'freesiem-sentinel') . '</p>';
 		if ($stealth_active) {
 			echo '<p style="color:#646970;">' . esc_html__('Stealth Mode enforcement is currently active for the settings shown above.', 'freesiem-sentinel') . '</p>';
 		}
@@ -3386,6 +3386,36 @@ class Freesiem_Admin
 		$allowed_login_actions = $this->get_allowed_stealth_login_actions();
 		$request_method = strtoupper((string) ($_SERVER['REQUEST_METHOD'] ?? 'GET'));
 
+		$request_uri = isset($_SERVER['REQUEST_URI']) ? wp_unslash((string) $_SERVER['REQUEST_URI']) : '';
+		$request_path = trim((string) wp_parse_url($request_uri, PHP_URL_PATH), '/');
+		$home_path = trim((string) wp_parse_url(home_url('/'), PHP_URL_PATH), '/');
+		if ($home_path !== '' && str_starts_with($request_path, $home_path . '/')) {
+			$request_path = trim(substr($request_path, strlen($home_path)), '/');
+		}
+
+		if (!$is_login_request && in_array($request_method, ['GET', 'HEAD'], true) && $request_path === $expected) {
+			$url = freesiem_sentinel_get_stealth_query_login_url($settings);
+			$redirect_to = isset($_GET['redirect_to']) ? esc_url_raw(wp_unslash((string) $_GET['redirect_to'])) : '';
+			$action = isset($_GET['action']) ? sanitize_key(wp_unslash((string) $_GET['action'])) : '';
+			$reauth = isset($_GET['reauth']) ? sanitize_text_field(wp_unslash((string) $_GET['reauth'])) : '';
+			if ($redirect_to !== '') {
+				$url = add_query_arg(['redirect_to' => $redirect_to], $url);
+			}
+			if ($action !== '') {
+				$url = add_query_arg(['action' => $action], $url);
+			}
+			if ($reauth !== '') {
+				$url = add_query_arg(['reauth' => $reauth], $url);
+			}
+
+			freesiem_sentinel_log_event('stealth_login_path_access', __('Friendly Stealth login path accessed.', 'freesiem-sentinel'), '', '', [
+				'request_path' => $request_path,
+				'redirect_to' => $redirect_to,
+			]);
+			wp_safe_redirect($url);
+			exit;
+		}
+
 		if ($is_login_request && $token_raw !== '' && !$has_valid_token) {
 			freesiem_sentinel_log_event('stealth_invalid_token', __('An invalid Stealth Mode token was supplied to wp-login.php.', 'freesiem-sentinel'), '', '', [
 				'action' => $login_action,
@@ -3471,7 +3501,7 @@ class Freesiem_Admin
 			return $login_url;
 		}
 
-		$url = add_query_arg(['freesiem_login' => freesiem_sentinel_get_stealth_expected_token($settings)], $login_url);
+		$url = freesiem_sentinel_get_stealth_login_url($settings);
 		if ($redirect !== '') {
 			$url = add_query_arg(['redirect_to' => $redirect], $url);
 		}

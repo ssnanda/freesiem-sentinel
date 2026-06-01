@@ -893,7 +893,15 @@ function freesiem_sentinel_get_stealth_login_url(?array $settings = null): strin
 	$settings = is_array($settings) ? $settings : freesiem_sentinel_get_stealth_mode_settings();
 	$slug = freesiem_sentinel_get_stealth_expected_token($settings);
 
-	return add_query_arg(['freesiem_login' => $slug], wp_login_url());
+	return home_url('/' . rawurlencode($slug) . '/');
+}
+
+function freesiem_sentinel_get_stealth_query_login_url(?array $settings = null): string
+{
+	$settings = is_array($settings) ? $settings : freesiem_sentinel_get_stealth_mode_settings();
+	$slug = freesiem_sentinel_get_stealth_expected_token($settings);
+
+	return add_query_arg(['freesiem_login' => $slug], site_url('wp-login.php', 'login'));
 }
 
 function freesiem_sentinel_get_stealth_mode_status_payload(?array $settings = null): array
