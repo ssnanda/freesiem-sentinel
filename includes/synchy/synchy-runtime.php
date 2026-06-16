@@ -2141,6 +2141,10 @@ function synchy_is_sync_file_excluded(string $archive_path): bool
 		'plugins/synchy/',
 	];
 
+	if (str_starts_with($archive_path, 'mu-plugins/') && str_contains(basename($archive_path), 'hostinger')) {
+		return true;
+	}
+
 	if (defined('FREESIEM_SENTINEL_SLUG') && FREESIEM_SENTINEL_SLUG !== '') {
 		$protected_plugin_prefixes[] = 'plugins/' . trim((string) FREESIEM_SENTINEL_SLUG, '/') . '/';
 	}
@@ -2569,9 +2573,9 @@ function synchy_get_form_plugin_sync_table_specs(): array
 	global $wpdb;
 
 	$tables = [
-		$wpdb->prefix . 'ajforms_forms',
-		$wpdb->prefix . 'ajforms_leads',
-		$wpdb->prefix . 'ajforms_lead_notes',
+		$wpdb->prefix . 'aj_forms_forms',
+		$wpdb->prefix . 'aj_forms_leads',
+		$wpdb->prefix . 'aj_forms_lead_notes',
 		$wpdb->prefix . 'formy_forms',
 		$wpdb->prefix . 'formy_leads',
 		$wpdb->prefix . 'formy_lead_notes',
@@ -7499,6 +7503,7 @@ function synchy_validate_sync_zip_entries(ZipArchive $zip)
 			!str_starts_with($name, 'plugins/')
 			&& !str_starts_with($name, 'themes/')
 			&& !str_starts_with($name, 'uploads/')
+			&& !str_starts_with($name, 'mu-plugins/')
 			&& !str_starts_with($name, '.synchy-sync/')
 		) {
 			return new WP_Error(
