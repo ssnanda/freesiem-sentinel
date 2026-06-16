@@ -2957,6 +2957,7 @@ function synchy_build_sync_manifest(array $file_delta, array $db_delta, int $syn
 		'pluginVersion' => synchy_get_display_version(),
 		'mode' => (string) ($db_delta['mode'] ?? $file_delta['mode'] ?? 'delta'),
 		'syncedAt' => $sync_time,
+		'syncId' => (string) ($file_delta['sync_id'] ?? $db_delta['sync_id'] ?? ''),
 		'source' => [
 			'homeUrl' => home_url('/'),
 			'siteUrl' => site_url('/'),
@@ -6266,6 +6267,7 @@ function synchy_build_sync_batch_package(array $options, array $job, array $batc
 		'bytes' => array_sum(array_map(static fn(array $file): int => (int) ($file['size'] ?? 0), (array) ($batch_payload['files'] ?? []))),
 		'baseline_scopes' => [(string) ($batch['scope_id'] ?? '')],
 		'selected_scopes' => [(string) ($batch['scope_id'] ?? '')],
+		'sync_id' => (string) ($job['sync_id'] ?? ''),
 	];
 	$db_tables = (array) ($batch_payload['tables'] ?? []);
 	$db_total_rows = 0;
@@ -7176,7 +7178,12 @@ function synchy_repair_synced_nav_menus(array $manifest): array
 	$posts = synchy_get_manifest_table_rows_by_suffix($manifest, 'posts');
 	$postmeta = synchy_get_manifest_table_rows_by_suffix($manifest, 'postmeta');
 	$options = synchy_get_manifest_table_rows_by_suffix($manifest, 'options');
+	$incoming_sync_id = (string) ($manifest['syncId'] ?? '');
 	$state = synchy_get_nav_menu_repair_state();
+
+	if ($incoming_sync_id !== '' && (string) ($state['sync_id'] ?? '') !== $incoming_sync_id) {
+		$state = ['sync_id' => $incoming_sync_id];
+	}
 	$state['terms'] = synchy_merge_nav_menu_repair_rows((array) ($state['terms'] ?? []), 'term_id', $terms);
 	$state['term_taxonomy'] = synchy_merge_nav_menu_repair_rows((array) ($state['term_taxonomy'] ?? []), 'term_taxonomy_id', $term_taxonomy);
 	$state['term_relationships'] = synchy_merge_nav_menu_repair_rows(
@@ -7449,6 +7456,26 @@ function synchy_repair_synced_nav_menus(array $manifest): array
 		}
 
 		update_option($option_name, $value);
+	}
+
+	$standalone_locations = get_option('nav_menu_locations', []);
+
+	if (is_array($standalone_locations) && $standalone_locations !== [] && $source_menu_to_destination !== []) {
+		$changed = false;
+
+		foreach ($standalone_locations as $location => $source_menu_id) {
+			$source_menu_id = (int) $source_menu_id;
+
+			if (isset($source_menu_to_destination[$source_menu_id])) {
+				$standalone_locations[$location] = $source_menu_to_destination[$source_menu_id];
+				$locations_repaired++;
+				$changed = true;
+			}
+		}
+
+		if ($changed) {
+			update_option('nav_menu_locations', $standalone_locations);
+		}
 	}
 
 	$current_locations = get_theme_mod('nav_menu_locations', []);
