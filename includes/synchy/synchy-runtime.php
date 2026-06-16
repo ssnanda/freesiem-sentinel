@@ -683,6 +683,13 @@ function synchy_get_sync_scope_definitions(): array
 			'label' => __('Uploads', 'synchy'),
 			'description' => __('Everything inside wp-content/uploads.', 'synchy'),
 		],
+		'files_mu_plugins' => [
+			'option_key' => 'sync_scope_files_mu_plugins',
+			'type' => 'file',
+			'group' => 'files',
+			'label' => __('MU Plugins', 'synchy'),
+			'description' => __('Everything inside wp-content/mu-plugins.', 'synchy'),
+		],
 		'db_content' => [
 			'option_key' => 'sync_scope_db_content',
 			'type' => 'db',
@@ -821,6 +828,10 @@ function synchy_get_sync_scope_tracked_items(string $scope_id): array
 				)
 			)
 		),
+		'files_mu_plugins' => array_map(
+			static fn(string $entry): string => 'wp-content/mu-plugins/' . $entry,
+			synchy_get_sync_top_level_entries(WP_CONTENT_DIR . '/mu-plugins')
+		) ?: [__('No must-use plugins detected.', 'synchy')],
 		'db_content' => [
 			$wpdb->posts,
 			$wpdb->postmeta,
@@ -1639,7 +1650,7 @@ function synchy_build_sync_scope_time_watermarks(array $selected_scope_ids, int 
 		}
 	}
 
-	foreach (synchy_get_sync_current_file_scope_times(array_values(array_intersect($selected_scope_ids, ['files_plugins', 'files_themes', 'files_uploads']))) as $scope_id => $time) {
+	foreach (synchy_get_sync_current_file_scope_times(array_values(array_intersect($selected_scope_ids, ['files_plugins', 'files_themes', 'files_uploads', 'files_mu_plugins']))) as $scope_id => $time) {
 		$scope_times[(string) $scope_id] = min($now, max((int) ($scope_times[(string) $scope_id] ?? 0), (int) $time, $fallback_time));
 	}
 
@@ -2081,6 +2092,17 @@ function synchy_get_sync_file_targets(array $selected_scope_ids = []): array
 				'scope_id' => 'files_themes',
 				'path' => $themes_dir,
 				'archive_prefix' => 'themes',
+			];
+		}
+	}
+
+	if (in_array('files_mu_plugins', $selected_scope_ids, true)) {
+		$mu_plugins_dir = wp_normalize_path(WP_CONTENT_DIR . '/mu-plugins');
+		if (is_dir($mu_plugins_dir)) {
+			$targets[] = [
+				'scope_id' => 'files_mu_plugins',
+				'path' => $mu_plugins_dir,
+				'archive_prefix' => 'mu-plugins',
 			];
 		}
 	}
@@ -3338,6 +3360,15 @@ function synchy_get_full_sync_file_batch_group(string $scope_id, string $archive
 			'key' => 'plugin:' . $slug,
 			'label' => 'Plugin / ' . $slug,
 			'path' => $root . '/' . $slug,
+		];
+	}
+
+	if ($scope_id === 'files_mu_plugins') {
+		$name = $segments[1] ?? basename($archive_path);
+		return [
+			'key' => 'mu-plugin:' . $name,
+			'label' => 'MU Plugin / ' . $name,
+			'path' => $root . '/' . $name,
 		];
 	}
 
