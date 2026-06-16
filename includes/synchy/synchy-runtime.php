@@ -7370,6 +7370,16 @@ function synchy_repair_synced_nav_menus(array $manifest): array
 		}
 
 		$source_item_ids = array_values(array_unique(array_filter($source_item_ids)));
+
+		$existing_destination_items = wp_get_nav_menu_items($destination_menu_id, ['nopaging' => true, 'post_status' => 'any']);
+		if (is_array($existing_destination_items)) {
+			foreach ($existing_destination_items as $existing_item) {
+				if (!in_array((int) $existing_item->ID, $source_item_ids, true)) {
+					wp_delete_post((int) $existing_item->ID, true);
+				}
+			}
+		}
+
 		usort(
 			$source_item_ids,
 			static function (int $left, int $right) use ($posts_by_id): int {
