@@ -1044,14 +1044,23 @@
 			: (config.strings.delta || "Delta");
 		const filesCount = Number(preview.filesCount || 0);
 		const dbRows = Number(preview.dbRows || 0);
+		const dryRunSummary = [
+			`Source: ${preview.sourcePath || "Unknown"}`,
+			`Destination: ${preview.destinationPath || destinationUrlInput?.value?.trim() || "Not set"}`,
+			`Files included: ${filesCount.toLocaleString()}`,
+			`Files excluded: ${Number(preview.excludedFilesCount || 0).toLocaleString()}`,
+			`DB sync: ${preview.dbSyncDisabled ? "disabled" : "enabled"}`,
+			`Protected options: ${Number(preview.protectedOptionsCount || 0).toLocaleString()}`,
+			`Protected tables: ${Number(preview.protectedTablesCount || 0).toLocaleString()}`,
+		];
 		previewBadge.textContent = mode;
 
 		if (filesCount === 0 && dbRows === 0) {
-			previewMessage.textContent = "No pending changes detected since the last successful Sync.";
+			previewMessage.textContent = ["No pending changes detected since the last successful Sync.", ...dryRunSummary].join(" | ");
 		} else if (Array.isArray(preview?.batches) && preview.batches.length > 0) {
-			previewMessage.textContent = `Full Sync will run ${Number(preview.totalBatches || 0).toLocaleString()} logical batches for the selected scopes.`;
+			previewMessage.textContent = [`Full Sync will run ${Number(preview.totalBatches || 0).toLocaleString()} logical batches for the selected scopes.`, ...dryRunSummary].join(" | ");
 		} else {
-			previewMessage.textContent = config.strings.previewSelectionHelp || "Review the pending file sections and database tables, then uncheck anything you do not want to send.";
+			previewMessage.textContent = [config.strings.previewSelectionHelp || "Review the pending file sections and database tables, then uncheck anything you do not want to send.", ...dryRunSummary].join(" | ");
 		}
 
 		renderPreviewTree(preview);
@@ -1430,6 +1439,7 @@
 		const selectedFileSections = form.querySelectorAll('input[name="synchy_sync_selected_file_scopes[]"]:checked').length;
 		const selectedDbTables = form.querySelectorAll('input[name="synchy_sync_selected_db_tables[]"]:checked').length;
 		const isFullSync = latestPreviewMode === "full" || getIsBatchedBaselinePreview() || Boolean(latestPreview?.forceFull);
+		const dbSyncEnabled = latestPreview?.dbSyncDisabled === false;
 		const confirmMessage = [
 			isFullSync
 				? (config.strings.confirmFullSync || "Run a full Sync for the selected scopes and send all tracked files and rows to the destination site now?")
@@ -1437,10 +1447,16 @@
 			"",
 			`Destination: ${destinationUrl || "Not set"}`,
 			`Scopes: ${scopeLabels.join(", ") || "None"}`,
+			`Files included: ${Number(latestPreview?.filesCount || 0).toLocaleString()}`,
+			`Files excluded: ${Number(latestPreview?.excludedFilesCount || 0).toLocaleString()}`,
+			`DB sync: ${dbSyncEnabled ? "enabled" : "disabled"}`,
+			`Protected AJ Core options: ${Number(latestPreview?.protectedOptionsCount || 0).toLocaleString()}`,
+			`Protected AJ Core tables: ${Number(latestPreview?.protectedTablesCount || 0).toLocaleString()}`,
+			dbSyncEnabled ? "Database Sync requires this explicit confirmation. Protected AJ Core options and runtime tables will still be excluded." : "",
 			isFullSync
 				? `Planned batches: ${Number(latestPreview?.totalBatches || 0).toLocaleString()}`
 				: `Selected preview items: ${selectedFileSections} file sections, ${selectedDbTables} DB tables`,
-		].join("\n");
+		].filter(Boolean).join("\n");
 
 		if (!window.confirm(confirmMessage)) {
 			return;
@@ -1473,6 +1489,7 @@
 		try {
 			const data = await sendAjax("synchy_run_sync_changes", {
 				synchy_sync_run_mode: isFullSync ? "full" : "delta",
+				synchy_sync_confirm_db: dbSyncEnabled ? "1" : "",
 			});
 			if (data.status) {
 				currentStatus = data.status;

@@ -450,6 +450,25 @@ function synchyInstallerValidateArchive(string $archivePath): void
 	}
 }
 
+function synchyInstallerArchiveContainsDatabase(string $archivePath): bool
+{
+	if (!class_exists('ZipArchive') || !is_readable($archivePath)) {
+		return false;
+	}
+
+	$zip = new ZipArchive();
+	$result = $zip->open($archivePath);
+
+	if ($result !== true) {
+		return false;
+	}
+
+	$contains_database = $zip->locateName('synchy/database.sql') !== false;
+	$zip->close();
+
+	return $contains_database;
+}
+
 function synchyInstallerExtractArchive(string $archivePath, string $extractDirectory, array &$messages): void
 {
 	if (!class_exists('ZipArchive')) {
@@ -686,6 +705,41 @@ function synchyInstallerImportDatabase(string $sqlPath, mysqli $connection, arra
 
 	@$connection->query('SET FOREIGN_KEY_CHECKS=1');
 	$messages[] = 'Database import completed (' . number_format($count) . ' SQL statements).';
+}
+
+function synchyInstallerIsAjCoreCodePath(string $relativePath): bool
+{
+	$relativePath = ltrim(str_replace('\\', '/', $relativePath), '/');
+
+	if ($relativePath === 'wp-content/plugins/ajcore/ajcore.php') {
+		return true;
+	}
+
+	foreach (['admin', 'includes', 'modules', 'languages', 'assets'] as $directory) {
+		if (str_starts_with($relativePath, 'wp-content/plugins/ajcore/' . $directory . '/')) {
+			return true;
+		}
+	}
+
+	return false;
+}
+
+function synchyInstallerShouldSkipProtectedRuntimeFile(string $relativePath): bool
+{
+	$relativePath = ltrim(str_replace('\\', '/', $relativePath), '/');
+
+	// AJ Core live runtime state is rebuilt from live Stripe and shared DB data.
+	// Installer file copy must never overwrite destination config, uploads, mappings,
+	// forms, leads, tasks, service requests, event logs, or sync history.
+	if ($relativePath === 'wp-config.php' || str_starts_with($relativePath, 'wp-content/uploads/')) {
+		return true;
+	}
+
+	if (str_starts_with($relativePath, 'wp-content/plugins/ajcore/') && !synchyInstallerIsAjCoreCodePath($relativePath)) {
+		return true;
+	}
+
+	return false;
 }
 
 function synchyInstallerReplaceValue($value, string $search, string $replace, bool &$changed)
@@ -1179,7 +1233,7 @@ function synchyInstallerCopyFiles(string $extractDirectory, string $wordpressRoo
 			continue;
 		}
 
-		if ($relative_path === 'wp-config.php') {
+		if (synchyInstallerShouldSkipProtectedRuntimeFile($relative_path)) {
 			continue;
 		}
 
@@ -1272,6 +1326,7 @@ $extract_directory = synchyInstallerPath($workspace_root, 'extracted');
 $database_path = synchyInstallerPath($extract_directory, 'synchy/database.sql');
 $expected_archive_size = synchyInstallerExpectedArchiveSize();
 $actual_archive_size = $archive_path !== '' && is_readable($archive_path) ? (int) filesize($archive_path) : 0;
+$archive_has_database = $archive_path !== '' ? synchyInstallerArchiveContainsDatabase($archive_path) : false;
 $token_required = SYNCHY_INSTALLER_ACCESS_TOKEN !== '' && SYNCHY_INSTALLER_ACCESS_TOKEN !== '__SYNCHY_ACCESS_TOKEN__';
 $provided_token = isset($_REQUEST['token']) ? trim((string) $_REQUEST['token']) : '';
 $authorized = !$token_required || ($provided_token !== '' && hash_equals(SYNCHY_INSTALLER_ACCESS_TOKEN, $provided_token));
@@ -1295,7 +1350,7 @@ if ($archive_path === '') {
 	$errors[] = 'Archive size mismatch detected. Expected ' . synchyInstallerReadableSize($expected_archive_size) . ' but found ' . synchyInstallerReadableSize($actual_archive_size) . '.';
 }
 
-if (!function_exists('mysqli_init')) {
+if ($archive_has_database && !function_exists('mysqli_init')) {
 	$errors[] = 'MySQLi is not available on this server, so the installer cannot connect to the destination database directly.';
 }
 
@@ -1331,13 +1386,15 @@ if ($request_method === 'POST') {
 		}
 
 			try {
-				synchyInstallerValidateDatabaseConfig($database_config);
-
 				if ($destination_url === '') {
 					throw new RuntimeException('Enter the final destination URL before running the restore.');
 				}
 
-				if ($database_config['host'] !== '' && $database_config['user'] !== '') {
+				if ($archive_has_database) {
+					synchyInstallerValidateDatabaseConfig($database_config);
+				}
+
+				if ($archive_has_database && $database_config['host'] !== '' && $database_config['user'] !== '') {
 					try {
 						$available_databases = synchyInstallerLoadDatabases($database_config);
 				} catch (Throwable $throwable) {
@@ -1353,13 +1410,14 @@ if ($request_method === 'POST') {
 			synchyInstallerWriteMaintenanceFile($wordpress_root);
 			synchyInstallerExtractArchive($archive_path, $extract_directory, $messages);
 
-			if (!is_readable($database_path)) {
+			if ($archive_has_database && !is_readable($database_path)) {
 				throw new RuntimeException('Could not find synchy/database.sql after extracting the package.');
 			}
 
-			$connection = synchyInstallerConnectDatabase($database_config, true);
-			synchyInstallerDropDatabaseObjects($connection, $messages);
-			synchyInstallerImportDatabase($database_path, $connection, $messages);
+			if ($archive_has_database) {
+				$connection = synchyInstallerConnectDatabase($database_config, true);
+				synchyInstallerDropDatabaseObjects($connection, $messages);
+				synchyInstallerImportDatabase($database_path, $connection, $messages);
 
 				$pairs = [];
 
@@ -1373,16 +1431,20 @@ if ($request_method === 'POST') {
 					$pairs[$source_url] = [$source_url, $destination_url];
 				}
 
-			foreach ($pairs as $pair) {
-				if ($pair[0] !== '' && $pair[1] !== '' && $pair[0] !== $pair[1]) {
-					synchyInstallerSearchReplace($pair[0], $pair[1], $connection, $messages, $warnings);
+				foreach ($pairs as $pair) {
+					if ($pair[0] !== '' && $pair[1] !== '' && $pair[0] !== $pair[1]) {
+						synchyInstallerSearchReplace($pair[0], $pair[1], $connection, $messages, $warnings);
+					}
 				}
+
+				synchyInstallerForceCoreUrls($connection, $database_config['prefix'], $destination_url, $messages);
+				synchyInstallerUpdateWpConfig($wordpress_root, $extract_directory, $database_config, $messages);
+				$connection->close();
+				$connection = null;
+			} else {
+				$messages[] = 'No database dump found in this package. Database import, URL search/replace, and wp-config.php updates were skipped.';
 			}
 
-			synchyInstallerForceCoreUrls($connection, $database_config['prefix'], $destination_url, $messages);
-			synchyInstallerUpdateWpConfig($wordpress_root, $extract_directory, $database_config, $messages);
-			$connection->close();
-			$connection = null;
 			synchyInstallerCopyFiles($extract_directory, $wordpress_root, $messages, $warnings);
 			synchyInstallerEnsureHtaccess($wordpress_root, $destination_url, $messages);
 			$restore_complete = true;
@@ -1466,7 +1528,7 @@ a{color:#1e7bc8}
 <div class="shell">
 	<p class="eyebrow">Backup & Restore Installer</p>
 	<h1>Manual Restore</h1>
-		<p>This installer restores the Backup & Restore archive staged next to it. It overwrites the destination files and replaces the selected MySQL database with the package database dump.</p>
+		<p><?php echo $archive_has_database ? 'This installer restores the Backup & Restore archive staged next to it. It overwrites the destination files and replaces the selected MySQL database with the package database dump.' : 'This installer restores the code-only Backup & Restore archive staged next to it. It copies package files while skipping database import, URL search/replace, wp-config.php updates, uploads, and protected AJ Core runtime files.'; ?></p>
 
 	<?php if ($token_required && !$authorized) : ?>
 		<div class="notice error">
@@ -1482,7 +1544,7 @@ a{color:#1e7bc8}
 	<?php if ($restore_complete) : ?>
 		<div class="notice success">
 			<strong>Restore complete.</strong>
-			<p>The selected database was replaced and the destination files were overwritten from the package.</p>
+			<p><?php echo $archive_has_database ? 'The selected database was replaced and the destination files were overwritten from the package.' : 'The package files were copied without replacing the database or protected AJ Core runtime files.'; ?></p>
 		</div>
 	<?php endif; ?>
 
@@ -1607,7 +1669,7 @@ a{color:#1e7bc8}
 					</div>
 				<div>
 					<span class="label">Database Dump</span>
-					<strong><?php echo synchyInstallerEscape($database_path); ?></strong>
+					<strong><?php echo synchyInstallerEscape($archive_has_database ? $database_path : 'Not included; database operations disabled'); ?></strong>
 				</div>
 			</div>
 		</div>
@@ -1618,13 +1680,18 @@ a{color:#1e7bc8}
 			<ul>
 				<li>Validates that the zip next to this installer matches the expected Backup & Restore package.</li>
 				<li>Extracts the uploaded Backup & Restore archive into a temporary workspace next to this installer.</li>
-				<li>Connects to the destination MySQL server using the credentials you provide here.</li>
-				<li>Drops all existing tables and views in the selected destination database, then imports the package dump.</li>
-				<li>Runs URL replacement from the source package URLs to the destination URL you confirm below.</li>
-				<li>Updates <code>wp-config.php</code> to use the selected database connection and package table prefix.</li>
+				<?php if ($archive_has_database) : ?>
+					<li>Connects to the destination MySQL server using the credentials you provide here.</li>
+					<li>Drops all existing tables and views in the selected destination database, then imports the package dump.</li>
+					<li>Runs URL replacement from the source package URLs to the destination URL you confirm below.</li>
+					<li>Updates <code>wp-config.php</code> to use the selected database connection and package table prefix.</li>
+				<?php else : ?>
+					<li>Skips database import, URL search/replace, and <code>wp-config.php</code> updates because this package is code-only.</li>
+					<li>Skips uploads and protected AJ Core runtime/config files while copying package files.</li>
+				<?php endif; ?>
 				<li>Copies the extracted files into the WordPress root while preserving the destination <code>wp-config.php</code>.</li>
 			</ul>
-		<p><strong>Backup first.</strong> This restore overwrites the selected database and the destination site files.</p>
+		<p><strong>Backup first.</strong> <?php echo $archive_has_database ? 'This restore overwrites the selected database and the destination site files.' : 'This restore overwrites matching package files, but leaves the destination database and protected runtime state in place.'; ?></p>
 	</div>
 
 	<?php if (!$restore_complete && !$cleanup_complete) : ?>
@@ -1686,7 +1753,7 @@ a{color:#1e7bc8}
 
 			<label class="checkbox">
 				<input type="checkbox" name="confirm_backup" value="1" <?php echo isset($_POST['confirm_backup']) && $_POST['confirm_backup'] === '1' ? 'checked' : ''; ?>>
-				<span>I created a database and file backup of this destination site and I understand this restore will overwrite it.</span>
+				<span><?php echo $archive_has_database ? 'I created a database and file backup of this destination site and I understand this restore will overwrite it.' : 'I created a file backup of this destination site and I understand this restore will overwrite matching package files.'; ?></span>
 			</label>
 
 			<div class="actions">

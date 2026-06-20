@@ -533,6 +533,8 @@ function synchy_get_export_defaults(): array
 		'exclude_cache_temp' => 1,
 		'exclude_existing_backups' => 1,
 		'exclude_dev_artifacts' => 1,
+		'exclude_ajcore_runtime' => 1,
+		'skip_database' => 0,
 		'custom_excludes' => '',
 	];
 }
@@ -653,10 +655,129 @@ function synchy_get_site_sync_defaults(): array
 	];
 
 	foreach (synchy_get_sync_scope_definitions() as $scope) {
-		$defaults[(string) $scope['option_key']] = 1;
+		$defaults[(string) $scope['option_key']] = (string) ($scope['group'] ?? '') === 'database' ? 0 : 1;
 	}
 
 	return $defaults;
+}
+
+function synchy_get_ajcore_protected_option_names(): array
+{
+	// AJ Core rebuilds portal and Stripe cache from live Stripe and the shared DB.
+	// Sentinel deploys code only; live site identity, shared DB settings, mappings,
+	// forms, leads, tasks, files, event logs, and sync history must stay local.
+	return [
+		'ajforms_settings',
+		'ajforms_stripe_products_cache',
+		'ajcore_shared_db_settings',
+		'ajcore_site_uuid',
+		'ajcore_portal_sync_settings',
+		'ajcore_customer_portal_page_id',
+		'ajcore_customer_portal_page_created',
+		'ajcore_customer_portal_menu_items',
+		'ajcore_public_product_display_settings',
+		'ajcore_public_product_dependencies',
+		'ajforms_asana_reference_cache',
+		'ajforms_developer_updates_enabled',
+		'ajforms_last_portal_db_error',
+	];
+}
+
+function synchy_get_ajcore_protected_table_suffixes(): array
+{
+	return [
+		'aj_portal_stripe_customers',
+		'aj_portal_stripe_products',
+		'aj_portal_product_catalog',
+		'aj_portal_stripe_subscriptions',
+		'aj_portal_stripe_transactions',
+		'aj_portal_ledger',
+		'aj_portal_service_snapshots',
+		'aj_portal_service_states',
+		'aj_portal_customer_states',
+		'aj_portal_tasks',
+		'aj_portal_task_statuses',
+		'aj_portal_task_comments',
+		'aj_portal_sync_logs',
+		'aj_portal_sync_log_items',
+		'aj_portal_service_requests',
+		'aj_portal_service_request_history',
+		'aj_portal_event_log',
+		'aj_portal_stripe_events',
+		'aj_auth_user_mappings',
+		'aj_portal_files',
+		'aj_portal_file_users',
+		'aj_forms_forms',
+		'aj_forms_leads',
+		'aj_forms_lead_notes',
+	];
+}
+
+function synchy_is_ajcore_protected_table(string $table): bool
+{
+	global $wpdb;
+
+	$table = trim($table, '` ');
+
+	if ($table === '') {
+		return false;
+	}
+
+	$prefix = isset($wpdb->prefix) ? (string) $wpdb->prefix : '';
+
+	foreach (synchy_get_ajcore_protected_table_suffixes() as $suffix) {
+		if ($table === $suffix || str_ends_with($table, '_' . $suffix) || ($prefix !== '' && $table === $prefix . $suffix)) {
+			return true;
+		}
+	}
+
+	return false;
+}
+
+function synchy_is_ajcore_code_path(string $archive_path): bool
+{
+	$archive_path = ltrim(wp_normalize_path($archive_path), '/');
+
+	if ($archive_path === 'plugins/ajcore/ajcore.php') {
+		return true;
+	}
+
+	foreach (['admin', 'includes', 'modules', 'languages', 'assets'] as $directory) {
+		if (str_starts_with($archive_path, 'plugins/ajcore/' . $directory . '/')) {
+			return true;
+		}
+	}
+
+	return false;
+}
+
+function synchy_is_production_like_destination(array $options): bool
+{
+	$host = strtolower((string) wp_parse_url((string) ($options['destination_url'] ?? ''), PHP_URL_HOST));
+
+	if ($host === '') {
+		return false;
+	}
+
+	if (in_array($host, ['localhost', '127.0.0.1', '::1'], true)) {
+		return false;
+	}
+
+	if (str_ends_with($host, '.local') || str_ends_with($host, '.test') || str_ends_with($host, '.localhost')) {
+		return false;
+	}
+
+	return true;
+}
+
+function synchy_has_selected_database_sync_scope(array $options): bool
+{
+	return synchy_get_selected_sync_scope_ids($options, 'database') !== [];
+}
+
+function synchy_has_explicit_database_sync_confirmation(array $source): bool
+{
+	return !empty($source['synchy_sync_confirm_db']);
 }
 
 function synchy_get_sync_scope_definitions(): array
@@ -980,7 +1101,7 @@ function synchy_sanitize_site_sync_options($value): array
 			continue;
 		}
 
-		$sanitized[$option_key] = 1;
+		$sanitized[$option_key] = synchy_is_production_like_destination($sanitized) && (string) ($scope['group'] ?? '') === 'database' ? 0 : 1;
 	}
 
 	return $sanitized;
@@ -2133,6 +2254,14 @@ function synchy_is_sync_file_excluded(string $archive_path): bool
 		return true;
 	}
 
+	if (str_starts_with($archive_path, 'uploads/')) {
+		return true;
+	}
+
+	if (str_starts_with($archive_path, 'plugins/ajcore/') && !synchy_is_ajcore_code_path($archive_path)) {
+		return true;
+	}
+
 	$protected_plugin_prefixes = [
 		'plugins/freesiem-sentinel/',
 		'plugins/hostinger/',
@@ -2167,6 +2296,8 @@ function synchy_is_sync_file_excluded(string $archive_path): bool
 		'.DS_Store',
 		'Thumbs.db',
 		'desktop.ini',
+		'plugins/ajcore/.DS_Store',
+		'plugins/ajcore/config/synced-settings.json',
 		'uploads/ast-block-templates-json/index.html',
 	];
 
@@ -2184,6 +2315,9 @@ function synchy_is_sync_file_excluded(string $archive_path): bool
 		'/node_modules/',
 		'/coverage/',
 		'/__MACOSX/',
+		'/plugins/ajcore/.git/',
+		'/plugins/ajcore/bin/',
+		'/plugins/ajcore/releases/',
 		'/uploads/synchy-backups/',
 		'/uploads/synchy-site-sync/',
 		'/uploads/synchy-sync/',
@@ -2207,6 +2341,8 @@ function synchy_collect_sync_file_delta(array $state, array $selected_scope_ids,
 	$previous_file_paths = isset($state['file_paths']) && is_array($state['file_paths']) ? $state['file_paths'] : [];
 	$current_file_paths = [];
 	$deleted_paths = [];
+	$excluded_paths = [];
+	$excluded_count = 0;
 
 	foreach (synchy_get_sync_file_targets($selected_scope_ids) as $target) {
 		$scope_id = (string) ($target['scope_id'] ?? '');
@@ -2240,6 +2376,12 @@ function synchy_collect_sync_file_delta(array $state, array $selected_scope_ids,
 			$archive_path = $archive_prefix . '/' . $relative_path;
 
 			if (synchy_is_sync_file_excluded($archive_path)) {
+				$excluded_count++;
+
+				if (count($excluded_paths) < 80) {
+					$excluded_paths[] = $archive_path;
+				}
+
 				continue;
 			}
 
@@ -2294,6 +2436,8 @@ function synchy_collect_sync_file_delta(array $state, array $selected_scope_ids,
 		'selected_scopes' => array_values($selected_scope_ids),
 		'current_file_paths' => $current_file_paths,
 		'deleted_paths' => $deleted_paths,
+		'excluded_paths' => array_values(array_unique($excluded_paths)),
+		'excluded_count' => $excluded_count,
 	];
 }
 
@@ -2322,6 +2466,10 @@ function synchy_should_sync_option_name(string $option_name): bool
 	}
 
 	if (preg_match('/(^|_)db_version$/', $option_name) || preg_match('/(^|_)current_version$/', $option_name)) {
+		return false;
+	}
+
+	if (in_array($option_name, synchy_get_ajcore_protected_option_names(), true)) {
 		return false;
 	}
 
@@ -2359,8 +2507,6 @@ function synchy_should_sync_option_name(string $option_name): bool
 		SYNCHY_SYNC_STATUS_OPTION,
 		SYNCHY_SYNC_JOB_OPTION,
 		SYNCHY_SYNC_LAST_TIME_OPTION,
-		'ajforms_settings',
-		'ajforms_stripe_products_cache',
 		'ajforms_last_portal_db_error',
 	];
 
@@ -2573,9 +2719,6 @@ function synchy_get_form_plugin_sync_table_specs(): array
 	global $wpdb;
 
 	$tables = [
-		$wpdb->prefix . 'aj_forms_forms',
-		$wpdb->prefix . 'aj_forms_leads',
-		$wpdb->prefix . 'aj_forms_lead_notes',
 		$wpdb->prefix . 'formy_forms',
 		$wpdb->prefix . 'formy_leads',
 		$wpdb->prefix . 'formy_lead_notes',
@@ -2606,6 +2749,10 @@ function synchy_get_wp_formy_sync_tables(): array
 	$tables = [];
 
 	foreach (array_keys(synchy_get_form_plugin_sync_table_specs()) as $table) {
+		if (synchy_is_ajcore_protected_table($table)) {
+			continue;
+		}
+
 		$table_exists = $wpdb->get_var(
 			$wpdb->prepare('SHOW TABLES LIKE %s', $table)
 		);
@@ -2888,6 +3035,10 @@ function synchy_write_sync_sql_file(array $tables, string $path)
 	$sql .= '-- Generated at ' . gmdate('c') . "\n\n";
 
 	foreach ($tables as $table => $data) {
+		if (synchy_is_ajcore_protected_table((string) $table)) {
+			continue;
+		}
+
 		$sql .= '-- Table: ' . $table . "\n";
 
 		foreach (
@@ -2943,6 +3094,10 @@ function synchy_build_sync_manifest(array $file_delta, array $db_delta, int $syn
 	$deleted_paths = [];
 
 	foreach ($db_delta['tables'] as $table => $data) {
+		if (synchy_is_ajcore_protected_table((string) $table)) {
+			continue;
+		}
+
 		$tables[$table] = [
 			'keyColumns' => array_values((array) ($data['key_columns'] ?? [])),
 			'updateColumns' => array_values((array) ($data['update_columns'] ?? [])),
@@ -2988,6 +3143,8 @@ function synchy_build_sync_manifest(array $file_delta, array $db_delta, int $syn
 			'count' => (int) ($file_delta['count'] ?? 0),
 			'bytes' => (int) ($file_delta['bytes'] ?? 0),
 			'paths' => array_values(array_map(static fn(array $file): string => (string) $file['archive_path'], (array) ($file_delta['files'] ?? []))),
+			'excludedPaths' => array_values((array) ($file_delta['excluded_paths'] ?? [])),
+			'excludedCount' => (int) ($file_delta['excluded_count'] ?? 0),
 			'managedTopLevelEntries' => synchy_get_sync_file_scope_top_level_entries($file_delta),
 			'deletedPaths' => (static function () use ($file_delta, &$deleted_paths): array {
 				foreach ((array) ($file_delta['deleted_paths'] ?? []) as $paths) {
@@ -3277,12 +3434,19 @@ function synchy_prepare_sync_payload(array $options, array $selection = [], bool
 
 	$summary = [
 		'mode' => $baseline_scope_ids !== [] ? 'baseline' : 'delta',
+		'sourcePath' => wp_normalize_path(WP_CONTENT_DIR),
+		'destinationPath' => (string) ($options['destination_url'] ?? ''),
 		'filesCount' => (int) ($manifest['files']['count'] ?? 0),
 		'filesBytes' => (int) ($manifest['files']['bytes'] ?? 0),
 		'filePaths' => array_slice((array) ($manifest['files']['paths'] ?? []), 0, 40),
+		'excludedFilePaths' => array_slice((array) ($manifest['files']['excludedPaths'] ?? []), 0, 40),
+		'excludedFilesCount' => (int) ($manifest['files']['excludedCount'] ?? 0),
 		'deletedPaths' => array_slice((array) ($manifest['files']['deletedPaths'] ?? []), 0, 40),
 		'deletedCount' => count((array) ($manifest['files']['deletedPaths'] ?? [])),
 		'dbRows' => (int) ($manifest['database']['totalRows'] ?? 0),
+		'dbSyncDisabled' => (int) ($manifest['database']['totalRows'] ?? 0) === 0 && !synchy_has_selected_database_sync_scope($options),
+		'protectedOptionsCount' => count(synchy_get_ajcore_protected_option_names()),
+		'protectedTablesCount' => count(synchy_get_ajcore_protected_table_suffixes()),
 		'tableCounts' => (array) ($manifest['database']['tableCounts'] ?? []),
 		'lastSyncTime' => synchy_get_sync_last_time(),
 		'syncedAt' => $sync_time,
@@ -3856,6 +4020,27 @@ function synchy_get_export_filter_groups(): array
 			'label' => __('Development build artifacts', 'synchy'),
 			'description' => __('Exclude folders that are usually safe to omit from a production restore package.', 'synchy'),
 			'patterns' => ['node_modules/', 'coverage/', '.sass-cache/'],
+		],
+		'exclude_ajcore_runtime' => [
+			'label' => __('AJ Core runtime and environment data', 'synchy'),
+			'description' => __('AJ Core rebuilds portal and Stripe cache from live Stripe and the shared DB. Deploy code only; keep live shared DB settings, Stripe settings, site UUID, mappings, files, forms, leads, tasks, service requests, event log, and sync history on the destination.', 'synchy'),
+			'patterns' => [
+				'wp-config.php',
+				'wp-content/uploads/',
+				'wp-content/plugins/ajcore/config/synced-settings.json',
+				'wp-content/plugins/ajcore/releases/',
+				'wp-content/plugins/ajcore/bin/',
+				'wp-content/plugins/ajcore/.git/',
+				'wp-content/plugins/ajcore/.DS_Store',
+				'*.sql',
+				'*.sqlite',
+				'*.db',
+				'*.log',
+				'releases/',
+				'bin/',
+				'.git/',
+				'.DS_Store',
+			],
 		],
 	];
 }
@@ -4656,7 +4841,7 @@ function synchy_process_export_zip_in_batches(array $job, array $files): array
 		return synchy_mark_export_job_error($job, __('Synchy could not open the export archive for writing.', 'synchy'));
 	}
 
-	if ($cursor === 0 && !$zip->addFile((string) $job['database_path'], 'synchy/database.sql')) {
+	if ($cursor === 0 && empty($job['options']['skip_database']) && !$zip->addFile((string) $job['database_path'], 'synchy/database.sql')) {
 		$zip->close();
 		return synchy_mark_export_job_error($job, __('Synchy could not add the database dump to the export archive.', 'synchy'));
 	}
@@ -4704,7 +4889,7 @@ function synchy_process_export_zip_continuously(array $job, array $files): array
 		return synchy_mark_export_job_error($job, __('Synchy could not open the export archive for writing.', 'synchy'));
 	}
 
-	if ($cursor === 0 && !$zip->addFile((string) $job['database_path'], 'synchy/database.sql')) {
+	if ($cursor === 0 && empty($job['options']['skip_database']) && !$zip->addFile((string) $job['database_path'], 'synchy/database.sql')) {
 		$zip->close();
 		return synchy_mark_export_job_error($job, __('Synchy could not add the database dump to the export archive.', 'synchy'));
 	}
@@ -5274,6 +5459,7 @@ function synchy_build_manifest(array $job): array
 	global $wpdb;
 
 	$archive_path = (string) $job['artifact_paths']['archive'];
+	$skip_database = !empty($job['options']['skip_database']);
 
 	return [
 		'plugin' => 'Synchy',
@@ -5303,9 +5489,10 @@ function synchy_build_manifest(array $job): array
 			'custom_excludes' => preg_split('/\r\n|\r|\n/', (string) ($job['options']['custom_excludes'] ?? '')) ?: [],
 		],
 		'database' => [
-			'path_in_archive' => 'synchy/database.sql',
+			'path_in_archive' => $skip_database ? '' : 'synchy/database.sql',
 			'tables' => (int) ($job['table_count'] ?? 0),
 			'size_bytes' => (int) ($job['database_size'] ?? 0),
+			'skipped' => $skip_database,
 		],
 		'files' => [
 			'included_count' => (int) ($job['file_count'] ?? 0),
@@ -5469,9 +5656,11 @@ function synchy_process_export_job(array $job): array
 
 	switch ($job['phase']) {
 		case 'queued':
-			$job['phase'] = 'dumping_database';
-			$job['message'] = __('Exporting the database dump.', 'synchy');
-			$job['progress'] = 8;
+			$job['phase'] = !empty($job['options']['skip_database']) ? 'scanning_files' : 'dumping_database';
+			$job['message'] = !empty($job['options']['skip_database'])
+				? __('Scanning files to include in the code-only export.', 'synchy')
+				: __('Exporting the database dump.', 'synchy');
+			$job['progress'] = !empty($job['options']['skip_database']) ? 22 : 8;
 			return synchy_update_export_job($job);
 
 		case 'dumping_database':
@@ -5565,6 +5754,7 @@ function synchy_get_site_sync_export_options(array $site_sync_options): array
 
 	$export_options['output_directory'] = synchy_get_site_sync_package_directory();
 	$export_options['package_name'] = 'synchy-site-sync-' . $destination_slug . '-' . gmdate('Ymd-His');
+	$export_options['skip_database'] = 1;
 
 	return $export_options;
 }
@@ -6802,6 +6992,10 @@ function synchy_build_sync_sql_from_manifest(array $manifest, string $sql_path)
 			continue;
 		}
 
+		if (synchy_is_ajcore_protected_table((string) $table)) {
+			continue;
+		}
+
 		$rows = isset($data['rows']) && is_array($data['rows']) ? $data['rows'] : [];
 		$prepared_rows = [];
 
@@ -6815,7 +7009,7 @@ function synchy_build_sync_sql_from_manifest(array $manifest, string $sql_path)
 		}
 
 		if ($table === $wpdb->options) {
-			$prepared_option_rows = $prepared_rows;
+			$prepared_option_rows = array_values(array_filter($prepared_rows, static fn(array $row): bool => synchy_should_sync_option_row($row)));
 			continue;
 		}
 
@@ -7010,6 +7204,10 @@ function synchy_execute_sync_sql_file(string $sql_path)
 		$count = synchy_iterate_sync_sql_statements(
 			$sql_path,
 			static function (string $statement) use ($wpdb): void {
+				if (preg_match('/^\s*INSERT\s+INTO\s+`?([^`\s(]+)`?/i', $statement, $matches) && synchy_is_ajcore_protected_table((string) $matches[1])) {
+					throw new RuntimeException('Refusing to write protected AJ Core runtime table.');
+				}
+
 				$result = $wpdb->query($statement);
 
 				if ($result === false) {
@@ -7553,6 +7751,14 @@ function synchy_validate_sync_zip_entries(ZipArchive $zip)
 			);
 		}
 
+		if (str_starts_with($name, 'uploads/')) {
+			return new WP_Error('synchy_sync_zip_uploads_disallowed', __('The Sync package contains uploads, which are protected from live AJ Core deployments.', 'synchy'));
+		}
+
+		if (str_starts_with($name, 'plugins/ajcore/') && !synchy_is_ajcore_code_path($name)) {
+			return new WP_Error('synchy_sync_zip_ajcore_runtime_disallowed', __('The Sync package contains AJ Core runtime or environment files, which are protected on the destination site.', 'synchy'));
+		}
+
 		if ($name === '.synchy-sync/db/manifest.json') {
 			$has_manifest = true;
 		}
@@ -7632,7 +7838,15 @@ function synchy_is_allowed_sync_deleted_path(string $relative_path): bool
 		return false;
 	}
 
-	foreach (['plugins/', 'themes/', 'uploads/'] as $prefix) {
+	if (str_starts_with($relative_path, 'uploads/')) {
+		return false;
+	}
+
+	if (str_starts_with($relative_path, 'plugins/ajcore/') && !synchy_is_ajcore_code_path($relative_path)) {
+		return false;
+	}
+
+	foreach (['plugins/', 'themes/'] as $prefix) {
 		if (str_starts_with($relative_path, $prefix)) {
 			return true;
 		}
@@ -8051,6 +8265,17 @@ function synchy_run_sync_changes(array $raw_options)
 		]);
 
 		return $validation;
+	}
+
+	if (synchy_has_selected_database_sync_scope($options) && !synchy_has_explicit_database_sync_confirmation($_POST)) {
+		$error = new WP_Error('synchy_sync_db_confirmation_required', __('Database Sync is disabled by default for live destinations. Confirm the database warning before running Sync.', 'synchy'));
+		synchy_set_sync_status([
+			'status' => 'error',
+			'message' => $error->get_error_message(),
+			'at' => gmdate('c'),
+		]);
+
+		return $error;
 	}
 
 	$started = microtime(true);
