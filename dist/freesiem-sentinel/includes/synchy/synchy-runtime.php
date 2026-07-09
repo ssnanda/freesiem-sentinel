@@ -9744,16 +9744,6 @@ function synchy_get_download_url(string $package_id, string $artifact_type): str
 	);
 }
 
-function synchy_get_delete_export_url(string $package_id, string $page_slug): string
-{
-	return wp_nonce_url(
-		admin_url(
-			'admin-post.php?action=synchy_delete_export&package=' . rawurlencode($package_id) . '&page=' . rawurlencode($page_slug)
-		),
-		'synchy_delete_export_' . $package_id
-	);
-}
-
 function synchy_render_export_history(array $history, string $page_slug): void
 {
 	?>
@@ -9832,13 +9822,20 @@ function synchy_render_export_history(array $history, string $page_slug): void
 											<?php echo esc_html((string) ($artifact['label'] ?? 'Download')); ?>
 										</a>
 									<?php endforeach; ?>
-									<a
-										class="button button-link-delete"
-										href="<?php echo esc_url(synchy_get_delete_export_url($package_id, $page_slug)); ?>"
-										onclick="return confirm('<?php echo esc_js(__('Delete this Backup & Restore export and remove its files from disk?', 'synchy')); ?>');"
+									<form
+										method="post"
+										action="<?php echo esc_url(admin_url('admin-post.php')); ?>"
+										class="synchy-inline-delete-form"
+										onsubmit="return confirm('<?php echo esc_js(__('Delete this Backup & Restore export and remove its files from disk?', 'synchy')); ?>');"
 									>
-										<?php esc_html_e('Delete Export', 'synchy'); ?>
-									</a>
+										<input type="hidden" name="action" value="synchy_delete_export" />
+										<input type="hidden" name="package" value="<?php echo esc_attr($package_id); ?>" />
+										<input type="hidden" name="page" value="<?php echo esc_attr($page_slug); ?>" />
+										<?php wp_nonce_field('synchy_delete_export_' . $package_id); ?>
+										<button type="submit" class="button button-link-delete">
+											<?php esc_html_e('Delete Export', 'synchy'); ?>
+										</button>
+									</form>
 								</div>
 							</div>
 						</div>
@@ -10312,8 +10309,6 @@ function synchy_render_export_page(array $current): void
 						</div>
 					</div>
 
-				<?php synchy_render_export_history($export_history, 'synchy-export'); ?>
-
 				<div class="synchy-panel synchy-panel--wide">
 					<h2><?php esc_html_e('Default Exclude Filters', 'synchy'); ?></h2>
 					<p class="synchy-field-note">
@@ -10372,6 +10367,8 @@ function synchy_render_export_page(array $current): void
 					<button type="submit" class="button button-primary"><?php esc_html_e('Save Export Settings', 'synchy'); ?></button>
 				</p>
 			</form>
+
+			<?php synchy_render_export_history($export_history, 'synchy-export'); ?>
 		</div>
 	</div>
 
@@ -11760,8 +11757,10 @@ add_action('admin_post_synchy_delete_export', function (): void {
 		wp_die(esc_html__('You are not allowed to delete Synchy exports.', 'synchy'));
 	}
 
-	$package_id = isset($_GET['package']) ? sanitize_text_field(wp_unslash((string) $_GET['package'])) : '';
-	$page = isset($_GET['page']) ? sanitize_key(wp_unslash((string) $_GET['page'])) : 'synchy-export';
+	$package_source = $_POST['package'] ?? ($_GET['package'] ?? '');
+	$page_source = $_POST['page'] ?? ($_GET['page'] ?? 'synchy-export');
+	$package_id = sanitize_text_field(wp_unslash((string) $package_source));
+	$page = sanitize_key(wp_unslash((string) $page_source));
 	$allowed_pages = ['synchy-export', 'synchy-import'];
 
 	if (!in_array($page, $allowed_pages, true)) {

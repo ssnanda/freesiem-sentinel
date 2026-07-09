@@ -753,6 +753,11 @@
 	gap: 10px;
 }
 
+.synchy-inline-delete-form {
+	display: inline-flex;
+	margin: 0;
+}
+
 .synchy-history-list {
 	display: grid;
 	gap: 14px;
