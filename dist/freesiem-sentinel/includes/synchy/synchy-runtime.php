@@ -279,9 +279,13 @@ function synchy_refresh_plugin_update_state()
 
 function synchy_get_plugin_upgrade_url(): string
 {
-	return wp_nonce_url(
-		self_admin_url('update.php?action=upgrade-plugin&plugin=' . rawurlencode(synchy_get_plugin_basename())),
-		'upgrade-plugin_' . synchy_get_plugin_basename()
+	return add_query_arg(
+		[
+			'action' => 'upgrade-plugin',
+			'plugin' => synchy_get_plugin_basename(),
+			'_wpnonce' => wp_create_nonce('upgrade-plugin_' . synchy_get_plugin_basename()),
+		],
+		self_admin_url('update.php')
 	);
 }
 
