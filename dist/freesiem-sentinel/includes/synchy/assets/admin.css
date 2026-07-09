@@ -261,6 +261,95 @@
 	margin-bottom: 20px;
 }
 
+.synchy-readme-panel {
+	margin: 18px 0;
+}
+
+.synchy-readme-panel summary {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	min-height: 36px;
+	padding: 0 14px;
+	border: 1px solid #b32d2e;
+	border-radius: 4px;
+	background: #b32d2e;
+	color: #ffffff;
+	cursor: pointer;
+	font-size: 13px;
+	font-weight: 700;
+	line-height: 1.2;
+}
+
+.synchy-readme-panel summary::-webkit-details-marker {
+	display: none;
+}
+
+.synchy-readme-panel summary::before {
+	content: "+";
+	margin-right: 8px;
+	font-weight: 800;
+}
+
+.synchy-readme-panel[open] summary::before {
+	content: "-";
+}
+
+.synchy-readme-panel__body {
+	margin-top: 12px;
+	padding: 18px;
+	border: 1px solid #f0b8b8;
+	border-radius: 8px;
+	background: #fff7f7;
+	color: #582020;
+}
+
+.synchy-readme-panel__body h3 {
+	margin: 18px 0 8px;
+	color: #6c1f1f;
+	font-size: 15px;
+}
+
+.synchy-readme-panel__body h3:first-child {
+	margin-top: 0;
+}
+
+.synchy-readme-grid {
+	display: grid;
+	grid-template-columns: repeat(2, minmax(0, 1fr));
+	gap: 18px;
+}
+
+.synchy-readme-sections {
+	display: grid;
+	gap: 12px;
+}
+
+.synchy-readme-section {
+	display: grid;
+	gap: 5px;
+}
+
+.synchy-readme-section strong {
+	color: #6c1f1f;
+}
+
+.synchy-readme-section span {
+	color: #7d3a3a;
+	font-size: 13px;
+	line-height: 1.45;
+}
+
+.synchy-readme-list {
+	margin: 0;
+	padding-left: 18px;
+	display: grid;
+	gap: 6px;
+	color: #582020;
+	font-size: 13px;
+	line-height: 1.45;
+}
+
 .synchy-checklist {
 	margin: 0;
 	padding-left: 20px;
@@ -1416,6 +1505,10 @@
 	}
 
 	.synchy-filter-list {
+		grid-template-columns: minmax(0, 1fr);
+	}
+
+	.synchy-readme-grid {
 		grid-template-columns: minmax(0, 1fr);
 	}
 

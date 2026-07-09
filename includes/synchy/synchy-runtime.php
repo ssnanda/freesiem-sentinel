@@ -2258,10 +2258,6 @@ function synchy_is_sync_file_excluded(string $archive_path): bool
 		return true;
 	}
 
-	if (str_starts_with($archive_path, 'uploads/')) {
-		return true;
-	}
-
 	if (str_starts_with($archive_path, 'plugins/ajcore/') && !synchy_is_ajcore_code_path($archive_path)) {
 		return true;
 	}
@@ -2323,6 +2319,7 @@ function synchy_is_sync_file_excluded(string $archive_path): bool
 		'/plugins/ajcore/bin/',
 		'/plugins/ajcore/releases/',
 		'/uploads/synchy-backups/',
+		'/uploads/synchy-import/',
 		'/uploads/synchy-site-sync/',
 		'/uploads/synchy-sync/',
 	];
@@ -4046,6 +4043,194 @@ function synchy_get_export_filter_groups(): array
 			],
 		],
 	];
+}
+
+function synchy_render_readme_list(array $items): void
+{
+	if ($items === []) {
+		return;
+	}
+	?>
+	<ul class="synchy-readme-list">
+		<?php foreach ($items as $item) : ?>
+			<li class="synchy-text-break"><?php echo esc_html((string) $item); ?></li>
+		<?php endforeach; ?>
+	</ul>
+	<?php
+}
+
+function synchy_render_export_readme_panel(array $options): void
+{
+	$filter_groups = synchy_get_export_filter_groups();
+	$active_filters = [];
+	$inactive_filters = [];
+	$custom_excludes = array_values(
+		array_filter(
+			array_map('trim', preg_split('/\r\n|\r|\n/', (string) ($options['custom_excludes'] ?? '')) ?: []),
+			static fn(string $line): bool => $line !== ''
+		)
+	);
+
+	foreach ($filter_groups as $key => $group) {
+		$row = [
+			'label' => (string) ($group['label'] ?? $key),
+			'description' => (string) ($group['description'] ?? ''),
+			'patterns' => array_map('strval', (array) ($group['patterns'] ?? [])),
+		];
+
+		if (!empty($options[$key])) {
+			$active_filters[] = $row;
+		} else {
+			$inactive_filters[] = $row;
+		}
+	}
+	?>
+	<details class="synchy-readme-panel">
+		<summary><?php esc_html_e('Read Included / Excluded Files', 'synchy'); ?></summary>
+		<div class="synchy-readme-panel__body">
+			<div class="synchy-readme-grid">
+				<div>
+					<h3><?php esc_html_e('Export Includes', 'synchy'); ?></h3>
+					<?php synchy_render_readme_list(array_map(static fn(array $item): string => (string) $item['label'] . ' - ' . (string) $item['description'], synchy_get_export_included_items())); ?>
+				</div>
+				<div>
+					<h3><?php esc_html_e('Always Excluded at Runtime', 'synchy'); ?></h3>
+					<?php
+					synchy_render_readme_list([
+						__('The selected export destination folder, when it is inside this WordPress install.', 'synchy'),
+						'wp-content/uploads/synchy-temp/',
+						__('Unreadable files, symlinks, and directories PHP cannot traverse.', 'synchy'),
+					]);
+					?>
+				</div>
+			</div>
+
+			<h3><?php esc_html_e('Enabled Default Exclude Filters', 'synchy'); ?></h3>
+			<div class="synchy-readme-sections">
+				<?php foreach ($active_filters as $filter) : ?>
+					<div class="synchy-readme-section">
+						<strong><?php echo esc_html($filter['label']); ?></strong>
+						<span><?php echo esc_html($filter['description']); ?></span>
+						<?php synchy_render_readme_list($filter['patterns']); ?>
+					</div>
+				<?php endforeach; ?>
+			</div>
+
+			<?php if ($custom_excludes !== []) : ?>
+				<h3><?php esc_html_e('Custom Excludes', 'synchy'); ?></h3>
+				<?php synchy_render_readme_list($custom_excludes); ?>
+			<?php endif; ?>
+
+			<?php if ($inactive_filters !== []) : ?>
+				<h3><?php esc_html_e('Available but Currently Disabled Filters', 'synchy'); ?></h3>
+				<div class="synchy-readme-sections">
+					<?php foreach ($inactive_filters as $filter) : ?>
+						<div class="synchy-readme-section">
+							<strong><?php echo esc_html($filter['label']); ?></strong>
+							<span><?php echo esc_html($filter['description']); ?></span>
+							<?php synchy_render_readme_list($filter['patterns']); ?>
+						</div>
+					<?php endforeach; ?>
+				</div>
+			<?php endif; ?>
+		</div>
+	</details>
+	<?php
+}
+
+function synchy_get_sync_file_exclusion_readme_items(): array
+{
+	return [
+		__('Blank or invalid archive paths.', 'synchy'),
+		'plugins/freesiem-sentinel/',
+		'plugins/synchy/',
+		'plugins/hostinger/',
+		'plugins/hostinger-ai-assistant/',
+		'plugins/hostinger-easy-onboarding/',
+		__('The current Sentinel plugin folder, detected from the active plugin basename.', 'synchy'),
+		__('Hostinger must-use plugin files whose filename contains hostinger.', 'synchy'),
+		__('AJ Core runtime files outside the allowed AJ Core code folders.', 'synchy'),
+		'plugins/ajcore/config/synced-settings.json',
+		'plugins/ajcore/.git/',
+		'plugins/ajcore/bin/',
+		'plugins/ajcore/releases/',
+		'.DS_Store',
+		'Thumbs.db',
+		'desktop.ini',
+		'uploads/ast-block-templates-json/index.html',
+		'uploads/synchy-backups/',
+		'uploads/synchy-import/',
+		'uploads/synchy-site-sync/',
+		'uploads/synchy-sync/',
+		'.git/',
+		'.github/',
+		'.svn/',
+		'.hg/',
+		'node_modules/',
+		'coverage/',
+		'__MACOSX/',
+	];
+}
+
+function synchy_get_sync_database_exclusion_readme_items(): array
+{
+	return [
+		__('Database scopes only include selected rows from the selected database areas.', 'synchy'),
+		__('Options home and siteurl are excluded so Sync does not rewrite the destination URL.', 'synchy'),
+		__('WordPress transients, cron, update/version markers, uninstall state, and migration flags are excluded.', 'synchy'),
+		__('Backup & Restore/Synchy job state, export history, import state, sync state, and saved destination credentials are excluded.', 'synchy'),
+		__('freeSIEM Sentinel options and runtime state are excluded.', 'synchy'),
+		__('AJ Core protected options and portal/customer portal cache prefixes are excluded.', 'synchy'),
+		__('Hostinger, Action Scheduler, analytics, onboarding, survey, Spectra/UAGB, SureForms, WPForms, WP Formy runtime/version, Stripe cache, LifterLMS/course runtime, and similar plugin runtime option prefixes are excluded.', 'synchy'),
+		__('Options ending in _db_version or _current_version are excluded.', 'synchy'),
+		__('Client portal and Stripe cache tables are intentionally excluded from the Forms database scope.', 'synchy'),
+	];
+}
+
+function synchy_render_sync_readme_panel(array $options): void
+{
+	$scope_definitions = synchy_get_sync_scope_definitions();
+	$selected_scope_ids = synchy_get_selected_sync_scope_ids($options);
+	$file_scopes = [];
+	$database_scopes = [];
+
+	foreach ($scope_definitions as $scope_id => $scope) {
+		$line = sprintf(
+			'%1$s%2$s - %3$s',
+			in_array((string) $scope_id, $selected_scope_ids, true) ? __('Selected: ', 'synchy') : __('Available: ', 'synchy'),
+			(string) ($scope['label'] ?? $scope_id),
+			(string) ($scope['description'] ?? '')
+		);
+
+		if (($scope['group'] ?? '') === 'database') {
+			$database_scopes[] = $line;
+		} else {
+			$file_scopes[] = $line;
+		}
+	}
+	?>
+	<details class="synchy-readme-panel">
+		<summary><?php esc_html_e('Read Sync Includes / Excludes', 'synchy'); ?></summary>
+		<div class="synchy-readme-panel__body">
+			<div class="synchy-readme-grid">
+				<div>
+					<h3><?php esc_html_e('File Scopes', 'synchy'); ?></h3>
+					<?php synchy_render_readme_list($file_scopes); ?>
+				</div>
+				<div>
+					<h3><?php esc_html_e('Database Scopes', 'synchy'); ?></h3>
+					<?php synchy_render_readme_list($database_scopes); ?>
+				</div>
+			</div>
+
+			<h3><?php esc_html_e('File Paths Always Excluded from Sync Packages', 'synchy'); ?></h3>
+			<?php synchy_render_readme_list(synchy_get_sync_file_exclusion_readme_items()); ?>
+
+			<h3><?php esc_html_e('Database Rows and Options Excluded from Sync', 'synchy'); ?></h3>
+			<?php synchy_render_readme_list(synchy_get_sync_database_exclusion_readme_items()); ?>
+		</div>
+	</details>
+	<?php
 }
 
 function synchy_get_notice_key(): string
@@ -10430,6 +10615,8 @@ function synchy_render_export_page(array $current): void
 				</div>
 			</div>
 
+			<?php synchy_render_export_readme_panel($options); ?>
+
 			<form method="post" action="options.php" class="synchy-form" data-synchy-export-form>
 				<?php settings_fields('synchy_export'); ?>
 
@@ -11226,6 +11413,8 @@ function synchy_render_incremental_site_sync_page(array $current): void
 						</div>
 					</div>
 				</div>
+
+				<?php synchy_render_sync_readme_panel($options); ?>
 
 				<div class="synchy-panel synchy-sync-scope-panel">
 					<div class="synchy-stack__split">
