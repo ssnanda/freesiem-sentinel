@@ -8137,8 +8137,10 @@ function synchy_validate_sync_zip_entries(ZipArchive $zip)
 			);
 		}
 
-		if (str_starts_with($name, 'uploads/')) {
-			return new WP_Error('synchy_sync_zip_uploads_disallowed', __('The Sync package contains uploads, which are protected from live AJ Core deployments.', 'synchy'));
+		foreach (['uploads/synchy-backups/', 'uploads/synchy-import/', 'uploads/synchy-site-sync/', 'uploads/synchy-sync/'] as $protected_upload_prefix) {
+			if (str_starts_with($name, $protected_upload_prefix)) {
+				return new WP_Error('synchy_sync_zip_uploads_disallowed', __('The Sync package contains protected Synchy upload workspace files.', 'synchy'));
+			}
 		}
 
 		if (str_starts_with($name, 'plugins/ajcore/') && !synchy_is_ajcore_code_path($name)) {
@@ -8224,15 +8226,17 @@ function synchy_is_allowed_sync_deleted_path(string $relative_path): bool
 		return false;
 	}
 
-	if (str_starts_with($relative_path, 'uploads/')) {
-		return false;
+	foreach (['uploads/synchy-backups/', 'uploads/synchy-import/', 'uploads/synchy-site-sync/', 'uploads/synchy-sync/'] as $protected_upload_prefix) {
+		if (str_starts_with($relative_path, $protected_upload_prefix)) {
+			return false;
+		}
 	}
 
 	if (str_starts_with($relative_path, 'plugins/ajcore/') && !synchy_is_ajcore_code_path($relative_path)) {
 		return false;
 	}
 
-	foreach (['plugins/', 'themes/'] as $prefix) {
+	foreach (['plugins/', 'themes/', 'uploads/'] as $prefix) {
 		if (str_starts_with($relative_path, $prefix)) {
 			return true;
 		}
