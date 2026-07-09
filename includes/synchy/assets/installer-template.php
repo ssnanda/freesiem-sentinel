@@ -729,9 +729,19 @@ function synchyInstallerShouldSkipProtectedRuntimeFile(string $relativePath): bo
 	$relativePath = ltrim(str_replace('\\', '/', $relativePath), '/');
 
 	// AJ Core live runtime state is rebuilt from live Stripe and shared DB data.
-	// Installer file copy must never overwrite destination config, uploads, mappings,
-	// forms, leads, tasks, service requests, event logs, or sync history.
-	if ($relativePath === 'wp-config.php' || str_starts_with($relativePath, 'wp-content/uploads/')) {
+	// Installer file copy must never overwrite destination config, Synchy staging
+	// folders, mappings, forms, leads, tasks, service requests, event logs, or sync history.
+	if ($relativePath === 'wp-config.php') {
+		return true;
+	}
+
+	foreach (['wp-content/uploads/synchy-import/', 'wp-content/uploads/synchy-site-sync/', 'wp-content/uploads/synchy-sync/'] as $protectedPrefix) {
+		if (str_starts_with($relativePath, $protectedPrefix)) {
+			return true;
+		}
+	}
+
+	if ($relativePath === 'wp-content/uploads/synchy-import' || $relativePath === 'wp-content/uploads/synchy-site-sync' || $relativePath === 'wp-content/uploads/synchy-sync') {
 		return true;
 	}
 
@@ -1528,7 +1538,7 @@ a{color:#1e7bc8}
 <div class="shell">
 	<p class="eyebrow">Backup & Restore Installer</p>
 	<h1>Manual Restore</h1>
-		<p><?php echo $archive_has_database ? 'This installer restores the Backup & Restore archive staged next to it. It overwrites the destination files and replaces the selected MySQL database with the package database dump.' : 'This installer restores the code-only Backup & Restore archive staged next to it. It copies package files while skipping database import, URL search/replace, wp-config.php updates, uploads, and protected AJ Core runtime files.'; ?></p>
+		<p><?php echo $archive_has_database ? 'This installer restores the Backup & Restore archive staged next to it. It overwrites the destination files and replaces the selected MySQL database with the package database dump.' : 'This installer restores the code-only Backup & Restore archive staged next to it. It copies package files while skipping database import, URL search/replace, wp-config.php updates, Synchy staging folders, and protected AJ Core runtime files.'; ?></p>
 
 	<?php if ($token_required && !$authorized) : ?>
 		<div class="notice error">
@@ -1687,7 +1697,7 @@ a{color:#1e7bc8}
 					<li>Updates <code>wp-config.php</code> to use the selected database connection and package table prefix.</li>
 				<?php else : ?>
 					<li>Skips database import, URL search/replace, and <code>wp-config.php</code> updates because this package is code-only.</li>
-					<li>Skips uploads and protected AJ Core runtime/config files while copying package files.</li>
+					<li>Skips Synchy staging folders and protected AJ Core runtime/config files while copying package files.</li>
 				<?php endif; ?>
 				<li>Copies the extracted files into the WordPress root while preserving the destination <code>wp-config.php</code>.</li>
 			</ul>

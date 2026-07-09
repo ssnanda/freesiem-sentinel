@@ -4027,10 +4027,9 @@ function synchy_get_export_filter_groups(): array
 		],
 		'exclude_ajcore_runtime' => [
 			'label' => __('AJ Core runtime and environment data', 'synchy'),
-			'description' => __('AJ Core rebuilds portal and Stripe cache from live Stripe and the shared DB. Deploy code only; keep live shared DB settings, Stripe settings, site UUID, mappings, files, forms, leads, tasks, service requests, event log, and sync history on the destination.', 'synchy'),
+			'description' => __('AJ Core rebuilds portal and Stripe cache from live Stripe and the shared DB. Keep live shared DB settings, Stripe settings, site UUID, mappings, forms, leads, tasks, service requests, event log, and sync history on the destination while still including the WordPress media library.', 'synchy'),
 			'patterns' => [
 				'wp-config.php',
-				'wp-content/uploads/',
 				'wp-content/plugins/ajcore/config/synced-settings.json',
 				'wp-content/plugins/ajcore/releases/',
 				'wp-content/plugins/ajcore/bin/',
@@ -4147,6 +4146,187 @@ function synchy_is_export_record_available(array $record): bool
 	return synchy_is_export_artifact_readable($archive);
 }
 
+function synchy_get_ddev_scaffolding_assets(): array
+{
+	$directory = wp_normalize_path(plugin_dir_path(__FILE__) . 'assets/ddev-scaffolding');
+	$files = [
+		'create-ddev-site-from-synchy-export.sh',
+		'create-ddev-site-from-synchy-export.ps1',
+		'create-ddev-site-from-synchy-export.bat',
+	];
+	$assets = [];
+
+	foreach ($files as $file) {
+		$path = wp_normalize_path(trailingslashit($directory) . $file);
+
+		if (is_readable($path)) {
+			$assets[$file] = $path;
+		}
+	}
+
+	return $assets;
+}
+
+function synchy_get_export_bundle_filename(array $entry): string
+{
+	$package_name = sanitize_file_name((string) ($entry['package_name'] ?? $entry['package_id'] ?? 'synchy-export'));
+
+	return ($package_name !== '' ? $package_name : 'synchy-export') . '-ddev-download.zip';
+}
+
+function synchy_get_export_bundle_path(array $entry): string
+{
+	$artifacts = isset($entry['artifacts']) && is_array($entry['artifacts']) ? $entry['artifacts'] : [];
+	$anchor_path = '';
+
+	foreach (['manifest', 'archive', 'installer'] as $artifact_type) {
+		$path = (string) (($artifacts[$artifact_type] ?? [])['path'] ?? '');
+
+		if ($path !== '') {
+			$anchor_path = wp_normalize_path($path);
+			break;
+		}
+	}
+
+	if ($anchor_path === '') {
+		return '';
+	}
+
+	return wp_normalize_path(trailingslashit(dirname($anchor_path)) . synchy_get_export_bundle_filename($entry));
+}
+
+function synchy_get_export_bundle_readme(array $entry): string
+{
+	$package_name = (string) ($entry['package_name'] ?? $entry['package_id'] ?? 'Synchy export');
+
+	return <<<README
+Synchy DDEV Local Site Bundle
+============================
+
+Package: {$package_name}
+
+This bundle contains:
+- the Synchy export archive zip
+- the Synchy installer PHP file
+- the Synchy manifest JSON file
+- DDEV helper scripts for macOS, Linux, and Windows
+
+The scripts can run from any folder as long as all files from this bundle stay together in that folder.
+They create the restored DDEV site under the current user's home directory:
+- macOS/Linux: \$HOME/Projects/sites
+- Windows PowerShell: \$HOME\\Projects\\sites
+
+Prerequisites
+-------------
+- Docker Desktop or Docker Engine
+- DDEV
+- macOS/Linux: python3, unzip, rsync
+- Windows: PowerShell and robocopy
+
+macOS
+-----
+1. Extract this bundle.
+2. Open Terminal in the extracted folder.
+3. Run:
+   chmod +x ./create-ddev-site-from-synchy-export.sh
+   ./create-ddev-site-from-synchy-export.sh
+
+Linux
+-----
+1. Extract this bundle.
+2. Open a terminal in the extracted folder.
+3. Run:
+   chmod +x ./create-ddev-site-from-synchy-export.sh
+   ./create-ddev-site-from-synchy-export.sh
+
+Windows
+-------
+1. Extract this bundle.
+2. Double-click create-ddev-site-from-synchy-export.bat, or open PowerShell in the extracted folder and run:
+   powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\\create-ddev-site-from-synchy-export.ps1
+
+README;
+}
+
+function synchy_build_export_download_bundle(array $entry)
+{
+	$artifacts = isset($entry['artifacts']) && is_array($entry['artifacts']) ? $entry['artifacts'] : [];
+	$required = ['archive', 'installer', 'manifest'];
+	$bundle_path = synchy_get_export_bundle_path($entry);
+
+	if ($bundle_path === '') {
+		return new WP_Error('synchy_bundle_path_missing', __('Synchy could not determine where to write the DDEV download bundle.', 'synchy'));
+	}
+
+	if (!class_exists('ZipArchive')) {
+		return new WP_Error('synchy_bundle_zip_missing', __('The PHP ZipArchive extension is required to build the DDEV download bundle.', 'synchy'));
+	}
+
+	foreach ($required as $artifact_type) {
+		if (!synchy_is_export_artifact_readable($artifacts[$artifact_type] ?? null)) {
+			return new WP_Error('synchy_bundle_artifact_missing', __('The DDEV download bundle could not be built because one or more export files are missing.', 'synchy'));
+		}
+	}
+
+	$script_assets = synchy_get_ddev_scaffolding_assets();
+
+	if (count($script_assets) < 3) {
+		return new WP_Error('synchy_bundle_scripts_missing', __('The DDEV helper scripts are missing from this Synchy installation.', 'synchy'));
+	}
+
+	if (file_exists($bundle_path)) {
+		@unlink($bundle_path);
+	}
+
+	$zip = new ZipArchive();
+
+	if ($zip->open($bundle_path, ZipArchive::CREATE | ZipArchive::OVERWRITE) !== true) {
+		return new WP_Error('synchy_bundle_write_failed', __('Synchy could not create the DDEV download bundle.', 'synchy'));
+	}
+
+	foreach ($required as $artifact_type) {
+		$path = wp_normalize_path((string) $artifacts[$artifact_type]['path']);
+		$filename = sanitize_file_name((string) ($artifacts[$artifact_type]['filename'] ?? basename($path)));
+		$entry_name = $filename !== '' ? $filename : basename($path);
+
+		if (!$zip->addFile($path, $entry_name)) {
+			$zip->close();
+			@unlink($bundle_path);
+			return new WP_Error('synchy_bundle_add_failed', __('Synchy could not add an export file to the DDEV download bundle.', 'synchy'));
+		}
+
+		synchy_maybe_optimize_zip_entry($zip, $entry_name);
+	}
+
+	foreach ($script_assets as $filename => $path) {
+		if (!$zip->addFile($path, $filename)) {
+			$zip->close();
+			@unlink($bundle_path);
+			return new WP_Error('synchy_bundle_script_failed', __('Synchy could not add the DDEV helper scripts to the download bundle.', 'synchy'));
+		}
+	}
+
+	$zip->addFromString('README-DDEV.txt', synchy_get_export_bundle_readme($entry));
+	$zip->close();
+
+	return [
+		'label' => __('Download Export Bundle', 'synchy'),
+		'filename' => basename($bundle_path),
+		'path' => $bundle_path,
+	];
+}
+
+function synchy_ensure_export_download_bundle(array $entry)
+{
+	$bundle = $entry['artifacts']['bundle'] ?? null;
+
+	if (synchy_is_export_artifact_readable($bundle)) {
+		return $bundle;
+	}
+
+	return synchy_build_export_download_bundle($entry);
+}
+
 function synchy_build_export_history_entry_from_manifest_path(string $manifest_path): array
 {
 	$manifest_path = wp_normalize_path($manifest_path);
@@ -4174,6 +4354,11 @@ function synchy_build_export_history_entry_from_manifest_path(string $manifest_p
 	$archive_path = $archive_filename !== '' ? wp_normalize_path(trailingslashit($directory) . $archive_filename) : '';
 	$installer_path = $installer_filename !== '' ? wp_normalize_path(trailingslashit($directory) . $installer_filename) : '';
 	$resolved_manifest_path = $manifest_filename !== '' ? wp_normalize_path(trailingslashit($directory) . $manifest_filename) : $manifest_path;
+	$bundle_filename = synchy_get_export_bundle_filename([
+		'package_id' => (string) $manifest['package_id'],
+		'package_name' => (string) ($manifest['package_name'] ?? $manifest['package_id']),
+	]);
+	$bundle_path = wp_normalize_path(trailingslashit($directory) . $bundle_filename);
 
 	return [
 		'package_id' => (string) $manifest['package_id'],
@@ -4201,6 +4386,11 @@ function synchy_build_export_history_entry_from_manifest_path(string $manifest_p
 				'label' => __('Download manifest', 'synchy'),
 				'filename' => $manifest_filename,
 				'path' => $resolved_manifest_path,
+			],
+			'bundle' => [
+				'label' => __('Download Export Bundle', 'synchy'),
+				'filename' => $bundle_filename,
+				'path' => $bundle_path,
 			],
 		],
 	];
@@ -4811,6 +5001,13 @@ function synchy_finalize_export_job(array $job): array
 			],
 		],
 	];
+	$bundle = synchy_build_export_download_bundle($last_export);
+
+	if (is_wp_error($bundle)) {
+		return synchy_mark_export_job_error($job, $bundle->get_error_message());
+	}
+
+	$last_export['artifacts']['bundle'] = $bundle;
 
 	synchy_record_export_history($last_export);
 	synchy_set_notice(
@@ -9779,7 +9976,6 @@ function synchy_render_export_history(array $history, string $page_slug): void
 						<?php
 						$package_id = (string) ($entry['package_id'] ?? '');
 						$package_name = (string) ($entry['package_name'] ?? $package_id);
-						$artifacts = isset($entry['artifacts']) && is_array($entry['artifacts']) ? $entry['artifacts'] : [];
 						$created = !empty($entry['created_at']) ? strtotime((string) $entry['created_at']) : false;
 						?>
 						<div class="synchy-history-item">
@@ -9818,14 +10014,11 @@ function synchy_render_export_history(array $history, string $page_slug): void
 								</div>
 
 								<div class="synchy-downloads">
-									<?php foreach ($artifacts as $type => $artifact) : ?>
-										<?php if (!synchy_is_export_artifact_readable($artifact)) : ?>
-											<?php continue; ?>
-										<?php endif; ?>
-										<a class="button" href="<?php echo esc_url(synchy_get_download_url($package_id, (string) $type)); ?>">
-											<?php echo esc_html((string) ($artifact['label'] ?? 'Download')); ?>
+									<?php if ($package_id !== '' && synchy_is_export_record_available($entry)) : ?>
+										<a class="button button-primary" href="<?php echo esc_url(synchy_get_download_url($package_id, 'bundle')); ?>">
+											<?php esc_html_e('Download Export Bundle', 'synchy'); ?>
 										</a>
-									<?php endforeach; ?>
+									<?php endif; ?>
 									<form
 										method="post"
 										action="<?php echo esc_url(admin_url('admin-post.php')); ?>"
@@ -9846,6 +10039,39 @@ function synchy_render_export_history(array $history, string $page_slug): void
 					<?php endforeach; ?>
 				</div>
 			<?php endif; ?>
+		</div>
+	</div>
+	<?php
+}
+
+function synchy_render_ddev_export_instructions(): void
+{
+	?>
+	<div class="synchy-panel synchy-panel--wide">
+		<div class="synchy-stack synchy-stack--compact">
+			<div>
+				<h2><?php esc_html_e('Run Export Locally with DDEV', 'synchy'); ?></h2>
+				<p class="synchy-field-note">
+					<?php esc_html_e('Download Export Bundle includes the archive, installer, manifest, macOS/Linux shell script, Windows PowerShell script, Windows batch launcher, and README-DDEV.txt. Extract the bundle anywhere and keep the files together in that folder.', 'synchy'); ?>
+				</p>
+			</div>
+			<div class="synchy-export-meta synchy-export-meta--wide">
+				<div>
+					<span class="synchy-export-meta__label"><?php esc_html_e('macOS', 'synchy'); ?></span>
+					<strong><code>chmod +x ./create-ddev-site-from-synchy-export.sh && ./create-ddev-site-from-synchy-export.sh</code></strong>
+					<span><?php esc_html_e('Creates the DDEV site under $HOME/Projects/sites.', 'synchy'); ?></span>
+				</div>
+				<div>
+					<span class="synchy-export-meta__label"><?php esc_html_e('Linux', 'synchy'); ?></span>
+					<strong><code>chmod +x ./create-ddev-site-from-synchy-export.sh && ./create-ddev-site-from-synchy-export.sh</code></strong>
+					<span><?php esc_html_e('Creates the DDEV site under $HOME/Projects/sites.', 'synchy'); ?></span>
+				</div>
+				<div>
+					<span class="synchy-export-meta__label"><?php esc_html_e('Windows', 'synchy'); ?></span>
+					<strong><code>create-ddev-site-from-synchy-export.bat</code></strong>
+					<span><?php esc_html_e('Runs the PowerShell helper and creates the DDEV site under $HOME\\Projects\\sites.', 'synchy'); ?></span>
+				</div>
+			</div>
 		</div>
 	</div>
 	<?php
@@ -10074,9 +10300,9 @@ function synchy_render_dashboard_widget(): void
 								<strong><?php echo esc_html($package_name); ?></strong>
 								<span><?php echo esc_html(synchy_format_dashboard_timestamp((string) ($entry['created_at'] ?? ''))); ?></span>
 							</div>
-							<?php if ($package_id !== '') : ?>
-								<a class="button button-small" href="<?php echo esc_url(synchy_get_download_url($package_id, 'archive')); ?>">
-									<?php esc_html_e('Archive', 'synchy'); ?>
+							<?php if ($package_id !== '' && synchy_is_export_record_available($entry)) : ?>
+								<a class="button button-small" href="<?php echo esc_url(synchy_get_download_url($package_id, 'bundle')); ?>">
+									<?php esc_html_e('Bundle', 'synchy'); ?>
 								</a>
 							<?php endif; ?>
 						</li>
@@ -10373,6 +10599,7 @@ function synchy_render_export_page(array $current): void
 			</form>
 
 			<?php synchy_render_export_history($export_history, 'synchy-export'); ?>
+			<?php synchy_render_ddev_export_instructions(); ?>
 		</div>
 	</div>
 
@@ -11719,7 +11946,7 @@ add_action('admin_post_synchy_download_export', function (): void {
 
 	$package_id = isset($_GET['package']) ? sanitize_text_field(wp_unslash((string) $_GET['package'])) : '';
 	$artifact = isset($_GET['artifact']) ? sanitize_text_field(wp_unslash((string) $_GET['artifact'])) : '';
-	$allowed = ['archive', 'installer', 'manifest'];
+	$allowed = ['bundle', 'archive', 'installer', 'manifest'];
 
 	if ($package_id === '' || !in_array($artifact, $allowed, true)) {
 		wp_die(esc_html__('The requested Synchy export file is invalid.', 'synchy'));
@@ -11733,7 +11960,15 @@ add_action('admin_post_synchy_download_export', function (): void {
 		wp_die(esc_html__('That export is no longer available through Synchy.', 'synchy'));
 	}
 
-	$artifact_meta = $export['artifacts'][$artifact] ?? null;
+	if ($artifact === 'bundle') {
+		$artifact_meta = synchy_ensure_export_download_bundle($export);
+
+		if (is_wp_error($artifact_meta)) {
+			wp_die(esc_html($artifact_meta->get_error_message()));
+		}
+	} else {
+		$artifact_meta = $export['artifacts'][$artifact] ?? null;
+	}
 
 	if (!is_array($artifact_meta) || empty($artifact_meta['path']) || !is_readable((string) $artifact_meta['path'])) {
 		wp_die(esc_html__('The requested Synchy export file could not be found.', 'synchy'));
@@ -11742,6 +11977,7 @@ add_action('admin_post_synchy_download_export', function (): void {
 	$file_path = wp_normalize_path((string) $artifact_meta['path']);
 	$filename = basename($file_path);
 	$mime = match ($artifact) {
+		'bundle' => 'application/zip',
 		'archive' => 'application/zip',
 		'manifest' => 'application/json',
 		default => 'application/x-httpd-php',
