@@ -669,7 +669,7 @@ function synchy_get_ajcore_protected_option_names(): array
 {
 	// AJ Core rebuilds portal and Stripe cache from live Stripe and the shared DB.
 	// Sentinel deploys code only; live site identity, shared DB settings, mappings,
-	// forms, leads, tasks, files, event logs, and sync history must stay local.
+	// leads, tasks, files, event logs, and sync history must stay local.
 	return [
 		'ajforms_settings',
 		'ajforms_stripe_products_cache',
@@ -711,7 +711,6 @@ function synchy_get_ajcore_protected_table_suffixes(): array
 		'aj_auth_user_mappings',
 		'aj_portal_files',
 		'aj_portal_file_users',
-		'aj_forms_forms',
 		'aj_forms_leads',
 		'aj_forms_lead_notes',
 	];
@@ -2723,6 +2722,7 @@ function synchy_get_form_plugin_sync_table_specs(): array
 		$wpdb->prefix . 'formy_forms',
 		$wpdb->prefix . 'formy_leads',
 		$wpdb->prefix . 'formy_lead_notes',
+		$wpdb->prefix . 'aj_forms_forms',
 		$wpdb->prefix . 'fluentform_entry_details',
 		$wpdb->prefix . 'fluentform_form_analytics',
 		$wpdb->prefix . 'fluentform_form_meta',
@@ -4024,7 +4024,7 @@ function synchy_get_export_filter_groups(): array
 		],
 		'exclude_ajcore_runtime' => [
 			'label' => __('AJ Core runtime and environment data', 'synchy'),
-			'description' => __('AJ Core rebuilds portal and Stripe cache from live Stripe and the shared DB. Keep live shared DB settings, Stripe settings, site UUID, mappings, forms, leads, tasks, service requests, event log, and sync history on the destination while still including the WordPress media library.', 'synchy'),
+			'description' => __('AJ Core rebuilds portal and Stripe cache from live Stripe and the shared DB. Keep live shared DB settings, Stripe settings, site UUID, mappings, leads, tasks, service requests, event log, and sync history on the destination while still including the WordPress media library.', 'synchy'),
 			'patterns' => [
 				'wp-config.php',
 				'wp-content/plugins/ajcore/config/synced-settings.json',
@@ -4183,6 +4183,7 @@ function synchy_get_sync_database_exclusion_readme_items(): array
 		__('AJ Core protected options and portal/customer portal cache prefixes are excluded.', 'synchy'),
 		__('Hostinger, Action Scheduler, analytics, onboarding, survey, Spectra/UAGB, SureForms, WPForms, WP Formy runtime/version, Stripe cache, LifterLMS/course runtime, and similar plugin runtime option prefixes are excluded.', 'synchy'),
 		__('Options ending in _db_version or _current_version are excluded.', 'synchy'),
+		__('AJ Core form definitions are included in the Forms database scope; AJ Core leads and lead notes are intentionally excluded as submitted user data.', 'synchy'),
 		__('Client portal and Stripe cache tables are intentionally excluded from the Forms database scope.', 'synchy'),
 	];
 }
