@@ -180,6 +180,52 @@
 	const getRemotePluginVersion = (remoteSite) =>
 		String(remoteSite?.sentinelVersion || remoteSite?.pluginVersion || "");
 
+	const getSiteVersion = (source) => {
+		const version = source?.siteVersion || {};
+
+		return {
+			siteId: String(version.siteId || ""),
+			number: Number(version.number || 0),
+			syncId: String(version.syncId || ""),
+			sourceUrl: String(version.sourceUrl || ""),
+			destinationUrl: String(version.destinationUrl || ""),
+			updatedAt: String(version.updatedAt || ""),
+			updatedBy: String(version.updatedBy || ""),
+			mode: String(version.mode || ""),
+		};
+	};
+
+	const formatSiteVersion = (version) => {
+		const normalized = getSiteVersion({ siteVersion: version });
+		const label = normalized.number > 0 ? `v${normalized.number}` : "unversioned";
+		const detail = normalized.updatedAt ? ` (${formatDateTime(normalized.updatedAt)})` : "";
+
+		return `${label}${detail}`;
+	};
+
+	const getSiteVersionRelationship = (remoteSite) => {
+		const local = getSiteVersion({ siteVersion: config.localSiteVersion || {} });
+		const remote = getSiteVersion(remoteSite || {});
+
+		if (local.number <= 0 && remote.number <= 0) {
+			return "No site sync version has been recorded yet.";
+		}
+
+		if (local.siteId !== "" && remote.siteId !== "" && local.siteId !== remote.siteId) {
+			return "Different site version lineage. Run a baseline/full sync before trusting reverse sync.";
+		}
+
+		if (local.number === remote.number) {
+			return `Same site version (${formatSiteVersion(local)}).`;
+		}
+
+		if (local.number > remote.number) {
+			return `Local is ahead (${formatSiteVersion(local)} vs live ${formatSiteVersion(remote)}).`;
+		}
+
+		return `Live is newer (${formatSiteVersion(remote)} vs local ${formatSiteVersion(local)}). Reverse sync can bring live changes back.`;
+	};
+
 	const refreshRemoteVersionUntilCurrent = (attempt = 0) => {
 		const maxAttempts = 6;
 		const localVersion = String(config.localPluginVersion || "");
@@ -710,6 +756,8 @@
 		const remoteVersion = getRemotePluginVersion(payload);
 		const localVersion = String(config.localPluginVersion || "");
 		const remoteIsOlder = !isError && remoteVersion !== "" && localVersion !== "" && compareVersions(remoteVersion, localVersion) < 0;
+		const localSiteVersion = getSiteVersion({ siteVersion: config.localSiteVersion || {} });
+		const remoteSiteVersion = getSiteVersion(payload || {});
 
 		connectionPanel.classList.remove("is-hidden");
 		connectionBadge.textContent = isError
@@ -724,7 +772,11 @@
 			return;
 		}
 
-		renderMeta(connectionMeta, []);
+		renderMeta(connectionMeta, [
+			{ label: config.strings.localSiteVersion || "Local site version", value: formatSiteVersion(localSiteVersion) },
+			{ label: config.strings.liveSiteVersion || "Live site version", value: formatSiteVersion(remoteSiteVersion) },
+			{ label: config.strings.versionState || "Version state", value: getSiteVersionRelationship(payload || {}) },
+		]);
 	};
 
 	const updateRemoteUpdateControls = () => {
@@ -1116,6 +1168,9 @@
 
 	const renderStatus = (status) => {
 		currentStatus = status || currentStatus;
+		if (currentStatus?.siteVersion) {
+			config.localSiteVersion = currentStatus.siteVersion;
+		}
 		statusBadge.textContent = getStatusBadge(status);
 		statusSummary.textContent = buildStatusSummary(status);
 

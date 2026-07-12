@@ -26,6 +26,7 @@ const SYNCHY_SYNC_LAST_TIME_OPTION = 'syncy_last_sync_time';
 const SYNCHY_SYNC_STATUS_OPTION = 'synchy_sync_status';
 const SYNCHY_SYNC_JOB_OPTION = 'synchy_sync_job';
 const SYNCHY_SYNC_CONNECTION_STATE_OPTION = 'synchy_sync_connection_state';
+const SYNCHY_SITE_SYNC_SITE_ID_OPTION = 'synchy_site_sync_site_id';
 const SYNCHY_IMPORT_OPTIONS = 'synchy_import_options';
 const SYNCHY_IMPORT_RESULT_OPTION = 'synchy_import_result';
 const SYNCHY_NOTICE_PREFIX = 'synchy_admin_notice_';
@@ -1330,6 +1331,85 @@ function synchy_set_sync_status(array $status): void
 	update_option(SYNCHY_SYNC_STATUS_OPTION, $status, false);
 }
 
+function synchy_get_site_sync_site_id(): string
+{
+	$site_id = (string) get_option(SYNCHY_SITE_SYNC_SITE_ID_OPTION, '');
+
+	if ($site_id === '') {
+		$site_id = function_exists('wp_generate_uuid4') ? wp_generate_uuid4() : md5(home_url('/') . '|' . wp_salt('auth'));
+		update_option(SYNCHY_SITE_SYNC_SITE_ID_OPTION, $site_id, false);
+	}
+
+	return $site_id;
+}
+
+function synchy_normalize_site_sync_version($version): array
+{
+	$version = is_array($version) ? $version : [];
+
+	return [
+		'siteId' => (string) ($version['siteId'] ?? synchy_get_site_sync_site_id()),
+		'number' => max(0, (int) ($version['number'] ?? 0)),
+		'syncId' => sanitize_text_field((string) ($version['syncId'] ?? '')),
+		'sourceUrl' => esc_url_raw((string) ($version['sourceUrl'] ?? '')),
+		'destinationUrl' => esc_url_raw((string) ($version['destinationUrl'] ?? '')),
+		'updatedAt' => sanitize_text_field((string) ($version['updatedAt'] ?? '')),
+		'updatedBy' => sanitize_text_field((string) ($version['updatedBy'] ?? '')),
+		'mode' => sanitize_key((string) ($version['mode'] ?? '')),
+	];
+}
+
+function synchy_get_site_sync_version(): array
+{
+	$status = synchy_get_sync_status();
+
+	if (!empty($status['siteVersion']) && is_array($status['siteVersion'])) {
+		return synchy_normalize_site_sync_version($status['siteVersion']);
+	}
+
+	$state = synchy_get_sync_state();
+
+	if (!empty($state['site_version']) && is_array($state['site_version'])) {
+		return synchy_normalize_site_sync_version($state['site_version']);
+	}
+
+	return synchy_normalize_site_sync_version([
+		'siteId' => synchy_get_site_sync_site_id(),
+		'number' => 0,
+		'sourceUrl' => home_url('/'),
+	]);
+}
+
+function synchy_build_next_site_sync_version(array $options, string $sync_id, string $mode): array
+{
+	$current = synchy_get_site_sync_version();
+	$user = wp_get_current_user();
+
+	return synchy_normalize_site_sync_version([
+		'siteId' => (string) ($current['siteId'] ?? synchy_get_site_sync_site_id()),
+		'number' => max(0, (int) ($current['number'] ?? 0)) + 1,
+		'syncId' => $sync_id,
+		'sourceUrl' => home_url('/'),
+		'destinationUrl' => (string) ($options['destination_url'] ?? ''),
+		'updatedAt' => gmdate('c'),
+		'updatedBy' => $user instanceof WP_User ? (string) $user->user_login : '',
+		'mode' => $mode,
+	]);
+}
+
+function synchy_apply_site_sync_version(array $version): array
+{
+	$version = synchy_normalize_site_sync_version($version);
+	$status = synchy_get_sync_status();
+	$status['siteVersion'] = $version;
+	synchy_set_sync_status($status);
+	$state = synchy_get_sync_state();
+	$state['site_version'] = $version;
+	synchy_write_sync_state($state);
+
+	return $version;
+}
+
 function synchy_reset_sync_state(): void
 {
 	delete_option(SYNCHY_SYNC_JOB_OPTION);
@@ -1818,6 +1898,8 @@ function synchy_mark_sync_baseline_complete(array $raw_options)
 		isset($state['file_paths']) && is_array($state['file_paths']) ? $state['file_paths'] : [],
 		synchy_get_sync_current_file_paths_by_scope(synchy_get_selected_sync_scope_ids($options, 'files'))
 	);
+	$site_version = synchy_build_next_site_sync_version($options, 'manual-baseline-' . gmdate('YmdHis', $sync_time), 'baseline');
+	$state['site_version'] = $site_version;
 
 	$write = synchy_write_sync_state($state);
 
@@ -1837,6 +1919,7 @@ function synchy_mark_sync_baseline_complete(array $raw_options)
 		'durationSeconds' => 0,
 		'selectedScopes' => $selected_scope_ids,
 		'selectedScopeLabels' => synchy_get_sync_scope_labels($selected_scope_ids),
+		'siteVersion' => $site_version,
 		'message' => sprintf(
 			/* translators: %s: comma-separated scope labels */
 			__('Manual baseline marked for %s. The next Sync preview will calculate deltas from this baseline.', 'synchy'),
@@ -3093,6 +3176,11 @@ function synchy_build_sync_manifest(array $file_delta, array $db_delta, int $syn
 
 	$tables = [];
 	$deleted_paths = [];
+	$site_version = isset($file_delta['site_version']) && is_array($file_delta['site_version'])
+		? synchy_normalize_site_sync_version($file_delta['site_version'])
+		: (isset($db_delta['site_version']) && is_array($db_delta['site_version'])
+			? synchy_normalize_site_sync_version($db_delta['site_version'])
+			: []);
 
 	foreach ($db_delta['tables'] as $table => $data) {
 		if (synchy_is_ajcore_protected_table((string) $table)) {
@@ -3114,6 +3202,7 @@ function synchy_build_sync_manifest(array $file_delta, array $db_delta, int $syn
 		'mode' => (string) ($db_delta['mode'] ?? $file_delta['mode'] ?? 'delta'),
 		'syncedAt' => $sync_time,
 		'syncId' => (string) ($file_delta['sync_id'] ?? $db_delta['sync_id'] ?? ''),
+		'siteVersion' => $site_version,
 		'source' => [
 			'homeUrl' => home_url('/'),
 			'siteUrl' => site_url('/'),
@@ -3406,6 +3495,11 @@ function synchy_prepare_sync_payload(array $options, array $selection = [], bool
 
 	$sync_time = time();
 	$manifest = synchy_build_sync_manifest($file_delta, $db_delta, $sync_time, $options);
+	$sync_id = (string) ($manifest['syncId'] ?? ($file_delta['sync_id'] ?? $db_delta['sync_id'] ?? ''));
+	$site_version = synchy_build_next_site_sync_version($options, $sync_id, (string) ($manifest['mode'] ?? 'delta'));
+	$file_delta['site_version'] = $site_version;
+	$db_delta['site_version'] = $site_version;
+	$manifest['siteVersion'] = $site_version;
 	$baseline_scope_ids = array_values(array_unique(array_merge(
 		(array) ($file_delta['baseline_scopes'] ?? []),
 		(array) ($db_delta['baseline_scopes'] ?? [])
@@ -3431,10 +3525,12 @@ function synchy_prepare_sync_payload(array $options, array $selection = [], bool
 			isset($state['file_paths']) && is_array($state['file_paths']) ? $state['file_paths'] : [],
 			(array) ($file_delta['current_file_paths'] ?? [])
 		),
+		'site_version' => $site_version,
 	];
 
 	$summary = [
 		'mode' => $baseline_scope_ids !== [] ? 'baseline' : 'delta',
+		'siteVersion' => $site_version,
 		'sourcePath' => wp_normalize_path(WP_CONTENT_DIR),
 		'destinationPath' => (string) ($options['destination_url'] ?? ''),
 		'filesCount' => (int) ($manifest['files']['count'] ?? 0),
@@ -6646,6 +6742,54 @@ function synchy_get_remote_sync_status(array $options)
 	return $response;
 }
 
+function synchy_validate_sync_version_compatibility(array $options)
+{
+	$remote_status = synchy_get_remote_sync_status($options);
+
+	if (is_wp_error($remote_status)) {
+		return $remote_status;
+	}
+
+	$local_version = synchy_get_site_sync_version();
+	$remote_version = [];
+
+	if (!empty($remote_status['siteVersion']) && is_array($remote_status['siteVersion'])) {
+		$remote_version = synchy_normalize_site_sync_version($remote_status['siteVersion']);
+	} elseif (!empty($remote_status['status']['siteVersion']) && is_array($remote_status['status']['siteVersion'])) {
+		$remote_version = synchy_normalize_site_sync_version($remote_status['status']['siteVersion']);
+	}
+
+	if ($remote_version === []) {
+		return true;
+	}
+
+	$local_number = max(0, (int) ($local_version['number'] ?? 0));
+	$remote_number = max(0, (int) ($remote_version['number'] ?? 0));
+	$local_site_id = (string) ($local_version['siteId'] ?? '');
+	$remote_site_id = (string) ($remote_version['siteId'] ?? '');
+
+	if ($local_number > 0 && $remote_number > 0 && $local_site_id !== '' && $remote_site_id !== '' && $local_site_id !== $remote_site_id) {
+		return new WP_Error(
+			'synchy_sync_version_lineage_mismatch',
+			__('The destination site has a different Sync version lineage. Run a baseline/full Sync only after confirming this is the correct destination.', 'synchy')
+		);
+	}
+
+	if ($remote_number > $local_number) {
+		return new WP_Error(
+			'synchy_sync_destination_newer',
+			sprintf(
+				/* translators: 1: destination version number, 2: local version number */
+				__('The destination site is newer than local Sync state (live v%1$d, local v%2$d). Reverse sync live changes back to DDEV before pushing.', 'synchy'),
+				$remote_number,
+				$local_number
+			)
+		);
+	}
+
+	return true;
+}
+
 function synchy_get_sync_remote_route_url(array $options): string
 {
 	return trailingslashit((string) $options['destination_url']) . 'wp-json/syncy/v1/sync';
@@ -6831,6 +6975,10 @@ function synchy_build_sync_batch_request_headers(array $job, array $batch): arra
 function synchy_build_sync_batch_package(array $options, array $job, array $batch)
 {
 	$batch_payload = synchy_read_full_sync_batch_payload($batch);
+	$next_state = synchy_read_full_sync_next_state($job);
+	$site_version = isset($next_state['site_version']) && is_array($next_state['site_version'])
+		? synchy_normalize_site_sync_version($next_state['site_version'])
+		: [];
 	$temp_dir = synchy_prepare_sync_temp_dir('full-batch');
 
 	if (is_wp_error($temp_dir)) {
@@ -6845,6 +6993,7 @@ function synchy_build_sync_batch_package(array $options, array $job, array $batc
 		'baseline_scopes' => [(string) ($batch['scope_id'] ?? '')],
 		'selected_scopes' => [(string) ($batch['scope_id'] ?? '')],
 		'sync_id' => (string) ($job['sync_id'] ?? ''),
+		'site_version' => $site_version,
 	];
 	$db_tables = (array) ($batch_payload['tables'] ?? []);
 	$db_total_rows = 0;
@@ -6861,6 +7010,7 @@ function synchy_build_sync_batch_package(array $options, array $job, array $batc
 		'current_fingerprints' => [],
 		'baseline_scopes' => [(string) ($batch['scope_id'] ?? '')],
 		'selected_scopes' => [(string) ($batch['scope_id'] ?? '')],
+		'site_version' => $site_version,
 	];
 	$sync_time = min(time(), max(0, (int) ($job['sync_time_base'] ?? time())) + max(1, (int) ($batch['sequence'] ?? 1)));
 	$written = synchy_write_sync_package_from_parts($file_delta, $db_delta, $sync_time, $options, $temp_dir);
@@ -6936,6 +7086,9 @@ function synchy_finalize_full_sync_success(array $job, array $options, float $st
 
 	$state_written = synchy_write_sync_state($next_state);
 	$sync_time = max(0, (int) ($next_state['last_sync_time'] ?? time()));
+	$site_version = isset($next_state['site_version']) && is_array($next_state['site_version'])
+		? synchy_normalize_site_sync_version($next_state['site_version'])
+		: synchy_get_site_sync_version();
 	synchy_set_sync_last_time($sync_time);
 	$duration = round(microtime(true) - $started_at, 2);
 	$job['status'] = 'complete';
@@ -6963,6 +7116,7 @@ function synchy_finalize_full_sync_success(array $job, array $options, float $st
 		'selectedScopeLabels' => (array) ($job['selected_scope_labels'] ?? []),
 		'at' => gmdate('c'),
 		'lastSyncTime' => $sync_time,
+		'siteVersion' => $site_version,
 		'message' => $job['message'],
 	];
 
@@ -8558,6 +8712,9 @@ function synchy_handle_remote_sync_request(WP_REST_Request $request)
 		$files_synced = (int) ($manifest['files']['count'] ?? 0);
 		$db_rows_synced = (int) ($prepared_sql['totalRows'] ?? 0);
 		$mode = (string) ($manifest['mode'] ?? ($synced_at > 0 ? 'delta' : 'baseline'));
+		$site_version = !empty($manifest['siteVersion']) && is_array($manifest['siteVersion'])
+			? synchy_normalize_site_sync_version($manifest['siteVersion'])
+			: synchy_get_site_sync_version();
 
 		synchy_set_sync_last_time($synced_at);
 		synchy_set_sync_status([
@@ -8569,6 +8726,7 @@ function synchy_handle_remote_sync_request(WP_REST_Request $request)
 			'destinationUrl' => home_url('/'),
 			'at' => gmdate('c'),
 			'lastSyncTime' => $synced_at,
+			'siteVersion' => $site_version,
 			'message' => sprintf(
 				/* translators: 1: file count, 2: row count, 3: deleted file count */
 				__('Applied Sync with %1$d files, %2$d DB rows, and %3$d deleted files on the destination site.', 'synchy'),
@@ -8581,6 +8739,7 @@ function synchy_handle_remote_sync_request(WP_REST_Request $request)
 			'deletedFiles' => (int) ($deleted_result['deletedFiles'] ?? 0),
 			'deletedDirs' => (int) ($deleted_result['deletedDirs'] ?? 0),
 		]);
+		synchy_apply_site_sync_version($site_version);
 
 		synchy_clear_sync_caches();
 
@@ -8590,6 +8749,7 @@ function synchy_handle_remote_sync_request(WP_REST_Request $request)
 			'filesSynced' => $files_synced,
 			'dbRowsSynced' => $db_rows_synced,
 			'lastSyncTime' => $synced_at,
+			'siteVersion' => $site_version,
 			'message' => sprintf(
 				/* translators: 1: file count, 2: row count, 3: deleted file count */
 				__('Synced %1$d files, %2$d DB rows, and %3$d deleted files on the destination site.', 'synchy'),
@@ -8667,6 +8827,19 @@ function synchy_run_sync_changes(array $raw_options)
 		]);
 
 		return $error;
+	}
+
+	$version_check = synchy_validate_sync_version_compatibility($options);
+
+	if (is_wp_error($version_check)) {
+		synchy_set_sync_status([
+			'status' => 'error',
+			'message' => $version_check->get_error_message(),
+			'at' => gmdate('c'),
+			'siteVersion' => synchy_get_site_sync_version(),
+		]);
+
+		return $version_check;
 	}
 
 	$started = microtime(true);
@@ -8759,6 +8932,7 @@ function synchy_run_sync_changes(array $raw_options)
 			'at' => gmdate('c'),
 			'message' => __('No changes detected since the last successful Sync.', 'synchy'),
 			'lastSyncTime' => synchy_get_sync_last_time(),
+			'siteVersion' => synchy_get_site_sync_version(),
 		];
 
 		synchy_set_sync_status($status);
@@ -8825,6 +8999,9 @@ function synchy_run_sync_changes(array $raw_options)
 
 	$state_written = synchy_write_sync_state($next_state);
 	$sync_time = max(0, (int) ($next_state['last_sync_time'] ?? time()));
+	$site_version = isset($next_state['site_version']) && is_array($next_state['site_version'])
+		? synchy_normalize_site_sync_version($next_state['site_version'])
+		: synchy_get_site_sync_version();
 	synchy_set_sync_last_time($sync_time);
 
 	$duration = round(microtime(true) - $started, 2);
@@ -8849,6 +9026,7 @@ function synchy_run_sync_changes(array $raw_options)
 		'selectedScopeLabels' => (array) ($summary['selectedScopeLabels'] ?? []),
 		'at' => gmdate('c'),
 		'lastSyncTime' => $sync_time,
+		'siteVersion' => $site_version,
 		'message' => sprintf(
 			/* translators: 1: file count, 2: db row count, 3: duration */
 			__('Synced %1$d files and %2$d DB rows in %3$s.', 'synchy'),
@@ -12310,6 +12488,7 @@ add_action('rest_api_init', function (): void {
 						'name' => get_bloginfo('name'),
 						'siteUrl' => home_url('/'),
 						'pluginVersion' => synchy_get_display_version(),
+						'siteVersion' => synchy_get_site_sync_version(),
 						'wordpressVersion' => get_bloginfo('version'),
 						'authenticatedAs' => $user instanceof WP_User ? (string) $user->user_login : '',
 						'receiverMode' => 'root_installer_package_upload',
@@ -12329,6 +12508,7 @@ add_action('rest_api_init', function (): void {
 				return rest_ensure_response(
 					[
 						'status' => synchy_get_sync_status(),
+						'siteVersion' => synchy_get_site_sync_version(),
 					]
 				);
 			},
@@ -12657,6 +12837,7 @@ add_action('admin_enqueue_scripts', function (string $hook_suffix): void {
 				'ajaxUrl' => admin_url('admin-ajax.php'),
 				'nonce' => wp_create_nonce('synchy_sync_ajax'),
 				'localPluginVersion' => synchy_get_display_version(),
+				'localSiteVersion' => synchy_get_site_sync_version(),
 				'currentJob' => synchy_build_sync_job_response(synchy_get_visible_sync_job()),
 				'currentStatus' => synchy_get_sync_status(),
 				'connectionState' => synchy_get_current_sync_connection_state(synchy_get_site_sync_options()),
@@ -12697,6 +12878,9 @@ add_action('admin_enqueue_scripts', function (string $hook_suffix): void {
 					'lastSync' => __('Last successful Sync', 'synchy'),
 					'destination' => __('Destination', 'synchy'),
 					'localPluginVersion' => __('Local Sentinel version', 'synchy'),
+					'localSiteVersion' => __('Local site version', 'synchy'),
+					'liveSiteVersion' => __('Live site version', 'synchy'),
+					'versionState' => __('Version state', 'synchy'),
 					'files' => __('Files', 'synchy'),
 					'dbRows' => __('DB rows', 'synchy'),
 					'duration' => __('Duration', 'synchy'),
