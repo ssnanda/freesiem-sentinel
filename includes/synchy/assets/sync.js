@@ -271,7 +271,7 @@
 		container.innerHTML = filtered
 			.map(
 				(item) =>
-					`<div><span class="synchy-export-meta__label">${escapeHtml(item.label)}</span><strong>${item.html ? item.value : escapeHtml(item.value)}</strong></div>`
+					`<div${item.className ? ` class="${escapeHtml(item.className)}"` : ""}><span class="synchy-export-meta__label">${escapeHtml(item.label)}</span><strong>${item.html ? item.value : escapeHtml(item.value)}</strong></div>`
 			)
 			.join("");
 	};
@@ -775,7 +775,7 @@
 		renderMeta(connectionMeta, [
 			{ label: config.strings.localSiteVersion || "Local site version", value: formatSiteVersion(localSiteVersion) },
 			{ label: config.strings.liveSiteVersion || "Live site version", value: formatSiteVersion(remoteSiteVersion) },
-			{ label: config.strings.versionState || "Version state", value: getSiteVersionRelationship(payload || {}) },
+			{ label: config.strings.versionState || "Version state", value: getSiteVersionRelationship(payload || {}), className: "synchy-detail-grid__wide" },
 		]);
 	};
 
@@ -802,6 +802,9 @@
 	const performConnectionTest = async () => {
 		try {
 			const data = await sendAjax("synchy_test_sync_connection");
+			if (data.localSiteVersion) {
+				config.localSiteVersion = data.localSiteVersion;
+			}
 			currentConnectionState = {
 				status: "connected",
 				message: config.strings.connectionReady || "Connection ready",

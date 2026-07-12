@@ -1410,6 +1410,29 @@ function synchy_apply_site_sync_version(array $version): array
 	return $version;
 }
 
+function synchy_maybe_adopt_remote_site_sync_version(array $remote_site): void
+{
+	if (empty($remote_site['siteVersion']) || !is_array($remote_site['siteVersion'])) {
+		return;
+	}
+
+	$local_version = synchy_get_site_sync_version();
+
+	if (max(0, (int) ($local_version['number'] ?? 0)) > 0) {
+		return;
+	}
+
+	$remote_version = synchy_normalize_site_sync_version($remote_site['siteVersion']);
+	$remote_source_url = untrailingslashit((string) ($remote_version['sourceUrl'] ?? ''));
+	$local_home_url = untrailingslashit(home_url('/'));
+
+	if ($remote_source_url === '' || $local_home_url === '' || $remote_source_url !== $local_home_url) {
+		return;
+	}
+
+	synchy_apply_site_sync_version($remote_version);
+}
+
 function synchy_reset_sync_state(): void
 {
 	delete_option(SYNCHY_SYNC_JOB_OPTION);
@@ -1926,6 +1949,7 @@ function synchy_mark_sync_baseline_complete(array $raw_options)
 			implode(', ', synchy_get_sync_scope_labels($selected_scope_ids))
 		),
 	]);
+	synchy_apply_site_sync_version($site_version);
 
 	return [
 		'status' => synchy_get_sync_status(),
@@ -6357,6 +6381,8 @@ function synchy_test_site_sync_connection(array $options)
 		return new WP_Error('synchy_site_sync_invalid_ping', __('The destination site responded, but it did not look like a Backup & Restore receiver.', 'synchy'));
 	}
 
+	synchy_maybe_adopt_remote_site_sync_version($response);
+
 	return $response;
 }
 
@@ -7125,6 +7151,7 @@ function synchy_finalize_full_sync_success(array $job, array $options, float $st
 	}
 
 	synchy_set_sync_status($status);
+	synchy_apply_site_sync_version($site_version);
 
 	if (!empty($job['temp_dir']) && is_dir((string) $job['temp_dir'])) {
 		synchy_rrmdir((string) $job['temp_dir']);
@@ -9042,6 +9069,7 @@ function synchy_run_sync_changes(array $raw_options)
 	}
 
 	synchy_set_sync_status($status);
+	synchy_apply_site_sync_version($site_version);
 
 	return $status;
 }
@@ -12125,7 +12153,10 @@ add_action('wp_ajax_synchy_test_sync_connection', function (): void {
 	}
 
 	synchy_store_sync_connection_success($options, $result);
-	wp_send_json_success(['remoteSite' => $result]);
+	wp_send_json_success([
+		'remoteSite' => $result,
+		'localSiteVersion' => synchy_get_site_sync_version(),
+	]);
 });
 
 add_action('wp_ajax_synchy_update_remote_synchy', function (): void {

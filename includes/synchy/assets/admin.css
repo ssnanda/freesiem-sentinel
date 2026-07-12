@@ -1346,16 +1346,29 @@
 .synchy-detail-grid strong {
 	margin: 0;
 	font-size: 12px;
-	overflow-wrap: anywhere;
+	min-width: 0;
+	overflow-wrap: break-word;
 }
 
 .synchy-detail-grid span {
+	flex: 0 0 auto;
 	color: #60747a;
+	white-space: nowrap;
 }
 
 .synchy-detail-grid strong {
 	color: #12323b;
 	text-align: right;
+}
+
+.synchy-detail-grid__wide {
+	grid-column: 1 / -1;
+	align-items: flex-start !important;
+}
+
+.synchy-detail-grid__wide strong {
+	max-width: 100%;
+	line-height: 1.35;
 }
 
 .synchy-update-row {
