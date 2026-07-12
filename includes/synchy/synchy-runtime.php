@@ -1433,6 +1433,42 @@ function synchy_maybe_adopt_remote_site_sync_version(array $remote_site): void
 	synchy_apply_site_sync_version($remote_version);
 }
 
+function synchy_get_site_sync_version_display_label(): string
+{
+	$version = synchy_get_site_sync_version();
+	$number = max(0, (int) ($version['number'] ?? 0));
+
+	return $number > 0
+		? sprintf(__('Site Sync v%d', 'synchy'), $number)
+		: __('Site Sync unversioned', 'synchy');
+}
+
+function synchy_get_site_sync_version_display_title(): string
+{
+	$version = synchy_get_site_sync_version();
+	$parts = [synchy_get_site_sync_version_display_label()];
+
+	if (!empty($version['updatedAt'])) {
+		$timestamp = strtotime((string) $version['updatedAt']);
+		$parts[] = sprintf(
+			__('Updated: %s', 'synchy'),
+			$timestamp
+				? get_date_from_gmt(gmdate('Y-m-d H:i:s', $timestamp), get_option('date_format') . ' ' . get_option('time_format'))
+				: (string) $version['updatedAt']
+		);
+	}
+
+	if (!empty($version['updatedBy'])) {
+		$parts[] = sprintf(__('By: %s', 'synchy'), (string) $version['updatedBy']);
+	}
+
+	if (!empty($version['mode'])) {
+		$parts[] = sprintf(__('Mode: %s', 'synchy'), (string) $version['mode']);
+	}
+
+	return implode(' | ', $parts);
+}
+
 function synchy_reset_sync_state(): void
 {
 	delete_option(SYNCHY_SYNC_JOB_OPTION);
@@ -4420,6 +4456,75 @@ add_action('admin_notices', function (): void {
 	}
 
 	synchy_render_notice();
+});
+
+add_action('admin_bar_menu', function (WP_Admin_Bar $admin_bar): void {
+	if (!current_user_can('manage_options')) {
+		return;
+	}
+
+	$admin_bar->add_node([
+		'id' => 'synchy-site-sync-version',
+		'title' => esc_html(synchy_get_site_sync_version_display_label()),
+		'href' => admin_url('admin.php?page=synchy-site-sync'),
+		'meta' => [
+			'title' => synchy_get_site_sync_version_display_title(),
+		],
+	]);
+}, 90);
+
+add_action('wp_footer', function (): void {
+	if (is_admin() || !current_user_can('manage_options')) {
+		return;
+	}
+
+	$label = synchy_get_site_sync_version_display_label();
+	$title = synchy_get_site_sync_version_display_title();
+	?>
+	<style>
+		.synchy-site-version-badge {
+			position: fixed;
+			right: 16px;
+			bottom: 16px;
+			z-index: 99999;
+			display: inline-flex;
+			align-items: center;
+			gap: 8px;
+			padding: 8px 11px;
+			border: 1px solid rgba(18, 50, 59, 0.18);
+			border-radius: 999px;
+			background: rgba(255, 255, 255, 0.96);
+			box-shadow: 0 10px 24px rgba(18, 35, 28, 0.16);
+			color: #12323b;
+			font: 700 12px/1.2 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+			text-decoration: none;
+		}
+		.synchy-site-version-badge:hover,
+		.synchy-site-version-badge:focus {
+			color: #12323b;
+			text-decoration: none;
+			border-color: rgba(31, 143, 95, 0.45);
+			box-shadow: 0 12px 28px rgba(18, 35, 28, 0.2);
+		}
+		.synchy-site-version-badge__dot {
+			width: 8px;
+			height: 8px;
+			border-radius: 50%;
+			background: #19cb78;
+		}
+		@media (max-width: 782px) {
+			.synchy-site-version-badge {
+				right: 10px;
+				bottom: 10px;
+				max-width: calc(100vw - 20px);
+			}
+		}
+	</style>
+	<a class="synchy-site-version-badge" href="<?php echo esc_url(admin_url('admin.php?page=synchy-site-sync')); ?>" title="<?php echo esc_attr($title); ?>">
+		<span class="synchy-site-version-badge__dot" aria-hidden="true"></span>
+		<span><?php echo esc_html($label); ?></span>
+	</a>
+	<?php
 });
 
 function synchy_get_last_export(): array
