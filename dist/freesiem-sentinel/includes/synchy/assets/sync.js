@@ -33,6 +33,9 @@
 	const connectionMeta = document.querySelector("[data-synchy-sync-connection-meta]");
 	const updateRemoteButton = document.querySelector("[data-synchy-update-remote-synchy]");
 	const updateRemoteNote = document.querySelector("[data-synchy-update-remote-note]");
+	const overrideVersionInput = document.querySelector("[data-synchy-override-site-version-input]");
+	const overrideVersionButton = document.querySelector("[data-synchy-override-site-version-apply]");
+	const overrideVersionMessage = document.querySelector("[data-synchy-override-site-version-message]");
 	const previewBadge = document.querySelector("[data-synchy-sync-preview-badge]");
 	const previewMessage = document.querySelector("[data-synchy-sync-preview-message]");
 	const previewBatchCounter = document.querySelector("[data-synchy-sync-batch-counter]");
@@ -182,22 +185,34 @@
 
 	const getSiteVersion = (source) => {
 		const version = source?.siteVersion || {};
+		// Older destinations may still report the legacy flat `number` counter
+		// instead of major/minor/patch; fold it into patch so comparisons keep working.
+		const hasSemverParts = version.major !== undefined || version.minor !== undefined || version.patch !== undefined;
+		const legacyNumber = Math.max(0, Number.parseInt(version.number, 10) || 0);
+		const major = Math.max(0, Number.parseInt(version.major, 10) || 0);
+		const minor = Math.max(0, Number.parseInt(version.minor, 10) || 0);
+		const patch = hasSemverParts ? Math.max(0, Number.parseInt(version.patch, 10) || 0) : legacyNumber;
 
 		return {
 			siteId: String(version.siteId || ""),
-			number: Number(version.number || 0),
+			major,
+			minor,
+			patch,
+			semver: `${major}.${minor}.${patch}`,
+			isSet: major > 0 || minor > 0 || patch > 0,
 			syncId: String(version.syncId || ""),
 			sourceUrl: String(version.sourceUrl || ""),
 			destinationUrl: String(version.destinationUrl || ""),
 			updatedAt: String(version.updatedAt || ""),
 			updatedBy: String(version.updatedBy || ""),
 			mode: String(version.mode || ""),
+			overridden: Boolean(version.overridden),
 		};
 	};
 
 	const formatSiteVersion = (version) => {
 		const normalized = getSiteVersion({ siteVersion: version });
-		const label = normalized.number > 0 ? `v${normalized.number}` : "unversioned";
+		const label = normalized.isSet ? `v${normalized.semver}` : "unversioned";
 		const detail = normalized.updatedAt ? ` (${formatDateTime(normalized.updatedAt)})` : "";
 
 		return `${label}${detail}`;
@@ -207,7 +222,7 @@
 		const local = getSiteVersion({ siteVersion: config.localSiteVersion || {} });
 		const remote = getSiteVersion(remoteSite || {});
 
-		if (local.number <= 0 && remote.number <= 0) {
+		if (!local.isSet && !remote.isSet) {
 			return "No site sync version has been recorded yet.";
 		}
 
@@ -215,15 +230,17 @@
 			return "Different site version lineage. Run a baseline/full sync before trusting reverse sync.";
 		}
 
-		if (local.number === remote.number) {
+		const comparison = compareVersions(local.semver, remote.semver);
+
+		if (comparison === 0) {
 			return `Same site version (${formatSiteVersion(local)}).`;
 		}
 
-		if (local.number > remote.number) {
+		if (comparison > 0) {
 			return `Local is ahead (${formatSiteVersion(local)} vs live ${formatSiteVersion(remote)}).`;
 		}
 
-		return `Live is newer (${formatSiteVersion(remote)} vs local ${formatSiteVersion(local)}). Reverse sync can bring live changes back.`;
+		return `Live is newer (${formatSiteVersion(remote)} vs local ${formatSiteVersion(local)}). Reverse sync can bring live changes back, or use Override version below if the live version is actually stale.`;
 	};
 
 	const refreshRemoteVersionUntilCurrent = (attempt = 0) => {
@@ -876,6 +893,60 @@
 			} else {
 				setBusy(false);
 			}
+		}
+	};
+
+	const setOverrideVersionMessage = (text, tone) => {
+		if (!overrideVersionMessage) {
+			return;
+		}
+
+		overrideVersionMessage.textContent = text || "";
+		overrideVersionMessage.classList.remove("is-success", "is-error");
+
+		if (tone) {
+			overrideVersionMessage.classList.add(tone);
+		}
+
+		overrideVersionMessage.classList.toggle("is-hidden", !text);
+	};
+
+	const overrideSiteVersion = async () => {
+		if (!overrideVersionInput || !overrideVersionButton) {
+			return;
+		}
+
+		const rawVersion = overrideVersionInput.value.trim();
+
+		if (!/^\d+\.\d+\.\d+$/.test(rawVersion)) {
+			setOverrideVersionMessage(config.strings.overrideVersionInvalid || "Enter a version in major.minor.patch format, e.g. 1.0.1.", "is-error");
+			return;
+		}
+
+		if (!window.confirm(config.strings.overrideVersionConfirm || "Manually set the local site version? This does not change anything on the destination site.")) {
+			return;
+		}
+
+		overrideVersionButton.disabled = true;
+		setOverrideVersionMessage(config.strings.overrideVersionApplying || "Setting version...", "");
+
+		try {
+			const data = await sendAjax("synchy_override_site_sync_version", { version: rawVersion });
+
+			if (data.localSiteVersion) {
+				config.localSiteVersion = data.localSiteVersion;
+			}
+
+			overrideVersionInput.value = "";
+			setOverrideVersionMessage(data.message || "Local site version updated.", "is-success");
+
+			if (currentConnectionState?.status === "connected") {
+				renderConnectionResult(currentConnectionState.remoteSite || {}, false);
+			}
+		} catch (error) {
+			setOverrideVersionMessage(error.message, "is-error");
+		} finally {
+			overrideVersionButton.disabled = false;
 		}
 	};
 
@@ -1711,6 +1782,9 @@
 	testButton.addEventListener("click", runTestConnection);
 	if (updateRemoteButton) {
 		updateRemoteButton.addEventListener("click", updateRemoteSynchy);
+	}
+	if (overrideVersionButton) {
+		overrideVersionButton.addEventListener("click", overrideSiteVersion);
 	}
 	previewButton.addEventListener("click", () => runPreview("delta"));
 	fullSyncButton.addEventListener("click", () => {

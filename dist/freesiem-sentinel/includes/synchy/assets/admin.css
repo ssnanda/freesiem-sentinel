@@ -1383,6 +1383,32 @@
 	margin: 0;
 }
 
+.synchy-override-version-row {
+	margin-top: 14px;
+	padding-top: 14px;
+	border-top: 1px solid rgba(0, 0, 0, 0.08);
+}
+
+.synchy-override-version-row .synchy-input-row {
+	margin-top: 4px;
+}
+
+.synchy-override-version-row #synchy-override-site-version {
+	max-width: 140px;
+}
+
+.synchy-override-version-row .synchy-field-note {
+	margin-top: 6px;
+}
+
+.synchy-override-version-row .synchy-field-note.is-success {
+	color: #1a7f37;
+}
+
+.synchy-override-version-row .synchy-field-note.is-error {
+	color: #c0341d;
+}
+
 .synchy-sync-action-row {
 	margin: 14px 0 8px;
 }

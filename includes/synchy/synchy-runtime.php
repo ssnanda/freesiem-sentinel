@@ -1347,15 +1347,67 @@ function synchy_normalize_site_sync_version($version): array
 {
 	$version = is_array($version) ? $version : [];
 
+	// Legacy records only stored a flat incrementing `number` (v13, v14, ...).
+	// Fold that into the patch slot so existing sites keep their ordering
+	// once they move to semver-style major.minor.patch versions.
+	$has_semver_parts = isset($version['major']) || isset($version['minor']) || isset($version['patch']);
+	$legacy_number = max(0, (int) ($version['number'] ?? 0));
+
 	return [
 		'siteId' => (string) ($version['siteId'] ?? synchy_get_site_sync_site_id()),
-		'number' => max(0, (int) ($version['number'] ?? 0)),
+		'major' => max(0, (int) ($version['major'] ?? 0)),
+		'minor' => max(0, (int) ($version['minor'] ?? 0)),
+		'patch' => $has_semver_parts ? max(0, (int) ($version['patch'] ?? 0)) : $legacy_number,
 		'syncId' => sanitize_text_field((string) ($version['syncId'] ?? '')),
 		'sourceUrl' => esc_url_raw((string) ($version['sourceUrl'] ?? '')),
 		'destinationUrl' => esc_url_raw((string) ($version['destinationUrl'] ?? '')),
 		'updatedAt' => sanitize_text_field((string) ($version['updatedAt'] ?? '')),
 		'updatedBy' => sanitize_text_field((string) ($version['updatedBy'] ?? '')),
 		'mode' => sanitize_key((string) ($version['mode'] ?? '')),
+		'overridden' => !empty($version['overridden']),
+	];
+}
+
+function synchy_site_sync_version_is_set(array $version): bool
+{
+	return ((int) ($version['major'] ?? 0)) > 0
+		|| ((int) ($version['minor'] ?? 0)) > 0
+		|| ((int) ($version['patch'] ?? 0)) > 0;
+}
+
+function synchy_site_sync_version_string(array $version): string
+{
+	return sprintf(
+		'%d.%d.%d',
+		max(0, (int) ($version['major'] ?? 0)),
+		max(0, (int) ($version['minor'] ?? 0)),
+		max(0, (int) ($version['patch'] ?? 0))
+	);
+}
+
+/**
+ * Returns <0 if $a is older than $b, 0 if equal, >0 if $a is newer than $b.
+ */
+function synchy_compare_site_sync_versions(array $a, array $b): int
+{
+	return version_compare(synchy_site_sync_version_string($a), synchy_site_sync_version_string($b));
+}
+
+function synchy_parse_site_sync_version_string(string $raw)
+{
+	$raw = trim($raw);
+
+	if (!preg_match('/^(\d+)\.(\d+)\.(\d+)$/', $raw, $matches)) {
+		return new WP_Error(
+			'synchy_invalid_site_sync_version',
+			__('Enter a version in major.minor.patch format, e.g. 1.0.1.', 'synchy')
+		);
+	}
+
+	return [
+		'major' => (int) $matches[1],
+		'minor' => (int) $matches[2],
+		'patch' => (int) $matches[3],
 	];
 }
 
@@ -1375,7 +1427,9 @@ function synchy_get_site_sync_version(): array
 
 	return synchy_normalize_site_sync_version([
 		'siteId' => synchy_get_site_sync_site_id(),
-		'number' => 0,
+		'major' => 0,
+		'minor' => 0,
+		'patch' => 0,
 		'sourceUrl' => home_url('/'),
 	]);
 }
@@ -1387,13 +1441,45 @@ function synchy_build_next_site_sync_version(array $options, string $sync_id, st
 
 	return synchy_normalize_site_sync_version([
 		'siteId' => (string) ($current['siteId'] ?? synchy_get_site_sync_site_id()),
-		'number' => max(0, (int) ($current['number'] ?? 0)) + 1,
+		'major' => max(0, (int) ($current['major'] ?? 0)),
+		'minor' => max(0, (int) ($current['minor'] ?? 0)),
+		'patch' => max(0, (int) ($current['patch'] ?? 0)) + 1,
 		'syncId' => $sync_id,
 		'sourceUrl' => home_url('/'),
 		'destinationUrl' => (string) ($options['destination_url'] ?? ''),
 		'updatedAt' => gmdate('c'),
 		'updatedBy' => $user instanceof WP_User ? (string) $user->user_login : '',
 		'mode' => $mode,
+	]);
+}
+
+/**
+ * Manually pin the local site sync version, e.g. to correct drift when the
+ * live site reports a stale/older version than what's actually deployed.
+ */
+function synchy_override_site_sync_version(string $raw_version)
+{
+	$parsed = synchy_parse_site_sync_version_string($raw_version);
+
+	if (is_wp_error($parsed)) {
+		return $parsed;
+	}
+
+	$current = synchy_get_site_sync_version();
+	$user = wp_get_current_user();
+
+	return synchy_apply_site_sync_version([
+		'siteId' => (string) ($current['siteId'] ?? synchy_get_site_sync_site_id()),
+		'major' => $parsed['major'],
+		'minor' => $parsed['minor'],
+		'patch' => $parsed['patch'],
+		'syncId' => 'manual-override-' . gmdate('YmdHis'),
+		'sourceUrl' => home_url('/'),
+		'destinationUrl' => (string) ($current['destinationUrl'] ?? ''),
+		'updatedAt' => gmdate('c'),
+		'updatedBy' => $user instanceof WP_User ? (string) $user->user_login : '',
+		'mode' => 'override',
+		'overridden' => true,
 	]);
 }
 
@@ -1418,7 +1504,7 @@ function synchy_maybe_adopt_remote_site_sync_version(array $remote_site): void
 
 	$local_version = synchy_get_site_sync_version();
 
-	if (max(0, (int) ($local_version['number'] ?? 0)) > 0) {
+	if (synchy_site_sync_version_is_set($local_version)) {
 		return;
 	}
 
@@ -1436,10 +1522,9 @@ function synchy_maybe_adopt_remote_site_sync_version(array $remote_site): void
 function synchy_get_site_sync_version_display_label(): string
 {
 	$version = synchy_get_site_sync_version();
-	$number = max(0, (int) ($version['number'] ?? 0));
 
-	return $number > 0
-		? sprintf(__('Site Sync v%d', 'synchy'), $number)
+	return synchy_site_sync_version_is_set($version)
+		? sprintf(__('Site Sync v%s', 'synchy'), synchy_site_sync_version_string($version))
 		: __('Site Sync unversioned', 'synchy');
 }
 
@@ -6894,26 +6979,26 @@ function synchy_validate_sync_version_compatibility(array $options)
 		return true;
 	}
 
-	$local_number = max(0, (int) ($local_version['number'] ?? 0));
-	$remote_number = max(0, (int) ($remote_version['number'] ?? 0));
+	$local_is_set = synchy_site_sync_version_is_set($local_version);
+	$remote_is_set = synchy_site_sync_version_is_set($remote_version);
 	$local_site_id = (string) ($local_version['siteId'] ?? '');
 	$remote_site_id = (string) ($remote_version['siteId'] ?? '');
 
-	if ($local_number > 0 && $remote_number > 0 && $local_site_id !== '' && $remote_site_id !== '' && $local_site_id !== $remote_site_id) {
+	if ($local_is_set && $remote_is_set && $local_site_id !== '' && $remote_site_id !== '' && $local_site_id !== $remote_site_id) {
 		return new WP_Error(
 			'synchy_sync_version_lineage_mismatch',
 			__('The destination site has a different Sync version lineage. Run a baseline/full Sync only after confirming this is the correct destination.', 'synchy')
 		);
 	}
 
-	if ($remote_number > $local_number) {
+	if (synchy_compare_site_sync_versions($remote_version, $local_version) > 0) {
 		return new WP_Error(
 			'synchy_sync_destination_newer',
 			sprintf(
 				/* translators: 1: destination version number, 2: local version number */
-				__('The destination site is newer than local Sync state (live v%1$d, local v%2$d). Reverse sync live changes back to DDEV before pushing.', 'synchy'),
-				$remote_number,
-				$local_number
+				__('The destination site is newer than local Sync state (live v%1$s, local v%2$s). Reverse sync live changes back to DDEV before pushing, or override the local site version below if the live version is actually stale.', 'synchy'),
+				synchy_site_sync_version_string($remote_version),
+				synchy_site_sync_version_string($local_version)
 			)
 		);
 	}
@@ -11726,6 +11811,23 @@ function synchy_render_incremental_site_sync_page(array $current): void
 									?>
 								</p>
 							</div>
+
+							<div class="synchy-override-version-row">
+								<label class="synchy-label" for="synchy-override-site-version"><?php esc_html_e('Override version', 'synchy'); ?></label>
+								<div class="synchy-input-row">
+									<input
+										id="synchy-override-site-version"
+										type="text"
+										class="regular-text code"
+										placeholder="<?php esc_attr_e('e.g. 1.0.1', 'synchy'); ?>"
+										pattern="\d+\.\d+\.\d+"
+										data-synchy-override-site-version-input
+									/>
+									<button type="button" class="button" data-synchy-override-site-version-apply><?php esc_html_e('Set Local Version', 'synchy'); ?></button>
+								</div>
+								<p class="synchy-field-note"><?php esc_html_e('Force the local site version if the live site is showing a stale or incorrect version.', 'synchy'); ?></p>
+								<p class="synchy-field-note is-hidden" data-synchy-override-site-version-message></p>
+							</div>
 						</div>
 					</div>
 				</div>
@@ -12261,6 +12363,30 @@ add_action('wp_ajax_synchy_test_sync_connection', function (): void {
 	wp_send_json_success([
 		'remoteSite' => $result,
 		'localSiteVersion' => synchy_get_site_sync_version(),
+	]);
+});
+
+add_action('wp_ajax_synchy_override_site_sync_version', function (): void {
+	if (!current_user_can('manage_options')) {
+		wp_send_json_error(['message' => __('You are not allowed to override the Synchy site version.', 'synchy')], 403);
+	}
+
+	check_ajax_referer('synchy_sync_ajax', 'nonce');
+
+	$raw_version = isset($_POST['version']) ? sanitize_text_field(wp_unslash((string) $_POST['version'])) : '';
+	$result = synchy_override_site_sync_version($raw_version);
+
+	if (is_wp_error($result)) {
+		wp_send_json_error(['message' => $result->get_error_message()], 400);
+	}
+
+	wp_send_json_success([
+		'localSiteVersion' => $result,
+		'message' => sprintf(
+			/* translators: %s: new site version, e.g. 1.0.1 */
+			__('Local site version set to v%s.', 'synchy'),
+			synchy_site_sync_version_string($result)
+		),
 	]);
 });
 
@@ -13017,6 +13143,12 @@ add_action('admin_enqueue_scripts', function (string $hook_suffix): void {
 					'localSiteVersion' => __('Local site version', 'synchy'),
 					'liveSiteVersion' => __('Live site version', 'synchy'),
 					'versionState' => __('Version state', 'synchy'),
+					'overrideVersion' => __('Override version', 'synchy'),
+					'overrideVersionPlaceholder' => __('e.g. 1.0.1', 'synchy'),
+					'overrideVersionHelp' => __('Force the local site version if the live site is showing a stale or incorrect version.', 'synchy'),
+					'overrideVersionInvalid' => __('Enter a version in major.minor.patch format, e.g. 1.0.1.', 'synchy'),
+					'overrideVersionConfirm' => __('Manually set the local site version? This does not change anything on the destination site.', 'synchy'),
+					'overrideVersionApplying' => __('Setting version...', 'synchy'),
 					'files' => __('Files', 'synchy'),
 					'dbRows' => __('DB rows', 'synchy'),
 					'duration' => __('Duration', 'synchy'),
