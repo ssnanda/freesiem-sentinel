@@ -10671,7 +10671,7 @@ function synchy_render_hostinger_export_instructions(): void
 			<div>
 				<h2><?php esc_html_e('Import Export into Hostinger', 'synchy'); ?></h2>
 				<p class="synchy-field-note">
-					<?php esc_html_e('Use the included Synchy installer to restore both the WordPress files and database. Extracting the site archive by itself does not import the database or update wp-config.php.', 'synchy'); ?>
+					<?php esc_html_e('Download and extract the Export Bundle on your computer first. Upload only its package zip and matching installer PHP file to Hostinger; the installer restores both the WordPress files and database.', 'synchy'); ?>
 				</p>
 			</div>
 			<div class="synchy-export-meta synchy-export-meta--wide">
@@ -10683,17 +10683,17 @@ function synchy_render_hostinger_export_instructions(): void
 				<div>
 					<span class="synchy-export-meta__label"><?php esc_html_e('2. Create a MySQL database', 'synchy'); ?></span>
 					<strong><?php esc_html_e('Websites → Dashboard → Databases → Management', 'synchy'); ?></strong>
-					<span><?php esc_html_e('Create a database and user for this site. Save the full Hostinger database name, username, password, and host; Hostinger normally adds an account prefix to the name and username.', 'synchy'); ?></span>
+					<span><?php esc_html_e('The database must exist before you run the installer. Create a new, empty database and user for this site. Save the full database name, username, password, and host; Hostinger normally adds an account prefix to the name and username.', 'synchy'); ?></span>
 				</div>
 				<div>
-					<span class="synchy-export-meta__label"><?php esc_html_e('3. Upload the bundle', 'synchy'); ?></span>
+					<span class="synchy-export-meta__label"><?php esc_html_e('3. Upload exactly two files', 'synchy'); ?></span>
 					<strong><?php esc_html_e('Websites → Dashboard → File Manager → public_html', 'synchy'); ?></strong>
-					<span><?php esc_html_e('Upload the downloaded Export Bundle zip and extract it directly in public_html. The package archive zip and the generated installer PHP file must remain together in that folder.', 'synchy'); ?></span>
+					<span><?php esc_html_e('From the bundle extracted on your computer, upload package-name.zip and the matching package-name-installer.php directly into public_html. Keep them together and do not extract the package zip on Hostinger.', 'synchy'); ?></span>
 				</div>
 				<div>
 					<span class="synchy-export-meta__label"><?php esc_html_e('4. Open the installer', 'synchy'); ?></span>
 					<strong><code>https://your-domain.com/package-name-installer.php</code></strong>
-					<span><?php esc_html_e('Replace the example with your domain and the exact installer filename shown in File Manager. Confirm the final destination URL, including https and whether you use www.', 'synchy'); ?></span>
+					<span><?php esc_html_e('Replace the example with your domain and the exact installer filename shown in File Manager. Confirm the final destination URL, including https and whether you use www. You do not need to upload the manifest, README, or DDEV scripts.', 'synchy'); ?></span>
 				</div>
 				<div>
 					<span class="synchy-export-meta__label"><?php esc_html_e('5. Run the restore', 'synchy'); ?></span>
@@ -10703,12 +10703,12 @@ function synchy_render_hostinger_export_instructions(): void
 				<div>
 					<span class="synchy-export-meta__label"><?php esc_html_e('6. Verify and clean up', 'synchy'); ?></span>
 					<strong><?php esc_html_e('Test the site before removing the restore files', 'synchy'); ?></strong>
-					<span><?php esc_html_e('Check the homepage, wp-admin, media, forms, and permalinks. Then use Delete Cleanup Files in the installer and remove the outer Export Bundle zip plus any DDEV helper files left in public_html.', 'synchy'); ?></span>
+					<span><?php esc_html_e('Check the homepage, wp-admin, media, forms, and permalinks. Then use Delete Cleanup Files in the installer to remove the installer, package zip, and temporary restore workspace.', 'synchy'); ?></span>
 				</div>
 			</div>
 			<p class="synchy-field-note">
 				<strong><?php esc_html_e('Important:', 'synchy'); ?></strong>
-				<?php esc_html_e('Do not upload only the inner site archive and extract it manually. The installer is the part that imports the SQL schema and data, performs serialized URL replacement, and connects WordPress to the Hostinger database.', 'synchy'); ?>
+				<?php esc_html_e('Do not extract the package zip manually. Upload it beside its matching installer PHP file, then run the installer. The installer imports the SQL schema and data, performs serialized URL replacement, and connects WordPress to the Hostinger database.', 'synchy'); ?>
 			</p>
 		</div>
 	</div>
