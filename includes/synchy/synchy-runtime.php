@@ -10663,6 +10663,58 @@ function synchy_render_ddev_export_instructions(): void
 	<?php
 }
 
+function synchy_render_hostinger_export_instructions(): void
+{
+	?>
+	<div class="synchy-panel synchy-panel--wide">
+		<div class="synchy-stack synchy-stack--compact">
+			<div>
+				<h2><?php esc_html_e('Import Export into Hostinger', 'synchy'); ?></h2>
+				<p class="synchy-field-note">
+					<?php esc_html_e('Use the included Synchy installer to restore both the WordPress files and database. Extracting the site archive by itself does not import the database or update wp-config.php.', 'synchy'); ?>
+				</p>
+			</div>
+			<div class="synchy-export-meta synchy-export-meta--wide">
+				<div>
+					<span class="synchy-export-meta__label"><?php esc_html_e('1. Back up the destination', 'synchy'); ?></span>
+					<strong><?php esc_html_e('Create or download a Hostinger backup first', 'synchy'); ?></strong>
+					<span><?php esc_html_e('The restore replaces the selected database and overwrites matching files. Do not delete public_html itself. For a clean replacement, remove its existing contents only after you have a recoverable backup.', 'synchy'); ?></span>
+				</div>
+				<div>
+					<span class="synchy-export-meta__label"><?php esc_html_e('2. Create a MySQL database', 'synchy'); ?></span>
+					<strong><?php esc_html_e('Websites → Dashboard → Databases → Management', 'synchy'); ?></strong>
+					<span><?php esc_html_e('Create a database and user for this site. Save the full Hostinger database name, username, password, and host; Hostinger normally adds an account prefix to the name and username.', 'synchy'); ?></span>
+				</div>
+				<div>
+					<span class="synchy-export-meta__label"><?php esc_html_e('3. Upload the bundle', 'synchy'); ?></span>
+					<strong><?php esc_html_e('Websites → Dashboard → File Manager → public_html', 'synchy'); ?></strong>
+					<span><?php esc_html_e('Upload the downloaded Export Bundle zip and extract it directly in public_html. The package archive zip and the generated installer PHP file must remain together in that folder.', 'synchy'); ?></span>
+				</div>
+				<div>
+					<span class="synchy-export-meta__label"><?php esc_html_e('4. Open the installer', 'synchy'); ?></span>
+					<strong><code>https://your-domain.com/package-name-installer.php</code></strong>
+					<span><?php esc_html_e('Replace the example with your domain and the exact installer filename shown in File Manager. Confirm the final destination URL, including https and whether you use www.', 'synchy'); ?></span>
+				</div>
+				<div>
+					<span class="synchy-export-meta__label"><?php esc_html_e('5. Run the restore', 'synchy'); ?></span>
+					<strong><?php esc_html_e('Enter the Hostinger database credentials and select Run Restore', 'synchy'); ?></strong>
+					<span><?php esc_html_e('Load Databases is optional. The installer drops existing objects from the selected database, imports the package SQL (including its schema), replaces the source URLs, copies the files, and updates wp-config.php.', 'synchy'); ?></span>
+				</div>
+				<div>
+					<span class="synchy-export-meta__label"><?php esc_html_e('6. Verify and clean up', 'synchy'); ?></span>
+					<strong><?php esc_html_e('Test the site before removing the restore files', 'synchy'); ?></strong>
+					<span><?php esc_html_e('Check the homepage, wp-admin, media, forms, and permalinks. Then use Delete Cleanup Files in the installer and remove the outer Export Bundle zip plus any DDEV helper files left in public_html.', 'synchy'); ?></span>
+				</div>
+			</div>
+			<p class="synchy-field-note">
+				<strong><?php esc_html_e('Important:', 'synchy'); ?></strong>
+				<?php esc_html_e('Do not upload only the inner site archive and extract it manually. The installer is the part that imports the SQL schema and data, performs serialized URL replacement, and connects WordPress to the Hostinger database.', 'synchy'); ?>
+			</p>
+		</div>
+	</div>
+	<?php
+}
+
 function synchy_get_admin_page_url(string $page_slug): string
 {
 	return admin_url('admin.php?page=' . rawurlencode($page_slug));
@@ -11188,6 +11240,7 @@ function synchy_render_export_page(array $current): void
 
 			<?php synchy_render_export_history($export_history, 'synchy-export'); ?>
 			<?php synchy_render_ddev_export_instructions(); ?>
+			<?php synchy_render_hostinger_export_instructions(); ?>
 		</div>
 	</div>
 
