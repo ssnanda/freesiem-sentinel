@@ -664,8 +664,6 @@ function synchy_get_site_sync_defaults(): array
 		$defaults[(string) $scope['option_key']] = (string) ($scope['group'] ?? '') === 'database' ? 0 : 1;
 	}
 
-	$defaults['profile_label'] = '';
-
 	return $defaults;
 }
 
@@ -679,14 +677,9 @@ function synchy_get_site_sync_profile_ids(): array
 	return ['a', 'b'];
 }
 
-function synchy_get_site_sync_profile_default_label(string $profile_id): string
+function synchy_get_site_sync_profile_short_label(string $profile_id): string
 {
-	$labels = [
-		'a' => __('Site A', 'synchy'),
-		'b' => __('Site B', 'synchy'),
-	];
-
-	return $labels[$profile_id] ?? __('Site', 'synchy');
+	return strtoupper($profile_id) ?: '?';
 }
 
 /**
@@ -755,14 +748,6 @@ function synchy_get_site_sync_profile_option_bases(): array
 		SYNCHY_SYNC_CONNECTION_STATE_OPTION,
 		SYNCHY_SITE_SYNC_SITE_ID_OPTION,
 	];
-}
-
-function synchy_get_site_sync_profile_label(string $profile_id): string
-{
-	$saved = get_option(synchy_site_sync_option_key(SYNCHY_SITE_SYNC_OPTIONS, $profile_id), []);
-	$label = is_array($saved) ? trim((string) ($saved['profile_label'] ?? '')) : '';
-
-	return $label !== '' ? $label : synchy_get_site_sync_profile_default_label($profile_id);
 }
 
 function synchy_get_ajcore_protected_option_names(): array
@@ -1164,9 +1149,6 @@ function synchy_sanitize_site_sync_options($value): array
 	$sanitized = synchy_get_site_sync_defaults();
 	$sanitized['destination_url'] = synchy_sanitize_site_sync_url((string) ($value['destination_url'] ?? ''));
 	$sanitized['destination_username'] = trim(sanitize_text_field((string) ($value['destination_username'] ?? '')));
-	$sanitized['profile_label'] = array_key_exists('profile_label', $value)
-		? trim(sanitize_text_field((string) $value['profile_label']))
-		: trim((string) ($existing['profile_label'] ?? ''));
 
 	$raw_password = isset($value['destination_application_password']) ? (string) $value['destination_application_password'] : '';
 	$normalized_password = synchy_normalize_application_password($raw_password);
@@ -1225,7 +1207,6 @@ function synchy_get_site_sync_options(): array
 	$options['destination_url'] = synchy_sanitize_site_sync_url((string) ($options['destination_url'] ?? ''));
 	$options['destination_username'] = trim(sanitize_text_field((string) ($options['destination_username'] ?? '')));
 	$options['destination_application_password'] = synchy_normalize_application_password((string) ($options['destination_application_password'] ?? ''));
-	$options['profile_label'] = trim(sanitize_text_field((string) ($options['profile_label'] ?? '')));
 	$options['verify_ssl'] = empty($options['verify_ssl']) ? 0 : 1;
 
 	$scope_selected = false;
@@ -1322,34 +1303,36 @@ function synchy_handle_save_site_sync_options(): void
 function synchy_render_site_sync_profile_switcher(): void
 {
 	$active_profile_id = synchy_get_active_site_sync_profile_id();
+	$current_url = add_query_arg(null, null);
 	?>
-	<div class="synchy-panel synchy-panel--muted synchy-panel--wide synchy-site-sync-profile-switcher">
-		<div class="synchy-stack__split">
-			<div>
-				<p class="synchy-panel__eyebrow"><?php esc_html_e('Destination Site', 'synchy'); ?></p>
-				<h2><?php esc_html_e('Choose which site Sync targets.', 'synchy'); ?></h2>
-			</div>
-		</div>
-		<div class="synchy-input-row">
+	<div class="synchy-field">
+		<label class="synchy-label"><?php esc_html_e('Destination Site', 'synchy'); ?></label>
+		<div class="synchy-input-row" style="gap: 6px;">
 			<?php foreach (synchy_get_site_sync_profile_ids() as $profile_id) : ?>
-				<form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" style="display:inline-block;">
-					<?php wp_nonce_field('synchy_switch_site_sync_profile', 'synchy_site_sync_profile_nonce'); ?>
-					<input type="hidden" name="action" value="synchy_switch_site_sync_profile" />
-					<input type="hidden" name="profile_id" value="<?php echo esc_attr($profile_id); ?>" />
-					<button
-						type="submit"
-						class="button<?php echo $profile_id === $active_profile_id ? ' button-primary' : ''; ?>"
-						<?php disabled($profile_id === $active_profile_id); ?>
-					>
-						<?php echo esc_html(synchy_get_site_sync_profile_label($profile_id)); ?>
-						<?php if ($profile_id === $active_profile_id) : ?>
-							&nbsp;<span class="synchy-badge synchy-badge--connected"><?php esc_html_e('Active', 'synchy'); ?></span>
-						<?php endif; ?>
-					</button>
-				</form>
+				<?php
+				$switch_url = wp_nonce_url(
+					add_query_arg(
+						[
+							'action' => 'synchy_switch_site_sync_profile',
+							'profile_id' => $profile_id,
+							'redirect_to' => rawurlencode($current_url),
+						],
+						admin_url('admin-post.php')
+					),
+					'synchy_switch_site_sync_profile',
+					'synchy_site_sync_profile_nonce'
+				);
+				?>
+				<a
+					href="<?php echo esc_url($switch_url); ?>"
+					class="button<?php echo $profile_id === $active_profile_id ? ' button-primary' : ''; ?>"
+					<?php echo $profile_id === $active_profile_id ? 'aria-disabled="true" onclick="return false;"' : ''; ?>
+				>
+					<?php echo esc_html(synchy_get_site_sync_profile_short_label($profile_id)); ?>
+				</a>
 			<?php endforeach; ?>
 		</div>
-		<p class="synchy-field-note"><?php esc_html_e('Each site keeps its own saved URL, credentials, connection status, and Sync history. Switching sites reloads the page and Sync/Preview/Full Sync act on whichever site is active.', 'synchy'); ?></p>
+		<p class="synchy-field-note"><?php esc_html_e('Each site keeps its own saved URL, credentials, connection status, and Sync history.', 'synchy'); ?></p>
 	</div>
 	<?php
 }
@@ -1362,11 +1345,15 @@ function synchy_handle_switch_site_sync_profile(): void
 
 	check_admin_referer('synchy_switch_site_sync_profile', 'synchy_site_sync_profile_nonce');
 
-	$profile_id = isset($_POST['profile_id']) ? sanitize_key(wp_unslash((string) $_POST['profile_id'])) : 'a';
+	$profile_id = isset($_REQUEST['profile_id']) ? sanitize_key(wp_unslash((string) $_REQUEST['profile_id'])) : 'a';
 	synchy_set_active_site_sync_profile_id($profile_id);
 	synchy_ensure_site_sync_options_not_autoloaded();
 
-	$redirect = wp_get_referer();
+	$redirect = isset($_REQUEST['redirect_to']) ? esc_url_raw(wp_unslash((string) $_REQUEST['redirect_to'])) : '';
+
+	if ($redirect === '') {
+		$redirect = wp_get_referer();
+	}
 
 	if (!$redirect) {
 		$redirect = admin_url('admin.php?page=synchy-site-sync');
@@ -11460,7 +11447,6 @@ function synchy_render_site_sync_page(array $current): void
 	<div class="wrap synchy-admin">
 		<?php synchy_render_notice(); ?>
 		<div class="synchy-shell">
-			<?php synchy_render_site_sync_profile_switcher(); ?>
 			<div class="synchy-hero">
 				<div>
 					<p class="synchy-eyebrow"><?php esc_html_e('Upload Workflow', 'synchy'); ?></p>
@@ -11498,6 +11484,7 @@ function synchy_render_site_sync_page(array $current): void
 				<div class="synchy-grid synchy-grid--upload-live">
 					<div class="synchy-panel synchy-panel--muted">
 							<h2><?php esc_html_e('Destination Connection', 'synchy'); ?></h2>
+						<?php synchy_render_site_sync_profile_switcher(); ?>
 						<div class="synchy-field">
 							<label class="synchy-label" for="synchy-destination-url"><?php esc_html_e('WordPress URL', 'synchy'); ?></label>
 							<input
@@ -11905,7 +11892,6 @@ function synchy_render_incremental_site_sync_page(array $current): void
 	<div class="wrap synchy-admin">
 		<?php synchy_render_notice(); ?>
 		<div class="synchy-shell">
-			<?php synchy_render_site_sync_profile_switcher(); ?>
 			<form method="post" action="<?php echo esc_url(synchy_get_site_sync_save_url()); ?>" class="synchy-form" data-synchy-sync-form>
 				<?php synchy_render_site_sync_save_fields(); ?>
 				<input type="hidden" name="<?php echo esc_attr(SYNCHY_SITE_SYNC_OPTIONS); ?>[sync_scope_selection_present]" value="1" />
@@ -11971,18 +11957,7 @@ function synchy_render_incremental_site_sync_page(array $current): void
 						</div>
 
 						<div class="synchy-sync-connection-form">
-							<div class="synchy-field">
-								<label class="synchy-label" for="synchy-sync-profile-label"><?php esc_html_e('Site Label', 'synchy'); ?></label>
-								<input
-									id="synchy-sync-profile-label"
-									type="text"
-									class="regular-text"
-									name="<?php echo esc_attr(SYNCHY_SITE_SYNC_OPTIONS); ?>[profile_label]"
-									value="<?php echo esc_attr((string) ($options['profile_label'] ?? '')); ?>"
-									placeholder="<?php echo esc_attr(synchy_get_site_sync_profile_default_label(synchy_get_active_site_sync_profile_id())); ?>"
-								/>
-								<p class="synchy-field-note"><?php esc_html_e('Shown on the site switcher above, e.g. "Staging" or "Production".', 'synchy'); ?></p>
-							</div>
+							<?php synchy_render_site_sync_profile_switcher(); ?>
 
 							<div class="synchy-field">
 								<label class="synchy-label" for="synchy-sync-destination-url"><?php esc_html_e('WordPress URL', 'synchy'); ?></label>
