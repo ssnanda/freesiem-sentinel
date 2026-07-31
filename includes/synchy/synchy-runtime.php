@@ -2713,13 +2713,22 @@ function synchy_is_sync_file_excluded(string $archive_path): bool
 		'/uploads/synchy-backups/',
 		'/uploads/synchy-import/',
 		'/uploads/synchy-site-sync/',
-		'/uploads/synchy-sync/',
 	];
 
 	foreach ($excluded_contains as $needle) {
 		if (str_contains('/' . $archive_path, $needle)) {
 			return true;
 		}
+	}
+
+	// Each destination profile keeps its own bookkeeping folder under uploads/
+	// (synchy-sync/ for profile "a", synchy-sync-b/ for "b", and so on for any
+	// additional profile). These are the sync tool's own internal state, not
+	// site content, and every sync run rewrites them -- so unless every
+	// variant is excluded, whichever ones aren't get reported as perpetually
+	// pending changes that a sync can never actually clear.
+	if (preg_match('#(?:^|/)uploads/synchy-sync(?:-[^/]+)?/#', '/' . $archive_path)) {
+		return true;
 	}
 
 	return false;
