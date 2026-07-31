@@ -4258,6 +4258,20 @@ function synchy_split_full_sync_database_batch(array $base_batch, array $tables)
 		];
 	}
 
+	// A scope's rows (e.g. every term/term_taxonomy/term_relationships row for
+	// db_taxonomies) can be split across several of these parts. The
+	// destination's nav-menu repair pass must know when it has seen the last
+	// part for a scope before it can safely treat its accumulated state as
+	// complete -- otherwise it risks deleting real menu items whose
+	// relationship row simply hasn't arrived yet. Stamp that position here,
+	// once the true part count for this scope is known.
+	$scope_part_total = count($batches);
+
+	foreach ($batches as $index => $batch) {
+		$batches[$index]['scope_part_index'] = $index + 1;
+		$batches[$index]['scope_part_total'] = $scope_part_total;
+	}
+
 	return $batches;
 }
 
@@ -7495,6 +7509,8 @@ function synchy_build_sync_batch_request_headers(array $job, array $batch): arra
 		'X-Syncy-Batch-Label' => rawurlencode((string) ($batch['label'] ?? '')),
 		'X-Syncy-Batch-Type' => (string) ($batch['type'] ?? ''),
 		'X-Syncy-Batch-Sequence' => (string) ((int) ($batch['sequence'] ?? 0)),
+		'X-Syncy-Scope-Part-Index' => (string) ((int) ($batch['scope_part_index'] ?? 0)),
+		'X-Syncy-Scope-Part-Total' => (string) ((int) ($batch['scope_part_total'] ?? 0)),
 	];
 }
 
@@ -8446,7 +8462,7 @@ function synchy_prepare_sync_metadata_replacements(array $manifest): void
 	}
 }
 
-function synchy_repair_synced_nav_menus(array $manifest): array
+function synchy_repair_synced_nav_menus(array $manifest, bool $is_final_batch = true): array
 {
 	global $wpdb;
 
@@ -8649,11 +8665,18 @@ function synchy_repair_synced_nav_menus(array $manifest): array
 
 		$source_item_ids = array_values(array_unique(array_filter($source_item_ids)));
 
-		$existing_destination_items = wp_get_nav_menu_items($destination_menu_id, ['nopaging' => true, 'post_status' => 'any']);
-		if (is_array($existing_destination_items)) {
-			foreach ($existing_destination_items as $existing_item) {
-				if (!in_array((int) $existing_item->ID, $source_item_ids, true)) {
-					wp_delete_post((int) $existing_item->ID, true);
+		// Pruning destination items that look orphaned is only safe once
+		// $source_item_ids reflects the *complete* current membership of this
+		// menu. Mid-batch, it's only a partial view -- deleting against it
+		// would wipe out real items whose relationship row is simply still
+		// in transit in a later batch.
+		if ($is_final_batch) {
+			$existing_destination_items = wp_get_nav_menu_items($destination_menu_id, ['nopaging' => true, 'post_status' => 'any']);
+			if (is_array($existing_destination_items)) {
+				foreach ($existing_destination_items as $existing_item) {
+					if (!in_array((int) $existing_item->ID, $source_item_ids, true)) {
+						wp_delete_post((int) $existing_item->ID, true);
+					}
 				}
 			}
 		}
@@ -9239,8 +9262,19 @@ function synchy_handle_remote_sync_request(WP_REST_Request $request)
 			return new WP_Error($executed->get_error_code(), $executed->get_error_message(), ['status' => 500]);
 		}
 
+		$scope_part_index = (int) $request->get_header('X-Syncy-Scope-Part-Index');
+		$scope_part_total = (int) $request->get_header('X-Syncy-Scope-Part-Total');
+		// Full Sync sends db_taxonomies (and other scopes) as several parts
+		// when a table exceeds the per-batch row limit. Only the last part
+		// carries a complete accumulated view of a menu's term_relationships,
+		// so pruning destination menu items that appear "missing" must wait
+		// for it -- otherwise items whose relationship row hasn't arrived yet
+		// look orphaned and get deleted. Requests without these headers (the
+		// regular single-manifest Push) always carry the complete picture.
+		$is_final_sync_batch = $scope_part_index <= 0 || $scope_part_total <= 0 || $scope_part_index >= $scope_part_total;
+
 		$applied_option_rows = synchy_apply_sync_option_rows((array) ($prepared_sql['optionRows'] ?? []));
-		$nav_menu_repair = synchy_repair_synced_nav_menus($manifest);
+		$nav_menu_repair = synchy_repair_synced_nav_menus($manifest, $is_final_sync_batch);
 		$deleted_result = synchy_apply_sync_deleted_paths($manifest);
 
 		if (is_wp_error($deleted_result)) {
