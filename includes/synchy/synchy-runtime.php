@@ -3296,7 +3296,13 @@ function synchy_build_sync_database_delta(array $state, array $selected_scope_id
 	$total_rows = 0;
 	$baseline_scopes = [];
 
-	if (in_array('db_content', $selected_scope_ids, true)) {
+	$content_selected = in_array('db_content', $selected_scope_ids, true);
+	$taxonomies_selected = in_array('db_taxonomies', $selected_scope_ids, true);
+
+	$content_baseline = false;
+	$content_post_ids = [];
+
+	if ($content_selected) {
 		$content_last_sync = max(0, (int) ($scope_sync_times['db_content'] ?? 0));
 		$content_baseline = $force_full || $content_last_sync <= 0;
 
@@ -3304,15 +3310,76 @@ function synchy_build_sync_database_delta(array $state, array $selected_scope_id
 			$baseline_scopes[] = 'db_content';
 		}
 
-		$post_ids = $content_baseline
+		$content_post_ids = $content_baseline
 			? synchy_get_changed_post_ids_for_sync(0)
 			: synchy_get_changed_post_ids_for_sync($content_last_sync);
+	}
 
-		// Nav menu items are small in number but their postmeta is the entire
-		// substance of the item; gating them behind post_modified/post_date
-		// (like ordinary content) lets a menu item's structural data silently
-		// drop out of a delta sync. Always ship the full current set instead.
-		$post_ids = array_values(array_unique(array_merge($post_ids, synchy_get_nav_menu_item_post_ids())));
+	$taxonomy_baseline = false;
+	$taxonomy_all_rows = [];
+	$taxonomy_delta_rows = [];
+
+	if ($taxonomies_selected) {
+		$taxonomy_baseline = $force_full || max(0, (int) ($scope_sync_times['db_taxonomies'] ?? 0)) <= 0;
+
+		if ($taxonomy_baseline) {
+			$baseline_scopes[] = 'db_taxonomies';
+		}
+
+		foreach ([$wpdb->terms, $wpdb->term_taxonomy, $wpdb->term_relationships] as $table) {
+			$all_rows = synchy_fetch_all_rows_from_table($table);
+			$delta = synchy_build_sync_snapshot_delta(
+				$all_rows,
+				isset($previous_fingerprints[$table]) && is_array($previous_fingerprints[$table]) ? $previous_fingerprints[$table] : [],
+				$specs[$table]['key_columns'],
+				$taxonomy_baseline
+			);
+
+			$current_fingerprints[$table] = $delta['fingerprints'];
+			$taxonomy_all_rows[$table] = $all_rows;
+			$taxonomy_delta_rows[$table] = $delta['rows'];
+		}
+	}
+
+	// Nav menu items are small in number, but the postmeta that defines a menu
+	// item's type/url/parent and the term_relationships row that defines its
+	// menu membership are delta-gated independently (post timestamp vs. row
+	// fingerprint). Shipping one without the other lets the destination repair
+	// pass either blank out or prune an item that never actually changed. Only
+	// when one side shows a genuine nav-menu-relevant change do we force the
+	// *complete* current nav-menu snapshot through, so the two can never
+	// desync -- an unrelated sync still reports zero pending changes.
+	$nav_menu_scope = ['term_ids' => [], 'term_taxonomy_ids' => []];
+	$nav_menu_item_ids = [];
+
+	if ($content_selected || $taxonomies_selected) {
+		$nav_menu_scope = synchy_get_nav_menu_taxonomy_scope_ids();
+	}
+
+	if ($content_selected) {
+		$nav_menu_item_ids = synchy_get_nav_menu_item_post_ids();
+	}
+
+	$content_touches_nav_menu_item = $content_selected && array_intersect($content_post_ids, $nav_menu_item_ids) !== [];
+	$taxonomy_touches_nav_menu = false;
+
+	if ($taxonomies_selected && !$taxonomy_baseline && $nav_menu_scope['term_taxonomy_ids'] !== []) {
+		foreach ((array) ($taxonomy_delta_rows[$wpdb->term_relationships] ?? []) as $row) {
+			if (is_array($row) && in_array((int) ($row['term_taxonomy_id'] ?? 0), $nav_menu_scope['term_taxonomy_ids'], true)) {
+				$taxonomy_touches_nav_menu = true;
+				break;
+			}
+		}
+	}
+
+	$should_force_nav_menu_snapshot = $content_selected && $taxonomies_selected
+		&& !$content_baseline && !$taxonomy_baseline
+		&& ($content_touches_nav_menu_item || $taxonomy_touches_nav_menu);
+
+	if ($content_selected) {
+		$post_ids = $should_force_nav_menu_snapshot
+			? array_values(array_unique(array_merge($content_post_ids, $nav_menu_item_ids)))
+			: $content_post_ids;
 
 		$posts_rows = synchy_fetch_rows_by_ids($wpdb->posts, 'ID', $post_ids);
 
@@ -3368,35 +3435,13 @@ function synchy_build_sync_database_delta(array $state, array $selected_scope_id
 		}
 	}
 
-	if (in_array('db_taxonomies', $selected_scope_ids, true)) {
-		$taxonomy_baseline = $force_full || max(0, (int) ($scope_sync_times['db_taxonomies'] ?? 0)) <= 0;
-
-		if ($taxonomy_baseline) {
-			$baseline_scopes[] = 'db_taxonomies';
-		}
-
-		$nav_menu_scope = synchy_get_nav_menu_taxonomy_scope_ids();
-
+	if ($taxonomies_selected) {
 		foreach ([$wpdb->terms, $wpdb->term_taxonomy, $wpdb->term_relationships] as $table) {
-			$all_rows = synchy_fetch_all_rows_from_table($table);
-			$delta = synchy_build_sync_snapshot_delta(
-				$all_rows,
-				isset($previous_fingerprints[$table]) && is_array($previous_fingerprints[$table]) ? $previous_fingerprints[$table] : [],
-				$specs[$table]['key_columns'],
-				$taxonomy_baseline
-			);
+			$rows = $taxonomy_delta_rows[$table] ?? [];
 
-			$current_fingerprints[$table] = $delta['fingerprints'];
-
-			// Nav menu structure (terms/term_taxonomy/term_relationships) must
-			// always travel as a complete set: the repair pass that rebuilds
-			// menu items on the destination treats this data as authoritative
-			// membership, so an item whose relationship row is unchanged (and
-			// therefore excluded by fingerprint delta) would otherwise be
-			// mistaken for "removed from the menu" and dropped or pruned.
-			$rows = $taxonomy_baseline
-				? $delta['rows']
-				: synchy_merge_forced_nav_menu_sync_rows($table, $all_rows, $delta['rows'], $specs[$table]['key_columns'], $nav_menu_scope);
+			if ($should_force_nav_menu_snapshot) {
+				$rows = synchy_merge_forced_nav_menu_sync_rows($table, $taxonomy_all_rows[$table] ?? [], $rows, $specs[$table]['key_columns'], $nav_menu_scope);
+			}
 
 			if ($rows === []) {
 				continue;
