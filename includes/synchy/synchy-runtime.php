@@ -3087,6 +3087,85 @@ function synchy_fetch_rows_by_ids(string $table, string $column, array $ids, arr
 	return $rows;
 }
 
+function synchy_get_nav_menu_item_post_ids(): array
+{
+	global $wpdb;
+
+	$ids = $wpdb->get_col(
+		$wpdb->prepare(
+			'SELECT `ID` FROM `' . str_replace('`', '``', $wpdb->posts) . '` WHERE `post_type` = %s',
+			'nav_menu_item'
+		)
+	);
+
+	return is_array($ids) ? array_values(array_map('intval', $ids)) : [];
+}
+
+function synchy_get_nav_menu_taxonomy_scope_ids(): array
+{
+	global $wpdb;
+
+	$rows = $wpdb->get_results(
+		$wpdb->prepare(
+			'SELECT `term_id`, `term_taxonomy_id` FROM `' . str_replace('`', '``', $wpdb->term_taxonomy) . '` WHERE `taxonomy` = %s',
+			'nav_menu'
+		),
+		ARRAY_A
+	);
+
+	$term_ids = [];
+	$term_taxonomy_ids = [];
+
+	foreach ((array) $rows as $row) {
+		if (!is_array($row)) {
+			continue;
+		}
+
+		$term_ids[] = (int) ($row['term_id'] ?? 0);
+		$term_taxonomy_ids[] = (int) ($row['term_taxonomy_id'] ?? 0);
+	}
+
+	return [
+		'term_ids' => array_values(array_unique(array_filter($term_ids))),
+		'term_taxonomy_ids' => array_values(array_unique(array_filter($term_taxonomy_ids))),
+	];
+}
+
+function synchy_merge_forced_nav_menu_sync_rows(string $table, array $all_rows, array $delta_rows, array $key_columns, array $nav_menu_scope): array
+{
+	global $wpdb;
+
+	if ($table === $wpdb->term_taxonomy) {
+		$forced_rows = array_filter($all_rows, static fn(array $row): bool => (string) ($row['taxonomy'] ?? '') === 'nav_menu');
+	} elseif ($table === $wpdb->term_relationships) {
+		$tt_ids = (array) ($nav_menu_scope['term_taxonomy_ids'] ?? []);
+		$forced_rows = $tt_ids === [] ? [] : array_filter($all_rows, static fn(array $row): bool => in_array((int) ($row['term_taxonomy_id'] ?? 0), $tt_ids, true));
+	} elseif ($table === $wpdb->terms) {
+		$term_ids = (array) ($nav_menu_scope['term_ids'] ?? []);
+		$forced_rows = $term_ids === [] ? [] : array_filter($all_rows, static fn(array $row): bool => in_array((int) ($row['term_id'] ?? 0), $term_ids, true));
+	} else {
+		return $delta_rows;
+	}
+
+	if ($forced_rows === []) {
+		return $delta_rows;
+	}
+
+	$merged = [];
+
+	foreach ($delta_rows as $row) {
+		if (is_array($row)) {
+			$merged[synchy_get_sync_row_key($row, $key_columns)] = $row;
+		}
+	}
+
+	foreach ($forced_rows as $row) {
+		$merged[synchy_get_sync_row_key($row, $key_columns)] = $row;
+	}
+
+	return array_values($merged);
+}
+
 function synchy_get_changed_post_ids_for_sync(int $last_sync_time): array
 {
 	global $wpdb;
@@ -3228,6 +3307,13 @@ function synchy_build_sync_database_delta(array $state, array $selected_scope_id
 		$post_ids = $content_baseline
 			? synchy_get_changed_post_ids_for_sync(0)
 			: synchy_get_changed_post_ids_for_sync($content_last_sync);
+
+		// Nav menu items are small in number but their postmeta is the entire
+		// substance of the item; gating them behind post_modified/post_date
+		// (like ordinary content) lets a menu item's structural data silently
+		// drop out of a delta sync. Always ship the full current set instead.
+		$post_ids = array_values(array_unique(array_merge($post_ids, synchy_get_nav_menu_item_post_ids())));
+
 		$posts_rows = synchy_fetch_rows_by_ids($wpdb->posts, 'ID', $post_ids);
 
 		if ($posts_rows !== []) {
@@ -3289,9 +3375,12 @@ function synchy_build_sync_database_delta(array $state, array $selected_scope_id
 			$baseline_scopes[] = 'db_taxonomies';
 		}
 
+		$nav_menu_scope = synchy_get_nav_menu_taxonomy_scope_ids();
+
 		foreach ([$wpdb->terms, $wpdb->term_taxonomy, $wpdb->term_relationships] as $table) {
+			$all_rows = synchy_fetch_all_rows_from_table($table);
 			$delta = synchy_build_sync_snapshot_delta(
-				synchy_fetch_all_rows_from_table($table),
+				$all_rows,
 				isset($previous_fingerprints[$table]) && is_array($previous_fingerprints[$table]) ? $previous_fingerprints[$table] : [],
 				$specs[$table]['key_columns'],
 				$taxonomy_baseline
@@ -3299,18 +3388,28 @@ function synchy_build_sync_database_delta(array $state, array $selected_scope_id
 
 			$current_fingerprints[$table] = $delta['fingerprints'];
 
-			if ($delta['rows'] === []) {
+			// Nav menu structure (terms/term_taxonomy/term_relationships) must
+			// always travel as a complete set: the repair pass that rebuilds
+			// menu items on the destination treats this data as authoritative
+			// membership, so an item whose relationship row is unchanged (and
+			// therefore excluded by fingerprint delta) would otherwise be
+			// mistaken for "removed from the menu" and dropped or pruned.
+			$rows = $taxonomy_baseline
+				? $delta['rows']
+				: synchy_merge_forced_nav_menu_sync_rows($table, $all_rows, $delta['rows'], $specs[$table]['key_columns'], $nav_menu_scope);
+
+			if ($rows === []) {
 				continue;
 			}
 
 			$tables[$table] = [
 				'scope_id' => 'db_taxonomies',
 				'key_columns' => $specs[$table]['key_columns'],
-				'rows' => $delta['rows'],
-				'row_ids' => $delta['row_ids'],
+				'rows' => $rows,
+				'row_ids' => array_map(static fn(array $row): string => synchy_get_sync_row_key($row, $specs[$table]['key_columns']), $rows),
 				'update_columns' => $specs[$table]['update_columns'] ?? [],
 			];
-			$total_rows += count($delta['rows']);
+			$total_rows += count($rows);
 		}
 	}
 
