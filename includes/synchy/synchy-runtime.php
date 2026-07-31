@@ -27,6 +27,7 @@ const SYNCHY_SYNC_STATUS_OPTION = 'synchy_sync_status';
 const SYNCHY_SYNC_JOB_OPTION = 'synchy_sync_job';
 const SYNCHY_SYNC_CONNECTION_STATE_OPTION = 'synchy_sync_connection_state';
 const SYNCHY_SITE_SYNC_SITE_ID_OPTION = 'synchy_site_sync_site_id';
+const SYNCHY_SITE_SYNC_ACTIVE_PROFILE_OPTION = 'synchy_site_sync_active_profile';
 const SYNCHY_IMPORT_OPTIONS = 'synchy_import_options';
 const SYNCHY_IMPORT_RESULT_OPTION = 'synchy_import_result';
 const SYNCHY_NOTICE_PREFIX = 'synchy_admin_notice_';
@@ -663,7 +664,105 @@ function synchy_get_site_sync_defaults(): array
 		$defaults[(string) $scope['option_key']] = (string) ($scope['group'] ?? '') === 'database' ? 0 : 1;
 	}
 
+	$defaults['profile_label'] = '';
+
 	return $defaults;
+}
+
+/**
+ * Sync supports two saved destination profiles ("a" and "b") that share the
+ * same source site. Only one profile is active at a time; switching profiles
+ * swaps which destination URL/credentials/job history Sync reads and writes.
+ */
+function synchy_get_site_sync_profile_ids(): array
+{
+	return ['a', 'b'];
+}
+
+function synchy_get_site_sync_profile_default_label(string $profile_id): string
+{
+	$labels = [
+		'a' => __('Site A', 'synchy'),
+		'b' => __('Site B', 'synchy'),
+	];
+
+	return $labels[$profile_id] ?? __('Site', 'synchy');
+}
+
+/**
+ * The active profile is normally read from a persisted option, but background
+ * full-Sync workers (wp_schedule_single_event / async admin-ajax pings) run in
+ * their own request and must stay pinned to the profile the job was started
+ * against, even if the user switches the active profile in the meantime. This
+ * request-local override lets that worker path force a specific profile
+ * without touching the persisted "currently active in the UI" value.
+ */
+function synchy_get_site_sync_profile_context(): ?string
+{
+	return isset($GLOBALS['synchy_site_sync_profile_context']) ? (string) $GLOBALS['synchy_site_sync_profile_context'] : null;
+}
+
+function synchy_set_site_sync_profile_context(string $profile_id): void
+{
+	$GLOBALS['synchy_site_sync_profile_context'] = in_array($profile_id, synchy_get_site_sync_profile_ids(), true) ? $profile_id : 'a';
+}
+
+function synchy_get_active_site_sync_profile_id(): string
+{
+	$context = synchy_get_site_sync_profile_context();
+
+	if ($context !== null) {
+		return $context;
+	}
+
+	$profile_id = (string) get_option(SYNCHY_SITE_SYNC_ACTIVE_PROFILE_OPTION, 'a');
+
+	return in_array($profile_id, synchy_get_site_sync_profile_ids(), true) ? $profile_id : 'a';
+}
+
+function synchy_set_active_site_sync_profile_id(string $profile_id): void
+{
+	if (!in_array($profile_id, synchy_get_site_sync_profile_ids(), true)) {
+		$profile_id = 'a';
+	}
+
+	update_option(SYNCHY_SITE_SYNC_ACTIVE_PROFILE_OPTION, $profile_id, false);
+}
+
+/**
+ * Profile "a" keeps using the original option names so existing single-site
+ * installs need no migration. Profile "b" (and beyond) get a suffixed option
+ * name so each profile keeps fully independent destination settings, job
+ * state, connection status, and Sync history.
+ */
+function synchy_site_sync_option_key(string $base, string $profile_id = ''): string
+{
+	if ($profile_id === '') {
+		$profile_id = synchy_get_active_site_sync_profile_id();
+	}
+
+	return $profile_id === 'a' ? $base : $base . '_' . $profile_id;
+}
+
+function synchy_get_site_sync_profile_option_bases(): array
+{
+	return [
+		SYNCHY_SITE_SYNC_OPTIONS,
+		SYNCHY_SITE_SYNC_JOB_OPTION,
+		SYNCHY_SYNC_LAST_TIME_OPTION,
+		SYNCHY_SYNC_STATUS_OPTION,
+		SYNCHY_SYNC_JOB_OPTION,
+		SYNCHY_SYNC_CONNECTION_STATE_OPTION,
+		SYNCHY_SITE_SYNC_SITE_ID_OPTION,
+	];
+}
+
+function synchy_get_site_sync_profile_label(string $profile_id): string
+{
+	$saved = get_option(synchy_site_sync_option_key(SYNCHY_SITE_SYNC_OPTIONS, $profile_id), []);
+	$label = is_array($saved) ? trim((string) ($saved['profile_label'] ?? '')) : '';
+
+	return $label !== '' ? $label : synchy_get_site_sync_profile_default_label($profile_id);
 }
 
 function synchy_get_ajcore_protected_option_names(): array
@@ -1056,7 +1155,7 @@ function synchy_normalize_application_password(string $value): string
 function synchy_sanitize_site_sync_options($value): array
 {
 	$value = is_array($value) ? $value : [];
-	$existing = get_option(SYNCHY_SITE_SYNC_OPTIONS, []);
+	$existing = get_option(synchy_site_sync_option_key(SYNCHY_SITE_SYNC_OPTIONS), []);
 
 	if (!is_array($existing)) {
 		$existing = [];
@@ -1065,6 +1164,9 @@ function synchy_sanitize_site_sync_options($value): array
 	$sanitized = synchy_get_site_sync_defaults();
 	$sanitized['destination_url'] = synchy_sanitize_site_sync_url((string) ($value['destination_url'] ?? ''));
 	$sanitized['destination_username'] = trim(sanitize_text_field((string) ($value['destination_username'] ?? '')));
+	$sanitized['profile_label'] = array_key_exists('profile_label', $value)
+		? trim(sanitize_text_field((string) $value['profile_label']))
+		: trim((string) ($existing['profile_label'] ?? ''));
 
 	$raw_password = isset($value['destination_application_password']) ? (string) $value['destination_application_password'] : '';
 	$normalized_password = synchy_normalize_application_password($raw_password);
@@ -1113,7 +1215,7 @@ function synchy_sanitize_site_sync_options($value): array
 
 function synchy_get_site_sync_options(): array
 {
-	$saved = get_option(SYNCHY_SITE_SYNC_OPTIONS, []);
+	$saved = get_option(synchy_site_sync_option_key(SYNCHY_SITE_SYNC_OPTIONS), []);
 
 	if (!is_array($saved)) {
 		$saved = [];
@@ -1123,6 +1225,7 @@ function synchy_get_site_sync_options(): array
 	$options['destination_url'] = synchy_sanitize_site_sync_url((string) ($options['destination_url'] ?? ''));
 	$options['destination_username'] = trim(sanitize_text_field((string) ($options['destination_username'] ?? '')));
 	$options['destination_application_password'] = synchy_normalize_application_password((string) ($options['destination_application_password'] ?? ''));
+	$options['profile_label'] = trim(sanitize_text_field((string) ($options['profile_label'] ?? '')));
 	$options['verify_ssl'] = empty($options['verify_ssl']) ? 0 : 1;
 
 	$scope_selected = false;
@@ -1153,25 +1256,32 @@ function synchy_ensure_site_sync_options_not_autoloaded(): void
 		return;
 	}
 
-	$option_exists = $wpdb->get_var(
-		$wpdb->prepare(
-			"SELECT option_id FROM {$wpdb->options} WHERE option_name = %s LIMIT 1",
-			SYNCHY_SITE_SYNC_OPTIONS
-		)
-	);
+	$active_profile_id = synchy_get_active_site_sync_profile_id();
 
-	if ($option_exists === null) {
-		add_option(SYNCHY_SITE_SYNC_OPTIONS, synchy_get_site_sync_defaults(), '', false);
-		return;
+	foreach (synchy_get_site_sync_profile_ids() as $profile_id) {
+		$option_name = synchy_site_sync_option_key(SYNCHY_SITE_SYNC_OPTIONS, $profile_id);
+		$option_exists = $wpdb->get_var(
+			$wpdb->prepare(
+				"SELECT option_id FROM {$wpdb->options} WHERE option_name = %s LIMIT 1",
+				$option_name
+			)
+		);
+
+		if ($option_exists === null) {
+			if ($profile_id === $active_profile_id) {
+				add_option($option_name, synchy_get_site_sync_defaults(), '', false);
+			}
+			continue;
+		}
+
+		$wpdb->update(
+			$wpdb->options,
+			['autoload' => 'off'],
+			['option_name' => $option_name],
+			['%s'],
+			['%s']
+		);
 	}
-
-	$wpdb->update(
-		$wpdb->options,
-		['autoload' => 'off'],
-		['option_name' => SYNCHY_SITE_SYNC_OPTIONS],
-		['%s'],
-		['%s']
-	);
 }
 
 function synchy_get_site_sync_save_url(): string
@@ -1209,11 +1319,68 @@ function synchy_handle_save_site_sync_options(): void
 	exit;
 }
 
+function synchy_render_site_sync_profile_switcher(): void
+{
+	$active_profile_id = synchy_get_active_site_sync_profile_id();
+	?>
+	<div class="synchy-panel synchy-panel--muted synchy-panel--wide synchy-site-sync-profile-switcher">
+		<div class="synchy-stack__split">
+			<div>
+				<p class="synchy-panel__eyebrow"><?php esc_html_e('Destination Site', 'synchy'); ?></p>
+				<h2><?php esc_html_e('Choose which site Sync targets.', 'synchy'); ?></h2>
+			</div>
+		</div>
+		<div class="synchy-input-row">
+			<?php foreach (synchy_get_site_sync_profile_ids() as $profile_id) : ?>
+				<form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" style="display:inline-block;">
+					<?php wp_nonce_field('synchy_switch_site_sync_profile', 'synchy_site_sync_profile_nonce'); ?>
+					<input type="hidden" name="action" value="synchy_switch_site_sync_profile" />
+					<input type="hidden" name="profile_id" value="<?php echo esc_attr($profile_id); ?>" />
+					<button
+						type="submit"
+						class="button<?php echo $profile_id === $active_profile_id ? ' button-primary' : ''; ?>"
+						<?php disabled($profile_id === $active_profile_id); ?>
+					>
+						<?php echo esc_html(synchy_get_site_sync_profile_label($profile_id)); ?>
+						<?php if ($profile_id === $active_profile_id) : ?>
+							&nbsp;<span class="synchy-badge synchy-badge--connected"><?php esc_html_e('Active', 'synchy'); ?></span>
+						<?php endif; ?>
+					</button>
+				</form>
+			<?php endforeach; ?>
+		</div>
+		<p class="synchy-field-note"><?php esc_html_e('Each site keeps its own saved URL, credentials, connection status, and Sync history. Switching sites reloads the page and Sync/Preview/Full Sync act on whichever site is active.', 'synchy'); ?></p>
+	</div>
+	<?php
+}
+
+function synchy_handle_switch_site_sync_profile(): void
+{
+	if (!current_user_can('manage_options')) {
+		wp_die(esc_html__('You are not allowed to change the Sync destination site.', 'synchy'), 403);
+	}
+
+	check_admin_referer('synchy_switch_site_sync_profile', 'synchy_site_sync_profile_nonce');
+
+	$profile_id = isset($_POST['profile_id']) ? sanitize_key(wp_unslash((string) $_POST['profile_id'])) : 'a';
+	synchy_set_active_site_sync_profile_id($profile_id);
+	synchy_ensure_site_sync_options_not_autoloaded();
+
+	$redirect = wp_get_referer();
+
+	if (!$redirect) {
+		$redirect = admin_url('admin.php?page=synchy-site-sync');
+	}
+
+	wp_safe_redirect($redirect);
+	exit;
+}
+
 function synchy_save_site_sync_options(array $options): array
 {
 	$options = synchy_sanitize_site_sync_options($options);
 
-	update_option(SYNCHY_SITE_SYNC_OPTIONS, $options, false);
+	update_option(synchy_site_sync_option_key(SYNCHY_SITE_SYNC_OPTIONS), $options, false);
 	synchy_ensure_site_sync_options_not_autoloaded();
 
 	return $options;
@@ -1236,7 +1403,7 @@ function synchy_get_site_sync_password_hint(array $options): string
 
 function synchy_get_sync_last_time(): int
 {
-	return max(0, (int) get_option(SYNCHY_SYNC_LAST_TIME_OPTION, 0));
+	return max(0, (int) get_option(synchy_site_sync_option_key(SYNCHY_SYNC_LAST_TIME_OPTION), 0));
 }
 
 function synchy_build_sync_connection_fingerprint(array $options): string
@@ -1259,14 +1426,14 @@ function synchy_build_sync_connection_fingerprint(array $options): string
 
 function synchy_get_sync_connection_state(): array
 {
-	$value = get_option(SYNCHY_SYNC_CONNECTION_STATE_OPTION, []);
+	$value = get_option(synchy_site_sync_option_key(SYNCHY_SYNC_CONNECTION_STATE_OPTION), []);
 
 	return is_array($value) ? $value : [];
 }
 
 function synchy_set_sync_connection_state(array $state): void
 {
-	update_option(SYNCHY_SYNC_CONNECTION_STATE_OPTION, $state, false);
+	update_option(synchy_site_sync_option_key(SYNCHY_SYNC_CONNECTION_STATE_OPTION), $state, false);
 }
 
 function synchy_get_current_sync_connection_state(array $options): array
@@ -1316,28 +1483,28 @@ function synchy_store_sync_connection_error(array $options, string $message): ar
 
 function synchy_set_sync_last_time(int $timestamp): void
 {
-	update_option(SYNCHY_SYNC_LAST_TIME_OPTION, max(0, $timestamp), false);
+	update_option(synchy_site_sync_option_key(SYNCHY_SYNC_LAST_TIME_OPTION), max(0, $timestamp), false);
 }
 
 function synchy_get_sync_status(): array
 {
-	$value = get_option(SYNCHY_SYNC_STATUS_OPTION, []);
+	$value = get_option(synchy_site_sync_option_key(SYNCHY_SYNC_STATUS_OPTION), []);
 
 	return is_array($value) ? $value : [];
 }
 
 function synchy_set_sync_status(array $status): void
 {
-	update_option(SYNCHY_SYNC_STATUS_OPTION, $status, false);
+	update_option(synchy_site_sync_option_key(SYNCHY_SYNC_STATUS_OPTION), $status, false);
 }
 
 function synchy_get_site_sync_site_id(): string
 {
-	$site_id = (string) get_option(SYNCHY_SITE_SYNC_SITE_ID_OPTION, '');
+	$site_id = (string) get_option(synchy_site_sync_option_key(SYNCHY_SITE_SYNC_SITE_ID_OPTION), '');
 
 	if ($site_id === '') {
 		$site_id = function_exists('wp_generate_uuid4') ? wp_generate_uuid4() : md5(home_url('/') . '|' . wp_salt('auth'));
-		update_option(SYNCHY_SITE_SYNC_SITE_ID_OPTION, $site_id, false);
+		update_option(synchy_site_sync_option_key(SYNCHY_SITE_SYNC_SITE_ID_OPTION), $site_id, false);
 	}
 
 	return $site_id;
@@ -1670,14 +1837,14 @@ function synchy_update_sync_job(array $job): array
 	}
 
 	$job['updated_at'] = gmdate('c');
-	update_option(SYNCHY_SYNC_JOB_OPTION, $job, false);
+	update_option(synchy_site_sync_option_key(SYNCHY_SYNC_JOB_OPTION), $job, false);
 
 	return $job;
 }
 
 function synchy_get_sync_job(): array
 {
-	$value = get_option(SYNCHY_SYNC_JOB_OPTION, []);
+	$value = get_option(synchy_site_sync_option_key(SYNCHY_SYNC_JOB_OPTION), []);
 
 	return is_array($value) ? $value : [];
 }
@@ -1882,6 +2049,7 @@ function synchy_build_full_sync_job(array $options, array $payload)
 		'job_id' => $job_id,
 		'sync_id' => (string) (($payload['summary']['syncId'] ?? '') ?: ('full-' . gmdate('YmdHis') . '-' . strtolower(wp_generate_password(6, false, false)))),
 		'worker_token' => wp_generate_password(32, false, false),
+		'profile_id' => synchy_get_active_site_sync_profile_id(),
 		'run_mode' => 'full',
 		'status' => 'running',
 		'resumable' => true,
@@ -2318,21 +2486,27 @@ function synchy_schedule_full_sync_worker(array $job, int $delay_seconds = 0): a
 		return $job;
 	}
 
+	$profile_id = (string) ($job['profile_id'] ?? synchy_get_active_site_sync_profile_id());
+
 	$timestamp = time() + max(0, $delay_seconds);
 	$job['next_run_at'] = gmdate('c', $timestamp);
 	$job = synchy_update_sync_job($job);
 
-	if (!wp_next_scheduled('synchy_run_full_sync_worker_event', [$worker_token])) {
-		wp_schedule_single_event($timestamp, 'synchy_run_full_sync_worker_event', [$worker_token]);
+	if (!wp_next_scheduled('synchy_run_full_sync_worker_event', [$worker_token, $profile_id])) {
+		wp_schedule_single_event($timestamp, 'synchy_run_full_sync_worker_event', [$worker_token, $profile_id]);
 	}
 
 	return $job;
 }
 
-function synchy_trigger_full_sync_worker_async(string $worker_token): void
+function synchy_trigger_full_sync_worker_async(string $worker_token, string $profile_id = ''): void
 {
 	if ($worker_token === '') {
 		return;
+	}
+
+	if ($profile_id === '') {
+		$profile_id = synchy_get_active_site_sync_profile_id();
 	}
 
 	$ajax_url = admin_url('admin-ajax.php');
@@ -2346,6 +2520,7 @@ function synchy_trigger_full_sync_worker_async(string $worker_token): void
 			'body' => [
 				'action' => 'synchy_run_full_sync_worker',
 				'token' => $worker_token,
+				'profile_id' => $profile_id,
 			],
 		]
 	);
@@ -2730,13 +2905,14 @@ function synchy_should_sync_option_name(string $option_name): bool
 		SYNCHY_EXPORT_JOB_OPTION,
 		SYNCHY_IMPORT_OPTIONS,
 		SYNCHY_IMPORT_RESULT_OPTION,
-		SYNCHY_SITE_SYNC_OPTIONS,
-		SYNCHY_SITE_SYNC_JOB_OPTION,
-		SYNCHY_SYNC_STATUS_OPTION,
-		SYNCHY_SYNC_JOB_OPTION,
-		SYNCHY_SYNC_LAST_TIME_OPTION,
 		'ajforms_last_portal_db_error',
 	];
+
+	foreach (synchy_get_site_sync_profile_ids() as $profile_id) {
+		foreach ([SYNCHY_SITE_SYNC_OPTIONS, SYNCHY_SITE_SYNC_JOB_OPTION, SYNCHY_SYNC_STATUS_OPTION, SYNCHY_SYNC_JOB_OPTION, SYNCHY_SYNC_LAST_TIME_OPTION] as $base) {
+			$excluded[] = synchy_site_sync_option_key($base, $profile_id);
+		}
+	}
 
 	if (in_array($option_name, $excluded, true)) {
 		return false;
@@ -5131,14 +5307,14 @@ function synchy_get_running_export_job(): array
 
 function synchy_update_site_sync_job(array $job): array
 {
-	update_option(SYNCHY_SITE_SYNC_JOB_OPTION, $job, false);
+	update_option(synchy_site_sync_option_key(SYNCHY_SITE_SYNC_JOB_OPTION), $job, false);
 
 	return $job;
 }
 
 function synchy_get_site_sync_job(): array
 {
-	$value = get_option(SYNCHY_SITE_SYNC_JOB_OPTION, []);
+	$value = get_option(synchy_site_sync_option_key(SYNCHY_SITE_SYNC_JOB_OPTION), []);
 
 	return is_array($value) ? $value : [];
 }
@@ -7406,6 +7582,13 @@ function synchy_process_full_sync_job(array $job, array $options)
 		}
 
 		$job = synchy_mark_full_sync_batch_complete($job, $index);
+		$job['message'] = sprintf(
+			/* translators: 1: completed batch number, 2: total batch count, 3: batch label */
+			__('Finished batch %1$d of %2$d: %3$s', 'synchy'),
+			$index + 1,
+			count($batches),
+			(string) ($batch['label'] ?? '')
+		);
 		synchy_update_sync_job($job);
 
 		if (!empty($job['pause_requested']) && ($index + 1) < count($batches)) {
@@ -7502,9 +7685,14 @@ function synchy_continue_full_sync_job(array $options)
 	return synchy_run_full_sync_worker_by_token($worker_token);
 }
 
-function synchy_run_full_sync_worker_by_token(string $worker_token)
+function synchy_run_full_sync_worker_by_token(string $worker_token, string $profile_id = '')
 {
 	$worker_token = sanitize_text_field($worker_token);
+
+	if ($profile_id !== '') {
+		synchy_set_site_sync_profile_context($profile_id);
+	}
+
 	$job = synchy_get_sync_job();
 
 	if ($worker_token === '' || ($job['run_mode'] ?? '') !== 'full' || (string) ($job['worker_token'] ?? '') !== $worker_token) {
@@ -7541,7 +7729,7 @@ function synchy_run_full_sync_worker_by_token(string $worker_token)
 
 		if (($job['run_mode'] ?? '') === 'full' && ($job['status'] ?? '') === 'running') {
 			$job = synchy_schedule_full_sync_worker($job, 1);
-			synchy_trigger_full_sync_worker_async((string) ($job['worker_token'] ?? ''));
+			synchy_trigger_full_sync_worker_async((string) ($job['worker_token'] ?? ''), (string) ($job['profile_id'] ?? ''));
 		}
 
 		return $job;
@@ -11272,6 +11460,7 @@ function synchy_render_site_sync_page(array $current): void
 	<div class="wrap synchy-admin">
 		<?php synchy_render_notice(); ?>
 		<div class="synchy-shell">
+			<?php synchy_render_site_sync_profile_switcher(); ?>
 			<div class="synchy-hero">
 				<div>
 					<p class="synchy-eyebrow"><?php esc_html_e('Upload Workflow', 'synchy'); ?></p>
@@ -11716,6 +11905,7 @@ function synchy_render_incremental_site_sync_page(array $current): void
 	<div class="wrap synchy-admin">
 		<?php synchy_render_notice(); ?>
 		<div class="synchy-shell">
+			<?php synchy_render_site_sync_profile_switcher(); ?>
 			<form method="post" action="<?php echo esc_url(synchy_get_site_sync_save_url()); ?>" class="synchy-form" data-synchy-sync-form>
 				<?php synchy_render_site_sync_save_fields(); ?>
 				<input type="hidden" name="<?php echo esc_attr(SYNCHY_SITE_SYNC_OPTIONS); ?>[sync_scope_selection_present]" value="1" />
@@ -11781,6 +11971,19 @@ function synchy_render_incremental_site_sync_page(array $current): void
 						</div>
 
 						<div class="synchy-sync-connection-form">
+							<div class="synchy-field">
+								<label class="synchy-label" for="synchy-sync-profile-label"><?php esc_html_e('Site Label', 'synchy'); ?></label>
+								<input
+									id="synchy-sync-profile-label"
+									type="text"
+									class="regular-text"
+									name="<?php echo esc_attr(SYNCHY_SITE_SYNC_OPTIONS); ?>[profile_label]"
+									value="<?php echo esc_attr((string) ($options['profile_label'] ?? '')); ?>"
+									placeholder="<?php echo esc_attr(synchy_get_site_sync_profile_default_label(synchy_get_active_site_sync_profile_id())); ?>"
+								/>
+								<p class="synchy-field-note"><?php esc_html_e('Shown on the site switcher above, e.g. "Staging" or "Production".', 'synchy'); ?></p>
+							</div>
+
 							<div class="synchy-field">
 								<label class="synchy-label" for="synchy-sync-destination-url"><?php esc_html_e('WordPress URL', 'synchy'); ?></label>
 								<input
@@ -12247,9 +12450,9 @@ add_action('wp_dashboard_setup', function (): void {
 	);
 });
 
-add_action('synchy_run_full_sync_worker_event', function (string $worker_token): void {
-	synchy_run_full_sync_worker_by_token($worker_token);
-}, 10, 1);
+add_action('synchy_run_full_sync_worker_event', function (string $worker_token, string $profile_id = 'a'): void {
+	synchy_run_full_sync_worker_by_token($worker_token, $profile_id);
+}, 10, 2);
 
 add_action('admin_init', function (): void {
 	synchy_ensure_site_sync_options_not_autoloaded();
@@ -12276,6 +12479,7 @@ add_action('admin_init', function (): void {
 });
 
 add_action('admin_post_synchy_save_site_sync_options', 'synchy_handle_save_site_sync_options');
+add_action('admin_post_synchy_switch_site_sync_profile', 'synchy_handle_switch_site_sync_profile');
 
 add_action('wp_ajax_synchy_start_export', function (): void {
 	if (!current_user_can('manage_options')) {
@@ -12525,7 +12729,8 @@ add_action('wp_ajax_synchy_continue_full_sync', function (): void {
 
 add_action('wp_ajax_synchy_run_full_sync_worker', function (): void {
 	$token = isset($_POST['token']) ? sanitize_text_field(wp_unslash((string) $_POST['token'])) : '';
-	$result = synchy_run_full_sync_worker_by_token($token);
+	$profile_id = isset($_POST['profile_id']) ? sanitize_key(wp_unslash((string) $_POST['profile_id'])) : '';
+	$result = synchy_run_full_sync_worker_by_token($token, $profile_id);
 
 	if (is_wp_error($result)) {
 		wp_send_json_error(['message' => $result->get_error_message()], 400);
@@ -12536,7 +12741,8 @@ add_action('wp_ajax_synchy_run_full_sync_worker', function (): void {
 
 add_action('wp_ajax_nopriv_synchy_run_full_sync_worker', function (): void {
 	$token = isset($_POST['token']) ? sanitize_text_field(wp_unslash((string) $_POST['token'])) : '';
-	$result = synchy_run_full_sync_worker_by_token($token);
+	$profile_id = isset($_POST['profile_id']) ? sanitize_key(wp_unslash((string) $_POST['profile_id'])) : '';
+	$result = synchy_run_full_sync_worker_by_token($token, $profile_id);
 
 	if (is_wp_error($result)) {
 		wp_send_json_error(['message' => $result->get_error_message()], 400);

@@ -1314,7 +1314,9 @@
 				currentStatus = data.status;
 				renderStatus(data.status);
 			}
-			currentJob = mergeJobResponse(data.job) || buildSyntheticFullSyncJob() || currentJob;
+			currentJob = mergeJobResponse(data.job)
+				|| buildSyntheticFullSyncJob()
+				|| (isTerminalSyncStatus(currentStatus?.status) ? null : currentJob);
 			if (isTerminalSyncStatus(currentStatus?.status) && currentJob?.status !== "running") {
 				clearFullSyncDisplay();
 			}
