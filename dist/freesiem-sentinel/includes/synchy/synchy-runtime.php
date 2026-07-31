@@ -2253,7 +2253,10 @@ function synchy_get_sync_storage_root(): string
 		return '';
 	}
 
-	return wp_normalize_path(trailingslashit((string) $uploads['basedir']) . 'synchy-sync');
+	$active_profile_id = synchy_get_active_site_sync_profile_id();
+	$dir_name = $active_profile_id === 'a' ? 'synchy-sync' : 'synchy-sync-' . $active_profile_id;
+
+	return wp_normalize_path(trailingslashit((string) $uploads['basedir']) . $dir_name);
 }
 
 function synchy_get_sync_state_path(): string
@@ -9197,7 +9200,13 @@ function synchy_run_sync_changes(array $raw_options)
 {
 	$options = synchy_sanitize_site_sync_options($raw_options);
 	$selection = synchy_get_sync_preview_selection($_POST);
-	$force_full = synchy_should_force_full_sync($_POST);
+	// Trust the client's "full sync" request, but also force a full baseline
+	// whenever any currently-selected scope has never been synced for this
+	// destination profile. This makes a fresh destination profile (e.g. a
+	// newly added second site) always get a genuine first baseline instead
+	// of a partial delta, even if the browser's preview/button state didn't
+	// classify the run as "full".
+	$force_full = synchy_should_force_full_sync($_POST) || !empty(synchy_get_sync_scope_status($options)['hasPendingBaseline']);
 	$validation = synchy_validate_site_sync_options($options);
 
 	if (is_wp_error($validation)) {

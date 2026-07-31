@@ -1569,7 +1569,7 @@
 		const scopeLabels = getSelectedScopeLabels();
 		const selectedFileSections = form.querySelectorAll('input[name="synchy_sync_selected_file_scopes[]"]:checked').length;
 		const selectedDbTables = form.querySelectorAll('input[name="synchy_sync_selected_db_tables[]"]:checked').length;
-		const isFullSync = latestPreviewMode === "full" || getIsBatchedBaselinePreview() || Boolean(latestPreview?.forceFull);
+		const isFullSync = latestPreviewMode === "full" || getIsBatchedBaselinePreview() || Boolean(latestPreview?.forceFull) || getHasPendingBaselineSelection();
 		const dbSyncEnabled = latestPreview?.dbSyncDisabled === false;
 		const confirmMessage = [
 			isFullSync
