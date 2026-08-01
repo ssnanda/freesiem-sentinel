@@ -40,6 +40,7 @@
 	const previewMessage = document.querySelector("[data-synchy-sync-preview-message]");
 	const previewBatchCounter = document.querySelector("[data-synchy-sync-batch-counter]");
 	const previewTreeContainer = document.querySelector("[data-synchy-sync-preview-tree]");
+	const runningWarning = document.querySelector("[data-synchy-sync-running-warning]");
 	const statusBadge = document.querySelector("[data-synchy-sync-status-badge]");
 	const statusSummary = document.querySelector("[data-synchy-sync-status-summary]");
 	const targetNote = document.querySelector("[data-synchy-sync-target-note]");
@@ -296,6 +297,14 @@
 	const isTerminalSyncStatus = (status) =>
 		["success", "complete", "completed", "done", "error", "failed"].includes(String(status || ""));
 
+	const setRunningWarningVisible = (visible) => {
+		if (!runningWarning) {
+			return;
+		}
+
+		runningWarning.classList.toggle("is-hidden", !visible);
+	};
+
 	const clearFullSyncDisplay = () => {
 		currentJob = null;
 		latestFullSyncPlan = null;
@@ -319,6 +328,7 @@
 			previewMessage.textContent = config.strings.previewDefault || "Run Preview to load the pending file sections and database tables.";
 		}
 
+		setRunningWarningVisible(false);
 		renderProgress(null);
 		updateActionButtons();
 	};
@@ -385,7 +395,7 @@
 			status: "running",
 			runMode: "full",
 			phase: currentJob?.phase || "sending_package",
-			phaseLabel: currentJob?.phaseLabel || (config.strings.syncRunning || "Sync running"),
+			phaseLabel: currentJob?.phaseLabel || (config.strings.syncRunning || "Sync Job Running"),
 			progress: Number(currentJob?.progress || 1),
 			message: currentJob?.message || currentStatus?.message || "Full Sync is running.",
 			filesCount: Number(currentJob?.filesCount || parsed.filesCount || 0),
@@ -405,6 +415,7 @@
 		const savedStatus = String(currentStatus?.status || "");
 
 		if (isTerminalSyncStatus(savedStatus) && !["running", "paused", "failed_partial"].includes(jobStatus)) {
+			setRunningWarningVisible(false);
 			return;
 		}
 
@@ -420,16 +431,18 @@
 			&& !(savedStatus === "running")
 			&& !hasBatchPlan
 		) {
+			setRunningWarningVisible(false);
 			return;
 		}
 
 		const effectiveStatus = jobStatus || savedStatus || "running";
 		previewBadge.textContent = effectiveStatus === "running"
-			? (config.strings.syncRunning || "Sync running")
+			? (config.strings.syncRunning || "Sync Job Running")
 			: effectiveStatus === "paused"
 				? (config.strings.paused || "Paused")
 				: (config.strings.resumeReady || "Resume ready");
 		previewMessage.textContent = currentJob?.message || currentStatus?.message || "Full Sync batches are in progress.";
+		setRunningWarningVisible(effectiveStatus === "running");
 		renderPreviewBatchCounter(latestPreview);
 	};
 
@@ -549,7 +562,7 @@
 		}
 
 		if (progressPhase) {
-			progressPhase.textContent = job.phaseLabel || (config.strings.syncRunning || "Sync running");
+			progressPhase.textContent = job.phaseLabel || (config.strings.syncRunning || "Sync Job Running");
 		}
 
 		if (progressPercent) {
@@ -1192,20 +1205,36 @@
 		renderPreviewTree(preview);
 	};
 
+	const STATUS_BADGE_CLASSES = ["synchy-badge--connected", "synchy-badge--danger", "synchy-badge--active", "synchy-badge--warning", "synchy-badge--muted"];
+
 	const getStatusBadge = (status) => {
 		switch (String(status?.status || "")) {
 			case "success":
-				return config.strings.success || "Success";
+				return config.strings.success || "In Sync";
 			case "paused":
 				return config.strings.paused || "Paused";
 			case "running":
 				return config.strings.syncingAction || "Syncing...";
 			case "error":
-				return config.strings.error || "Error";
+				return config.strings.error || "Sync Error";
 			case "idle":
-				return config.strings.noChanges || "No changes";
+				return config.strings.noChanges || "In Sync";
 			default:
-				return config.strings.awaitingBaseline || "Awaiting baseline";
+				return config.strings.awaitingBaseline || "Out of Sync";
+		}
+	};
+
+	const getStatusBadgeClass = (status) => {
+		switch (String(status?.status || "")) {
+			case "success":
+			case "idle":
+				return "synchy-badge--connected";
+			case "error":
+				return "synchy-badge--danger";
+			case "running":
+				return "synchy-badge--active";
+			default:
+				return "synchy-badge--warning";
 		}
 	};
 
@@ -1246,6 +1275,8 @@
 			config.localSiteVersion = currentStatus.siteVersion;
 		}
 		statusBadge.textContent = getStatusBadge(status);
+		statusBadge.classList.remove(...STATUS_BADGE_CLASSES);
+		statusBadge.classList.add(getStatusBadgeClass(status));
 		statusSummary.textContent = buildStatusSummary(status);
 
 		if (isTerminalSyncStatus(currentStatus?.status) && currentJob?.status !== "running") {
@@ -1356,6 +1387,10 @@
 			renderPreviewTree(latestPreview || latestFullSyncPlan);
 			if (currentJob?.runMode === "full" && currentJob?.status === "running") {
 				statusBadge.textContent = config.strings.syncingAction || "Syncing...";
+		statusBadge.classList.remove(...STATUS_BADGE_CLASSES);
+		statusBadge.classList.add("synchy-badge--active");
+				statusBadge.classList.remove(...STATUS_BADGE_CLASSES);
+				statusBadge.classList.add("synchy-badge--active");
 				statusSummary.textContent = currentJob.message || "Full Sync is running. Keep this tab open while the batches run.";
 			} else {
 				renderStatus(data.status || {});
@@ -1366,6 +1401,10 @@
 			previewMessage.textContent = error.message;
 			if (currentJob?.runMode === "full" && currentJob?.status === "running") {
 				statusBadge.textContent = config.strings.syncingAction || "Syncing...";
+		statusBadge.classList.remove(...STATUS_BADGE_CLASSES);
+		statusBadge.classList.add("synchy-badge--active");
+				statusBadge.classList.remove(...STATUS_BADGE_CLASSES);
+				statusBadge.classList.add("synchy-badge--active");
 				statusSummary.textContent = "Full Sync is still running. Retrying status refresh after: " + error.message;
 				window.setTimeout(pollSyncJob, 1000);
 			} else {
@@ -1531,6 +1570,8 @@
 
 		setBusy(true);
 		statusBadge.textContent = config.strings.syncingAction || "Syncing...";
+		statusBadge.classList.remove(...STATUS_BADGE_CLASSES);
+		statusBadge.classList.add("synchy-badge--active");
 		statusSummary.textContent = "Saving the selected manual baseline state.";
 
 		try {
@@ -1598,7 +1639,7 @@
 			status: "running",
 			runMode: isFullSync ? "full" : "delta",
 			phase: "building_package",
-			phaseLabel: config.strings.syncRunning || "Sync running",
+			phaseLabel: config.strings.syncRunning || "Sync Job Running",
 			progress: 5,
 			message: "Starting Sync...",
 			filesCount: Number(latestPreview?.filesCount || 0),
@@ -1613,6 +1654,8 @@
 		renderPreviewTree(latestPreview);
 		window.setTimeout(pollSyncJob, 100);
 		statusBadge.textContent = config.strings.syncingAction || "Syncing...";
+		statusBadge.classList.remove(...STATUS_BADGE_CLASSES);
+		statusBadge.classList.add("synchy-badge--active");
 		statusSummary.textContent = isFullSync
 			? "Full Sync is starting. Keep this tab open while the batches run."
 			: "Sync is running. Keep this tab open until it finishes.";
@@ -1635,6 +1678,10 @@
 			if (currentJob?.runMode === "full" && currentJob?.status === "running") {
 				setBusy(true);
 				statusBadge.textContent = config.strings.syncingAction || "Syncing...";
+		statusBadge.classList.remove(...STATUS_BADGE_CLASSES);
+		statusBadge.classList.add("synchy-badge--active");
+				statusBadge.classList.remove(...STATUS_BADGE_CLASSES);
+				statusBadge.classList.add("synchy-badge--active");
 				statusSummary.textContent = "Full Sync is running. Keep this tab open while the batches run.";
 				renderProgress(currentJob);
 				window.setTimeout(driveFullSyncFromBrowser, 50);
@@ -1701,7 +1748,7 @@
 			runMode: "full",
 			pauseRequested: false,
 			phase: "sending_package",
-			phaseLabel: config.strings.syncRunning || "Sync running",
+			phaseLabel: config.strings.syncRunning || "Sync Job Running",
 			message: "Resuming Sync...",
 		};
 		renderProgress(currentJob);
@@ -1722,6 +1769,10 @@
 				renderStatus(data.status || {});
 			} else {
 				statusBadge.textContent = config.strings.syncingAction || "Syncing...";
+		statusBadge.classList.remove(...STATUS_BADGE_CLASSES);
+		statusBadge.classList.add("synchy-badge--active");
+				statusBadge.classList.remove(...STATUS_BADGE_CLASSES);
+				statusBadge.classList.add("synchy-badge--active");
 				statusSummary.textContent = currentJob.message || "Full Sync is running. Keep this tab open while the batches run.";
 			}
 			applyScopeStatus(data.scopeStatus || null);

@@ -11930,7 +11930,8 @@ function synchy_render_incremental_site_sync_page(array $current): void
 	$last_sync_time = synchy_get_sync_last_time();
 	$status = synchy_get_sync_status();
 	$status_state = (string) ($status['status'] ?? '');
-	$status_badge = __('Awaiting baseline', 'synchy');
+	$status_badge = __('Out of Sync', 'synchy');
+	$status_badge_class = 'synchy-badge--warning';
 	$status_message = __('No Sync has completed yet. The first Sync sends a baseline for the selected folders and database tables. Later Sync runs send deltas only.', 'synchy');
 	$status_destination = (string) ($status['destinationUrl'] ?? $options['destination_url'] ?? __('Not set', 'synchy'));
 	$status_mode = ucfirst((string) ($status['mode'] ?? ($last_sync_time > 0 ? 'delta' : 'baseline')));
@@ -11940,6 +11941,7 @@ function synchy_render_incremental_site_sync_page(array $current): void
 	$pending_batch_counter = '';
 	$pending_tree_classes = 'synchy-sync-tree is-hidden';
 	$pending_tree_html = '';
+	$pending_running_warning = false;
 	$full_sync_status = (string) ($visible_sync_job['status'] ?? '');
 
 	if (
@@ -11947,8 +11949,9 @@ function synchy_render_incremental_site_sync_page(array $current): void
 		&& in_array($full_sync_status, ['running', 'paused', 'failed_partial'], true)
 	) {
 		$pending_badge = $full_sync_status === 'running'
-			? __('Sync running', 'synchy')
+			? __('Sync Job Running', 'synchy')
 			: ($full_sync_status === 'paused' ? __('Paused', 'synchy') : __('Resume ready', 'synchy'));
+		$pending_running_warning = $full_sync_status === 'running';
 		$pending_message = (string) ($visible_sync_job['message'] ?? __('Full Sync batches are in progress.', 'synchy'));
 		$total_batches = max(0, (int) ($visible_sync_job['total_batches'] ?? 0));
 		$completed_batches = max(0, (int) ($visible_sync_job['completed_batches'] ?? 0));
@@ -12015,7 +12018,8 @@ function synchy_render_incremental_site_sync_page(array $current): void
 			$pending_tree_html = (string) ob_get_clean();
 		}
 	} elseif ((string) ($status['status'] ?? '') === 'running') {
-		$pending_badge = __('Sync running', 'synchy');
+		$pending_badge = __('Sync Job Running', 'synchy');
+		$pending_running_warning = true;
 		$pending_message = (string) ($status['message'] ?? __('Full Sync batches are in progress.', 'synchy'));
 
 		if (preg_match('/(\d+)\s+batches\s+planned/i', $pending_message, $matches)) {
@@ -12046,17 +12050,23 @@ function synchy_render_incremental_site_sync_page(array $current): void
 	$run_button_label = $scope_status['hasPendingBaseline'] ? __('Start Baseline', 'synchy') : __('Push', 'synchy');
 
 	if ($status_state === 'success') {
-		$status_badge = __('Success', 'synchy');
+		$status_badge = __('In Sync', 'synchy');
+		$status_badge_class = 'synchy-badge--connected';
 		$status_message = (string) ($status['message'] ?? __('The most recent Sync completed successfully.', 'synchy'));
 	} elseif ($status_state === 'error') {
-		$status_badge = __('Error', 'synchy');
+		$status_badge = __('Sync Error', 'synchy');
+		$status_badge_class = 'synchy-badge--danger';
 		$status_message = (string) ($status['message'] ?? __('The most recent Sync failed.', 'synchy'));
 		$status_summary = $status_message;
 	} elseif ($status_state === 'idle') {
-		$status_badge = __('No changes', 'synchy');
+		$status_badge = __('In Sync', 'synchy');
+		$status_badge_class = 'synchy-badge--connected';
 		$status_message = (string) ($status['message'] ?? __('No file or database changes were detected for Sync.', 'synchy'));
+	} elseif ($status_state === 'running') {
+		$status_badge = __('Syncing...', 'synchy');
+		$status_badge_class = 'synchy-badge--active';
 	} elseif (!$scope_status['hasPendingBaseline']) {
-		$status_badge = __('Delta ready', 'synchy');
+		$status_badge = __('Out of Sync', 'synchy');
 	}
 
 	$connection_remote_version = (string) ($connection_remote_site['sentinelVersion'] ?? $connection_remote_site['pluginVersion'] ?? '');
@@ -12096,7 +12106,7 @@ function synchy_render_incremental_site_sync_page(array $current): void
 					<div class="synchy-panel synchy-sync-control-panel" data-synchy-sync-status-panel data-synchy-sync-pending-panel>
 						<div class="synchy-stack__split">
 							<h2><?php esc_html_e('Workflow', 'synchy'); ?></h2>
-							<span class="synchy-badge" data-synchy-sync-status-badge><?php echo esc_html($status_badge); ?></span>
+							<span class="synchy-badge synchy-badge--hero <?php echo esc_attr($status_badge_class); ?>" data-synchy-sync-status-badge><?php echo esc_html($status_badge); ?></span>
 						</div>
 						<p class="synchy-status-line" data-synchy-sync-status-summary><?php echo esc_html($status_summary); ?></p>
 
@@ -12141,6 +12151,10 @@ function synchy_render_incremental_site_sync_page(array $current): void
 								</div>
 								<p class="synchy-field-note" data-synchy-sync-preview-message><?php echo esc_html($pending_message); ?></p>
 								<p class="synchy-field-note<?php echo $pending_batch_counter === '' ? ' is-hidden' : ''; ?>" data-synchy-sync-batch-counter><?php echo esc_html($pending_batch_counter); ?></p>
+								<div class="synchy-sync-warning-banner<?php echo $pending_running_warning ? '' : ' is-hidden'; ?>" data-synchy-sync-running-warning>
+									<span class="synchy-sync-warning-banner__icon" aria-hidden="true">⚠</span>
+									<span><?php esc_html_e('A Sync job is actively running. Do not make changes to this site (content, plugins, or settings) until it finishes — edits made mid-Sync can be lost or cause conflicts.', 'synchy'); ?></span>
+								</div>
 								<div class="<?php echo esc_attr($pending_tree_classes); ?>" data-synchy-sync-preview-tree><?php echo wp_kses_post($pending_tree_html); ?></div>
 							</div>
 						</div>
@@ -13560,10 +13574,10 @@ add_action('admin_enqueue_scripts', function (string $hook_suffix): void {
 					'syncingAction' => __('Syncing...', 'synchy'),
 					'paused' => __('Paused', 'synchy'),
 					'resumeReady' => __('Resume ready', 'synchy'),
-					'success' => __('Success', 'synchy'),
-					'error' => __('Error', 'synchy'),
-					'noChanges' => __('No changes', 'synchy'),
-					'awaitingBaseline' => __('Awaiting baseline', 'synchy'),
+					'success' => __('In Sync', 'synchy'),
+					'error' => __('Sync Error', 'synchy'),
+					'noChanges' => __('In Sync', 'synchy'),
+					'awaitingBaseline' => __('Out of Sync', 'synchy'),
 					'baseline' => __('Baseline', 'synchy'),
 					'delta' => __('Delta', 'synchy'),
 					'lastRun' => __('Last run', 'synchy'),
@@ -13596,7 +13610,8 @@ add_action('admin_enqueue_scripts', function (string $hook_suffix): void {
 					'previewSelectionTitle' => __('Pending Changes', 'synchy'),
 					'previewSelectionHelp' => __('Review the pending file sections and database tables, then uncheck anything you do not want to send.', 'synchy'),
 					'sampleRowIds' => __('Sample row IDs', 'synchy'),
-					'syncRunning' => __('Sync running', 'synchy'),
+					'syncRunning' => __('Sync Job Running', 'synchy'),
+					'syncJobRunningWarning' => __('A Sync job is actively running. Do not make changes to this site (content, plugins, or settings) until it finishes — edits made mid-Sync can be lost or cause conflicts.', 'synchy'),
 					'selectedChanges' => __('Selected changes', 'synchy'),
 					'tableUpdates' => __('Table updates', 'synchy'),
 					'sampleFiles' => __('Sample files', 'synchy'),

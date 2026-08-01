@@ -707,6 +707,47 @@
 	color: #1f8f5f;
 }
 
+.synchy-badge--danger {
+	background: #fdeaea;
+	color: #b3261e;
+}
+
+.synchy-badge--active {
+	background: #e8f0fe;
+	color: #1a56db;
+}
+
+.synchy-badge--hero {
+	padding: 12px 22px;
+	font-size: 20px;
+	font-weight: 800;
+	letter-spacing: 0.01em;
+}
+
+.synchy-sync-warning-banner {
+	display: flex;
+	align-items: flex-start;
+	gap: 10px;
+	margin: 10px 0 0;
+	padding: 12px 14px;
+	border-radius: 10px;
+	background: #fff5df;
+	border: 1px solid #f1c98a;
+	color: #7a4a00;
+	font-size: 13px;
+	font-weight: 700;
+	line-height: 1.4;
+}
+
+.synchy-sync-warning-banner.is-hidden {
+	display: none;
+}
+
+.synchy-sync-warning-banner__icon {
+	font-size: 16px;
+	line-height: 1.4;
+}
+
 .synchy-export-meta {
 	display: grid;
 	grid-template-columns: repeat(4, minmax(0, 1fr));
