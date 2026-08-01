@@ -1183,6 +1183,27 @@
 			: (config.strings.delta || "Delta");
 		const filesCount = Number(preview.filesCount || 0);
 		const dbRows = Number(preview.dbRows || 0);
+
+		// A prior Sync can report "success" and still leave the top status
+		// badge showing In Sync even after new pending changes show up in a
+		// later Preview -- renderStatus() only reflects the *last run's*
+		// outcome, it has no way to know a fresh Preview found real work.
+		// Whenever Preview confirms real pending files or DB rows, the badge
+		// must say so regardless of what the last run reported.
+		const jobIsRunning = currentJob?.status === "running" || currentStatus?.status === "running";
+
+		if (!jobIsRunning) {
+			if (filesCount > 0 || dbRows > 0) {
+				statusBadge.textContent = config.strings.awaitingBaseline || "Out of Sync";
+				statusBadge.classList.remove(...STATUS_BADGE_CLASSES);
+				statusBadge.classList.add("synchy-badge--danger", "synchy-badge--attention");
+			} else if (String(currentStatus?.status || "") !== "error") {
+				statusBadge.textContent = config.strings.success || "In Sync";
+				statusBadge.classList.remove(...STATUS_BADGE_CLASSES);
+				statusBadge.classList.add("synchy-badge--connected");
+			}
+		}
+
 		const dryRunSummary = [
 			`Source: ${preview.sourcePath || "Unknown"}`,
 			`Destination: ${preview.destinationPath || destinationUrlInput?.value?.trim() || "Not set"}`,
@@ -1205,7 +1226,7 @@
 		renderPreviewTree(preview);
 	};
 
-	const STATUS_BADGE_CLASSES = ["synchy-badge--connected", "synchy-badge--danger", "synchy-badge--active", "synchy-badge--warning", "synchy-badge--muted"];
+	const STATUS_BADGE_CLASSES = ["synchy-badge--connected", "synchy-badge--danger", "synchy-badge--active", "synchy-badge--warning", "synchy-badge--muted", "synchy-badge--attention"];
 
 	const getStatusBadge = (status) => {
 		switch (String(status?.status || "")) {
@@ -1228,13 +1249,13 @@
 		switch (String(status?.status || "")) {
 			case "success":
 			case "idle":
-				return "synchy-badge--connected";
+				return ["synchy-badge--connected"];
 			case "error":
-				return "synchy-badge--danger";
+				return ["synchy-badge--danger", "synchy-badge--attention"];
 			case "running":
-				return "synchy-badge--active";
+				return ["synchy-badge--active"];
 			default:
-				return "synchy-badge--warning";
+				return ["synchy-badge--danger", "synchy-badge--attention"];
 		}
 	};
 

@@ -724,6 +724,17 @@
 	letter-spacing: 0.01em;
 }
 
+.synchy-badge--attention {
+	padding: 16px 30px;
+	font-size: 28px;
+	border: 2px solid #b3261e;
+}
+
+.synchy-badge--attention::before {
+	content: "\27A4";
+	margin-right: 12px;
+}
+
 .synchy-sync-warning-banner {
 	display: flex;
 	align-items: flex-start;

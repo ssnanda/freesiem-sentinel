@@ -11931,7 +11931,7 @@ function synchy_render_incremental_site_sync_page(array $current): void
 	$status = synchy_get_sync_status();
 	$status_state = (string) ($status['status'] ?? '');
 	$status_badge = __('Out of Sync', 'synchy');
-	$status_badge_class = 'synchy-badge--warning';
+	$status_badge_class = 'synchy-badge--danger synchy-badge--attention';
 	$status_message = __('No Sync has completed yet. The first Sync sends a baseline for the selected folders and database tables. Later Sync runs send deltas only.', 'synchy');
 	$status_destination = (string) ($status['destinationUrl'] ?? $options['destination_url'] ?? __('Not set', 'synchy'));
 	$status_mode = ucfirst((string) ($status['mode'] ?? ($last_sync_time > 0 ? 'delta' : 'baseline')));
@@ -12055,7 +12055,7 @@ function synchy_render_incremental_site_sync_page(array $current): void
 		$status_message = (string) ($status['message'] ?? __('The most recent Sync completed successfully.', 'synchy'));
 	} elseif ($status_state === 'error') {
 		$status_badge = __('Sync Error', 'synchy');
-		$status_badge_class = 'synchy-badge--danger';
+		$status_badge_class = 'synchy-badge--danger synchy-badge--attention';
 		$status_message = (string) ($status['message'] ?? __('The most recent Sync failed.', 'synchy'));
 		$status_summary = $status_message;
 	} elseif ($status_state === 'idle') {
