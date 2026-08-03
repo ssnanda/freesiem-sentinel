@@ -4,6 +4,9 @@
 	const config = window.synchyAdminBarPushConfig || {};
 	const node = document.querySelector("#wp-admin-bar-synchy-site-sync-push");
 	const button = node?.querySelector(":scope > .ab-item");
+	const statusNode = document.querySelector("#wp-admin-bar-synchy-site-sync-status");
+	const statusButton = statusNode?.querySelector(":scope > .ab-item");
+	let statusCheckBusy = false;
 
 	if (!node || !button) {
 		return;
@@ -50,6 +53,31 @@
 		return payload.data || {};
 	};
 
+	const checkStatus = async () => {
+		if (statusCheckBusy || node.classList.contains("synchy-admin-bar-push--busy")) {
+			return;
+		}
+
+		statusCheckBusy = true;
+		updateStatus(config.checkingLabel || "Checking...", "running");
+		setState("disabled", config.pushLabel || "Push");
+
+		try {
+			const runMode = config.requiresBaseline ? "full" : "delta";
+			const data = await sendAjax("synchy_preview_sync_changes", { synchy_sync_run_mode: runMode });
+			const preview = data.preview || {};
+			const hasChanges = Number(preview.filesCount || 0) > 0 || Number(preview.dbRows || 0) > 0;
+			updateStatus(hasChanges ? (config.outOfSyncLabel || "Out of Sync") : (config.inSyncLabel || "In Sync"), hasChanges ? "warning" : "success");
+			window.synchySetAdminBarPushEnabled(hasChanges);
+		} catch (error) {
+			updateStatus(config.errorLabel || "Sync Error", "error");
+			window.synchySetAdminBarPushEnabled(false);
+			window.alert(error.message);
+		} finally {
+			statusCheckBusy = false;
+		}
+	};
+
 	const finishFullSync = async (job) => {
 		let currentJob = job;
 		let latestData = {};
@@ -86,13 +114,21 @@
 
 			const isFull = runMode === "full" || Boolean(preview.forceFull);
 			const dbEnabled = preview.dbSyncDisabled === false;
+			const scopeLabels = Array.isArray(previewData.scopeStatus?.selectedScopeLabels) ? previewData.scopeStatus.selectedScopeLabels : [];
 			const message = [
 				isFull ? (config.confirmFull || "Run a full Sync and send all tracked changes now?") : (config.confirmSync || "Sync the previewed changes to the destination site now?"),
 				"",
 				`Destination: ${preview.destinationPath || config.destination || "Not set"}`,
+				`Scopes: ${scopeLabels.join(", ") || "None"}`,
 				`Files included: ${files.toLocaleString()}`,
+				`Files excluded: ${Number(preview.excludedFilesCount || 0).toLocaleString()}`,
+				`DB sync: ${dbEnabled ? "enabled" : "disabled"}`,
 				`Database rows: ${rows.toLocaleString()}`,
-			].join("\n");
+				`Protected AJ Core options: ${Number(preview.protectedOptionsCount || 0).toLocaleString()}`,
+				`Protected AJ Core tables: ${Number(preview.protectedTablesCount || 0).toLocaleString()}`,
+				dbEnabled ? "Database Sync requires this explicit confirmation. Protected AJ Core options and runtime tables will still be excluded." : "",
+				isFull ? `Planned batches: ${Number(preview.totalBatches || 0).toLocaleString()}` : "",
+			].filter(Boolean).join("\n");
 
 			if (!window.confirm(message)) {
 				setState("enabled", config.pushLabel || "Push");
@@ -124,5 +160,9 @@
 	button.addEventListener("click", (event) => {
 		event.preventDefault();
 		quickPush();
+	});
+	statusButton?.addEventListener("click", (event) => {
+		event.preventDefault();
+		checkStatus();
 	});
 })();

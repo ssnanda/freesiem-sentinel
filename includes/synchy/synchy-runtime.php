@@ -4935,7 +4935,7 @@ add_action('admin_bar_menu', function (WP_Admin_Bar $admin_bar): void {
 		'href' => $sync_url,
 		'meta' => [
 			'class' => 'synchy-admin-bar-status synchy-admin-bar-status--' . sanitize_html_class((string) $sync_status['state']),
-			'title' => __('Open Backup & Restore Sync status', 'synchy'),
+			'title' => __('Click to check Sync status now', 'synchy'),
 		],
 	]);
 
@@ -4976,8 +4976,10 @@ function synchy_enqueue_admin_bar_push_script(): void
 		'destination' => (string) (synchy_get_site_sync_options()['destination_url'] ?? ''),
 		'pushLabel' => __('Push', 'synchy'),
 		'preparingLabel' => __('Preparing...', 'synchy'),
+		'checkingLabel' => __('Checking...', 'synchy'),
 		'syncingLabel' => __('Syncing...', 'synchy'),
 		'inSyncLabel' => __('In Sync', 'synchy'),
+		'outOfSyncLabel' => __('Out of Sync', 'synchy'),
 		'errorLabel' => __('Sync Error', 'synchy'),
 		'confirmSync' => __('Sync the previewed changes to the destination site now?', 'synchy'),
 		'confirmFull' => __('Run a full Sync for the selected scopes and send all tracked files and rows to the destination site now?', 'synchy'),
@@ -5010,6 +5012,7 @@ function synchy_render_admin_bar_sync_styles(): void
 			border: 1px solid rgba(255, 255, 255, 0.38);
 			color: #08130d;
 			text-shadow: 0 1px 0 rgba(255, 255, 255, 0.28);
+			cursor: pointer;
 		}
 		#wpadminbar .synchy-admin-bar-status--success > .ab-item { background: #39ed83; }
 		#wpadminbar .synchy-admin-bar-status--warning > .ab-item { background: #ffd84a; }
