@@ -743,7 +743,7 @@
 		const resumableFullSync = getHasResumableFullSync();
 
 		previewButton.disabled = busy || !hasSelection;
-		runButton.disabled = busy || !hasSelection || (hasFullSyncPreview && !hasBatchedBaselinePreview) || !hasPreviewChanges || !hasSelectedPreviewItems || runningFullSync || resumableFullSync;
+		runButton.disabled = busy || !hasSelection || runningFullSync || resumableFullSync || (latestPreview !== null && ((hasFullSyncPreview && !hasBatchedBaselinePreview) || !hasPreviewChanges || !hasSelectedPreviewItems));
 		fullSyncButton.disabled = (busy && !runningFullSync) || !hasSelection || runningFullSync || resumableFullSync || (hasFullSyncPreview && (!hasPreviewChanges || !hasSelectedPreviewItems));
 		pauseSyncButton.disabled = !runningFullSync;
 		resumeSyncButton.disabled = runningFullSync || !resumableFullSync;
@@ -1242,6 +1242,9 @@
 		node.classList.remove(...ADMIN_BAR_STATUS_CLASSES);
 		node.classList.add(`synchy-admin-bar-status--${state}`);
 		item.innerHTML = `<span class="synchy-admin-bar-status__prefix">Status:</span> ${label}`;
+		if (typeof window.synchySetAdminBarPushEnabled === "function") {
+			window.synchySetAdminBarPushEnabled(state === "warning" && label === (config.strings.awaitingBaseline || "Out of Sync"));
+		}
 	};
 
 	const getStatusBadge = (status) => {
@@ -1502,7 +1505,9 @@
 		}
 	};
 
-	const runPreview = async (mode = "delta") => {
+	const runPreview = async (mode = "delta", pushAfterPreview = false) => {
+		let previewReadyForPush = false;
+
 		if (!requireSelection()) {
 			updateActionButtons();
 			return;
@@ -1542,6 +1547,7 @@
 				renderConnectionResult(data.remoteSite || {}, false);
 			}
 			renderPreview(latestPreview);
+			previewReadyForPush = pushAfterPreview && getHasPreviewChanges() && getHasSelectedPreviewItems();
 			if (effectiveMode === "full" && latestPreview !== null) {
 				statusBadge.textContent = config.strings.previewReady || "Preview ready";
 				statusSummary.textContent = getHasPreviewChanges()
@@ -1554,6 +1560,10 @@
 			previewMessage.textContent = error.message;
 		} finally {
 			setBusy(false);
+		}
+
+		if (previewReadyForPush) {
+			await runSync();
 		}
 	};
 
@@ -1891,7 +1901,14 @@
 
 		runPreview("full");
 	});
-	runButton.addEventListener("click", runSync);
+	runButton.addEventListener("click", () => {
+		if (latestPreview === null) {
+			runPreview("delta", true);
+			return;
+		}
+
+		runSync();
+	});
 	pauseSyncButton.addEventListener("click", pauseFullSync);
 	resumeSyncButton.addEventListener("click", resumeFullSync);
 	resetSyncButton.addEventListener("click", resetSyncState);

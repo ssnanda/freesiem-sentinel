@@ -4914,6 +4914,7 @@ add_action('admin_bar_menu', function (WP_Admin_Bar $admin_bar): void {
 
 	$sync_url = admin_url('admin.php?page=synchy-site-sync');
 	$sync_status = synchy_get_admin_bar_sync_status();
+	$push_enabled = (string) $sync_status['state'] === 'warning' && (string) $sync_status['label'] === __('Out of Sync', 'synchy');
 
 	$admin_bar->add_node([
 		'id' => 'synchy-site-sync-version',
@@ -4941,13 +4942,52 @@ add_action('admin_bar_menu', function (WP_Admin_Bar $admin_bar): void {
 	$admin_bar->add_node([
 		'id' => 'synchy-site-sync-push',
 		'title' => '<span class="dashicons dashicons-upload" aria-hidden="true"></span>' . esc_html__('Push', 'synchy'),
-		'href' => $sync_url,
+		'href' => $push_enabled ? '#' : false,
 		'meta' => [
-			'class' => 'synchy-admin-bar-push',
-			'title' => __('Open Sync to preview and push changes', 'synchy'),
+			'class' => 'synchy-admin-bar-push' . ($push_enabled ? '' : ' synchy-admin-bar-push--disabled'),
+			'title' => $push_enabled ? __('Preview and push changes now', 'synchy') : __('Push is available when the site is out of sync', 'synchy'),
+			'aria-disabled' => $push_enabled ? 'false' : 'true',
 		],
 	]);
 }, 90);
+
+function synchy_enqueue_admin_bar_push_script(): void
+{
+	if (!is_admin_bar_showing() || !current_user_can('manage_options')) {
+		return;
+	}
+
+	$script_path = plugin_dir_path(__FILE__) . 'assets/admin-bar-push.js';
+
+	if (!file_exists($script_path)) {
+		return;
+	}
+
+	$status = synchy_get_admin_bar_sync_status();
+	$scope_status = synchy_get_sync_scope_status(synchy_get_site_sync_options());
+	$enabled = (string) $status['state'] === 'warning' && (string) $status['label'] === __('Out of Sync', 'synchy');
+
+	wp_enqueue_script('synchy-admin-bar-push', plugin_dir_url(__FILE__) . 'assets/admin-bar-push.js', [], (string) filemtime($script_path), true);
+	wp_localize_script('synchy-admin-bar-push', 'synchyAdminBarPushConfig', [
+		'ajaxUrl' => admin_url('admin-ajax.php'),
+		'nonce' => wp_create_nonce('synchy_sync_ajax'),
+		'enabled' => $enabled,
+		'requiresBaseline' => !empty($scope_status['hasPendingBaseline']),
+		'destination' => (string) (synchy_get_site_sync_options()['destination_url'] ?? ''),
+		'pushLabel' => __('Push', 'synchy'),
+		'preparingLabel' => __('Preparing...', 'synchy'),
+		'syncingLabel' => __('Syncing...', 'synchy'),
+		'inSyncLabel' => __('In Sync', 'synchy'),
+		'errorLabel' => __('Sync Error', 'synchy'),
+		'confirmSync' => __('Sync the previewed changes to the destination site now?', 'synchy'),
+		'confirmFull' => __('Run a full Sync for the selected scopes and send all tracked files and rows to the destination site now?', 'synchy'),
+		'noChangesMessage' => __('No pending changes were found. The site is in sync.', 'synchy'),
+		'unknownError' => __('Backup & Restore hit an unexpected Sync error.', 'synchy'),
+	]);
+}
+
+add_action('admin_enqueue_scripts', 'synchy_enqueue_admin_bar_push_script');
+add_action('wp_enqueue_scripts', 'synchy_enqueue_admin_bar_push_script');
 
 function synchy_render_admin_bar_sync_styles(): void
 {
@@ -4988,6 +5028,19 @@ function synchy_render_admin_bar_sync_styles(): void
 			background: linear-gradient(135deg, #ff62c1, #bd72ff);
 			color: #fff;
 		}
+		#wpadminbar #wp-admin-bar-synchy-site-sync-push.synchy-admin-bar-push--disabled > .ab-item {
+			border-color: #777;
+			background: #555;
+			box-shadow: none;
+			color: #aaa;
+			cursor: not-allowed;
+			opacity: 0.72;
+		}
+		#wpadminbar #wp-admin-bar-synchy-site-sync-push.synchy-admin-bar-push--busy > .ab-item {
+			cursor: progress;
+			animation: synchy-admin-bar-push-pulse 1s ease-in-out infinite alternate;
+		}
+		@keyframes synchy-admin-bar-push-pulse { to { filter: brightness(1.25); } }
 		#wpadminbar #wp-admin-bar-synchy-site-sync-push .dashicons {
 			width: 16px;
 			height: 16px;
