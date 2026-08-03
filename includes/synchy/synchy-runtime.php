@@ -4896,6 +4896,10 @@ function synchy_get_admin_bar_sync_status(): array
 		return ['label' => __('Sync Error', 'synchy'), 'state' => 'error'];
 	}
 
+	if ($status_state === 'pending') {
+		return ['label' => __('Out of Sync', 'synchy'), 'state' => 'warning'];
+	}
+
 	if (!empty($scope_status['hasPendingBaseline']) || !in_array($status_state, ['success', 'idle'], true)) {
 		return ['label' => __('Out of Sync', 'synchy'), 'state' => 'warning'];
 	}
@@ -9485,7 +9489,19 @@ function synchy_preview_sync_changes(array $raw_options)
 	}
 
 	$result = (array) ($preview['preview'] ?? []);
-	$result['lastStatus'] = synchy_get_sync_status();
+	$last_status = synchy_get_sync_status();
+	$result['lastStatus'] = $last_status;
+	$has_pending_changes = (int) ($result['filesCount'] ?? 0) > 0 || (int) ($result['dbRows'] ?? 0) > 0;
+	synchy_set_sync_status(array_merge(
+		$last_status,
+		[
+			'status' => $has_pending_changes ? 'pending' : 'idle',
+			'message' => $has_pending_changes
+				? __('Preview found changes waiting to be pushed.', 'synchy')
+				: __('No file or database changes were detected for Sync.', 'synchy'),
+			'at' => gmdate('c'),
+		]
+	));
 
 	return $result;
 }

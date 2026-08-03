@@ -1197,10 +1197,12 @@
 				statusBadge.textContent = config.strings.awaitingBaseline || "Out of Sync";
 				statusBadge.classList.remove(...STATUS_BADGE_CLASSES);
 				statusBadge.classList.add("synchy-badge--danger", "synchy-badge--attention");
+				updateAdminBarStatus(config.strings.awaitingBaseline || "Out of Sync", "warning");
 			} else if (String(currentStatus?.status || "") !== "error") {
 				statusBadge.textContent = config.strings.success || "In Sync";
 				statusBadge.classList.remove(...STATUS_BADGE_CLASSES);
 				statusBadge.classList.add("synchy-badge--connected");
+				updateAdminBarStatus(config.strings.success || "In Sync", "success");
 			}
 		}
 
@@ -1227,6 +1229,20 @@
 	};
 
 	const STATUS_BADGE_CLASSES = ["synchy-badge--connected", "synchy-badge--danger", "synchy-badge--active", "synchy-badge--warning", "synchy-badge--muted", "synchy-badge--attention"];
+	const ADMIN_BAR_STATUS_CLASSES = ["synchy-admin-bar-status--success", "synchy-admin-bar-status--warning", "synchy-admin-bar-status--error", "synchy-admin-bar-status--running"];
+
+	const updateAdminBarStatus = (label, state) => {
+		const node = document.querySelector("#wp-admin-bar-synchy-site-sync-status");
+		const item = node?.querySelector(":scope > .ab-item");
+
+		if (!node || !item) {
+			return;
+		}
+
+		node.classList.remove(...ADMIN_BAR_STATUS_CLASSES);
+		node.classList.add(`synchy-admin-bar-status--${state}`);
+		item.innerHTML = `<span class="synchy-admin-bar-status__prefix">Status:</span> ${label}`;
+	};
 
 	const getStatusBadge = (status) => {
 		switch (String(status?.status || "")) {
@@ -1298,6 +1314,12 @@
 		statusBadge.textContent = getStatusBadge(status);
 		statusBadge.classList.remove(...STATUS_BADGE_CLASSES);
 		statusBadge.classList.add(getStatusBadgeClass(status));
+		updateAdminBarStatus(
+			getStatusBadge(status),
+			String(status?.status || "") === "running"
+				? "running"
+				: (String(status?.status || "") === "error" ? "error" : (["success", "idle"].includes(String(status?.status || "")) ? "success" : "warning"))
+		);
 		statusSummary.textContent = buildStatusSummary(status);
 
 		if (isTerminalSyncStatus(currentStatus?.status) && currentJob?.status !== "running") {
