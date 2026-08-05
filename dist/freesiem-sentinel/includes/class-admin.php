@@ -2714,7 +2714,7 @@ class Freesiem_Admin
 		echo '<label><input type="checkbox" name="use_staging" value="1" ' . checked(!empty($ssl_settings['use_staging']), true, false) . ' /> ' . esc_html__('Use staging', 'freesiem-sentinel') . '</label>';
 		echo '<label><input type="checkbox" name="detailed_logs" value="1" ' . checked(!empty($ssl_settings['detailed_logs']), true, false) . ' /> ' . esc_html__('Detailed logs', 'freesiem-sentinel') . '</label>';
 		echo '</div>';
-		echo '<p style="margin:10px 0 0 0;color:#646970;">' . esc_html__('Webroot is auto-populated from nginx when available and falls back to WordPress paths if needed. HSTS and Auto-renew remain stored-only in this version.', 'freesiem-sentinel') . '</p>';
+		echo '<p style="margin:10px 0 0 0;color:#646970;">' . esc_html__('Webroot is auto-populated from nginx when available and falls back to WordPress paths if needed. HSTS remains stored-only in this version. Auto-renew runs a daily background check and renews the certificate automatically once it is within its renewal window.', 'freesiem-sentinel') . '</p>';
 		echo '<p style="margin:12px 0 0 0;">';
 		submit_button(__('Save SSL Settings', 'freesiem-sentinel'), 'secondary', '', false);
 		echo '</p>';
@@ -2907,7 +2907,7 @@ class Freesiem_Admin
 		$this->render_ssl_checkbox_field('check_port_443', __('Intent to use port 443', 'freesiem-sentinel'), !empty($ssl_settings['check_port_443']), __('Used for readiness reporting only right now.', 'freesiem-sentinel'));
 		$this->render_ssl_checkbox_field('force_https', __('Force HTTPS', 'freesiem-sentinel'), !empty($ssl_settings['force_https']), __('Stored only for future implementation; no redirects are added in this version.', 'freesiem-sentinel'));
 		$this->render_ssl_checkbox_field('hsts_enabled', __('HSTS', 'freesiem-sentinel'), !empty($ssl_settings['hsts_enabled']), __('Applied through nginx SSL config when you run Apply SSL to Nginx.', 'freesiem-sentinel'));
-		$this->render_ssl_checkbox_field('auto_renew', __('Auto-renew', 'freesiem-sentinel'), !empty($ssl_settings['auto_renew']), __('Stored only for future implementation; no renewal jobs are scheduled in this version.', 'freesiem-sentinel'));
+		$this->render_ssl_checkbox_field('auto_renew', __('Auto-renew', 'freesiem-sentinel'), !empty($ssl_settings['auto_renew']), __('Runs a daily background check (via WP-Cron) and renews the certificate automatically once it is within its Let\'s Encrypt renewal window. Nginx is reloaded automatically where the host allows it; otherwise a manual reload may be needed.', 'freesiem-sentinel'));
 		$this->render_ssl_checkbox_field('use_staging', __('Use Let’s Encrypt staging', 'freesiem-sentinel'), !empty($ssl_settings['use_staging']), __('Recommended for safe simulated execution planning.', 'freesiem-sentinel'));
 		$this->render_ssl_checkbox_field('detailed_logs', __('Enable detailed SSL logs', 'freesiem-sentinel'), !empty($ssl_settings['detailed_logs']), __('Adds category and context details to the lightweight SSL log store.', 'freesiem-sentinel'));
 		echo '</table>';
@@ -3182,11 +3182,7 @@ class Freesiem_Admin
 
 	private function ssl_result_log_level(string $status): string
 	{
-		return match (sanitize_key($status)) {
-			'success', 'applied' => 'success',
-			'warning', 'warn', 'blocked', 'no_action_needed', 'manual_required' => 'warning',
-			default => 'error',
-		};
+		return freesiem_sentinel_ssl_result_log_level($status);
 	}
 
 	private function get_login_protection_failure_context(string $username, ?WP_Error $error = null): array

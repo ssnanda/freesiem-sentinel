@@ -1375,6 +1375,15 @@ function freesiem_sentinel_get_ssl_logs(): array
 	return $logs;
 }
 
+function freesiem_sentinel_ssl_result_log_level(string $status): string
+{
+	return match (sanitize_key($status)) {
+		'success', 'applied' => 'success',
+		'warning', 'warn', 'blocked', 'no_action_needed', 'manual_required' => 'warning',
+		default => 'error',
+	};
+}
+
 function freesiem_sentinel_add_ssl_log(string $level, string $message, string $category = 'general', array $context = []): void
 {
 	$logs = freesiem_sentinel_get_ssl_logs();
@@ -3076,13 +3085,23 @@ function freesiem_sentinel_get_nginx_preview_config(array $integration, bool $en
 	return implode("\n", $lines);
 }
 
-function freesiem_sentinel_get_nginx_redirect_block(string $host): string
+function freesiem_sentinel_get_nginx_redirect_block(string $host, string $webroot = ''): string
 {
+	$webroot = $webroot !== '' ? $webroot : freesiem_sentinel_recommend_ssl_webroot_path();
+
 	$lines = [
 		'# BEGIN freeSIEM Sentinel Nginx HTTPS Redirect',
 		'server {',
 		'    listen 80;',
 		'    server_name ' . $host . ';',
+		// Let's Encrypt HTTP-01 validation must reach this path over plain HTTP.
+		// Redirecting it to HTTPS breaks renewal whenever the current cert is
+		// expired or otherwise not trusted, so it's excluded from the redirect.
+		'    location ^~ /.well-known/acme-challenge/ {',
+		'        root ' . $webroot . ';',
+		'        default_type "text/plain";',
+		'    }',
+		'',
 		'    return 301 https://$host$request_uri;',
 		'}',
 		'# END freeSIEM Sentinel Nginx HTTPS Redirect',
@@ -3492,6 +3511,84 @@ function freesiem_sentinel_get_ssl_endpoint_status(?array $environment = null): 
 	return $result;
 }
 
+function freesiem_sentinel_run_nginx_control_command(string $nginx_path, string $args, string $action, string $redacted_command): array
+{
+	// Opportunistically use a passwordless sudo grant if the host has one
+	// configured (see /etc/sudoers.d on VPS/self-hosted installs). This is
+	// entirely optional: on hosts without such a grant (shared hosting,
+	// containers without sudo, etc.) the probe just fails fast and the
+	// command runs unprefixed, exactly as before.
+	$sudo_probe = freesiem_sentinel_run_ssl_shell_command('sudo -n true', 'sudo_probe', 10, 'sudo -n true');
+	$prefix = !empty($sudo_probe['success']) ? 'sudo -n ' : '';
+
+	return freesiem_sentinel_run_ssl_shell_command(
+		$prefix . escapeshellarg($nginx_path) . ' ' . $args,
+		$action,
+		60,
+		$prefix . $redacted_command
+	);
+}
+
+/**
+ * Test and reload nginx only -- no config content is written or rolled back.
+ * Used after a certificate renewal (where the config on disk hasn't changed,
+ * only the cert files it points at) as well as by freesiem_sentinel_apply_ssl_to_nginx().
+ * Safe to call on hosts with no nginx at all: it detects that and skips.
+ */
+function freesiem_sentinel_reload_nginx(?array $integration = null): array
+{
+	$integration = is_array($integration) ? $integration : freesiem_sentinel_detect_nginx_integration();
+	$nginx_path = (string) ($integration['nginx_binary']['path'] ?? '');
+
+	if ($nginx_path === '' || empty($integration['nginx_binary']['available'])) {
+		return [
+			'success' => false,
+			'status' => 'skipped',
+			'summary' => __('Nginx binary was not detected on this server; reload was skipped.', 'freesiem-sentinel'),
+			'test' => null,
+			'reload' => null,
+		];
+	}
+
+	$test = freesiem_sentinel_run_nginx_control_command($nginx_path, '-t', 'nginx_test', (string) ($integration['test_command'] ?? 'nginx -t'));
+	if (empty($test['success'])) {
+		$permission_denied = freesiem_sentinel_detect_permission_denied_message((string) ($test['stdout_summary'] ?? ''), (string) ($test['stderr_summary'] ?? ''));
+
+		return [
+			'success' => false,
+			'status' => $permission_denied ? 'manual_required' : 'failed',
+			'summary' => $permission_denied
+				? __('Nginx config test could not run with the available privileges. Run nginx -t and reload nginx manually as root to finalize the renewed certificate.', 'freesiem-sentinel')
+				: (!empty($test['stderr_summary']) ? (string) $test['stderr_summary'] : __('nginx -t failed.', 'freesiem-sentinel')),
+			'test' => $test,
+			'reload' => null,
+		];
+	}
+
+	$reload = freesiem_sentinel_run_nginx_control_command($nginx_path, '-s reload', 'nginx_reload', (string) ($integration['reload_command'] ?? 'nginx -s reload'));
+	if (empty($reload['success'])) {
+		$permission_denied = freesiem_sentinel_detect_permission_denied_message((string) ($reload['stdout_summary'] ?? ''), (string) ($reload['stderr_summary'] ?? ''));
+
+		return [
+			'success' => false,
+			'status' => $permission_denied ? 'manual_required' : 'failed',
+			'summary' => $permission_denied
+				? __('Nginx reload could not run with the available privileges. Reload nginx manually as root to finalize the renewed certificate.', 'freesiem-sentinel')
+				: (!empty($reload['stderr_summary']) ? (string) $reload['stderr_summary'] : __('nginx reload failed.', 'freesiem-sentinel')),
+			'test' => $test,
+			'reload' => $reload,
+		];
+	}
+
+	return [
+		'success' => true,
+		'status' => 'reloaded',
+		'summary' => __('Nginx reloaded successfully.', 'freesiem-sentinel'),
+		'test' => $test,
+		'reload' => $reload,
+	];
+}
+
 function freesiem_sentinel_apply_ssl_to_nginx(bool $enable_redirect = false): array
 {
 	$ssl_settings = freesiem_sentinel_get_ssl_settings();
@@ -3567,7 +3664,7 @@ function freesiem_sentinel_apply_ssl_to_nginx(bool $enable_redirect = false): ar
 	}
 
 	if ($enable_redirect) {
-		$redirect_block = freesiem_sentinel_get_nginx_redirect_block((string) ($integration['host'] ?? 'example.com'));
+		$redirect_block = freesiem_sentinel_get_nginx_redirect_block((string) ($integration['host'] ?? 'example.com'), (string) ($integration['webroot'] ?? ''));
 		if (!str_contains($patched_contents, 'return 301 https://$host$request_uri;')) {
 			$patched_contents = $redirect_block . "\n\n" . ltrim($patched_contents);
 		}
@@ -3648,7 +3745,8 @@ function freesiem_sentinel_apply_ssl_to_nginx(bool $enable_redirect = false): ar
 		];
 	}
 
-	$test = freesiem_sentinel_run_ssl_shell_command(escapeshellarg((string) ($integration['nginx_binary']['path'] ?: 'nginx')) . ' -t', 'nginx_test', 60, (string) ($integration['test_command'] ?? 'nginx -t'));
+	$nginx_control_path = (string) ($integration['nginx_binary']['path'] ?: 'nginx');
+	$test = freesiem_sentinel_run_nginx_control_command($nginx_control_path, '-t', 'nginx_test', (string) ($integration['test_command'] ?? 'nginx -t'));
 	if (empty($test['success'])) {
 		$test_permission_denied = freesiem_sentinel_detect_permission_denied_message((string) ($test['stdout_summary'] ?? ''), (string) ($test['stderr_summary'] ?? ''));
 		if (!$test_permission_denied) {
@@ -3687,7 +3785,7 @@ function freesiem_sentinel_apply_ssl_to_nginx(bool $enable_redirect = false): ar
 		];
 	}
 
-	$reload = freesiem_sentinel_run_ssl_shell_command(escapeshellarg((string) ($integration['nginx_binary']['path'] ?: 'nginx')) . ' -s reload', 'nginx_reload', 60, (string) ($integration['reload_command'] ?? 'nginx -s reload'));
+	$reload = freesiem_sentinel_run_nginx_control_command($nginx_control_path, '-s reload', 'nginx_reload', (string) ($integration['reload_command'] ?? 'nginx -s reload'));
 	if (empty($reload['success'])) {
 		$reload_permission_denied = freesiem_sentinel_detect_permission_denied_message((string) ($reload['stdout_summary'] ?? ''), (string) ($reload['stderr_summary'] ?? ''));
 		if (!$reload_permission_denied) {
@@ -3701,8 +3799,8 @@ function freesiem_sentinel_apply_ssl_to_nginx(bool $enable_redirect = false): ar
 			} elseif (!$snippet_exists && file_exists($snippet_path)) {
 				@unlink($snippet_path);
 			}
-			@freesiem_sentinel_run_ssl_shell_command(escapeshellarg((string) ($integration['nginx_binary']['path'] ?: 'nginx')) . ' -t', 'nginx_test_after_restore', 60, (string) ($integration['test_command'] ?? 'nginx -t'));
-			@freesiem_sentinel_run_ssl_shell_command(escapeshellarg((string) ($integration['nginx_binary']['path'] ?: 'nginx')) . ' -s reload', 'nginx_reload_after_restore', 60, (string) ($integration['reload_command'] ?? 'nginx -s reload'));
+			@freesiem_sentinel_run_nginx_control_command($nginx_control_path, '-t', 'nginx_test_after_restore', (string) ($integration['test_command'] ?? 'nginx -t'));
+			@freesiem_sentinel_run_nginx_control_command($nginx_control_path, '-s reload', 'nginx_reload_after_restore', (string) ($integration['reload_command'] ?? 'nginx -s reload'));
 		}
 
 		$state_updates['nginx_backup_path'] = $backup_path;

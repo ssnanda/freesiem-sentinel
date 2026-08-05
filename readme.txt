@@ -3,7 +3,7 @@ Contributors: freesiem
 Requires at least: 6.4
 Tested up to: 6.8
 Requires PHP: 8.1
-Stable tag: 1.0.45
+Stable tag: 1.0.47
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -70,6 +70,10 @@ Version bumps should always have matching git tags.
 GitHub Actions publishes the ZIP automatically when a `v*` tag is pushed.
 
 == Changelog ==
+
+= 1.0.47 =
+
+* Fix SSL auto-renew: wire the Auto-renew toggle to a real daily WP-Cron job that renews the certificate and reloads nginx (previously stored-only, never scheduled); exclude /.well-known/acme-challenge/ from the generated HTTPS redirect so future renewals aren't broken by it; reload nginx opportunistically via passwordless sudo when available, falling back to the existing manual-reload state otherwise.
 
 = 0.3.47 =
 
