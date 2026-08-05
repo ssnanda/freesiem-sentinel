@@ -2004,6 +2004,17 @@ function freesiem_sentinel_get_ssl_user_space_paths(?array $ssl_settings = null)
 		}
 	}
 
+	// This directory can end up inside the public webroot (whenever
+	// webroot_path is configured, which HTTP-01 challenge delivery needs it
+	// to be) and it holds private key material, so always lock it down at
+	// the web server level too - don't rely on file permissions alone, since
+	// some hosts run the webserver as the same user PHP writes as, which
+	// would make a 0600 key file readable over HTTP regardless. Self-heals
+	// on every call so existing installs pick this up without any action.
+	if ($root_dir !== '') {
+		freesiem_sentinel_ensure_ssl_directory_lockdown($root_dir);
+	}
+
 	return [
 		'base_path' => $selected_base,
 		'root_dir' => $root_dir,
@@ -2018,6 +2029,31 @@ function freesiem_sentinel_get_ssl_user_space_paths(?array $ssl_settings = null)
 			'logs_dir' => $logs_dir !== '' && freesiem_sentinel_path_is_writable($logs_dir),
 		],
 	];
+}
+
+/**
+ * Writes (or repairs) a `.htaccess` that denies all web access to the given
+ * directory, covering both the Apache 2.4 and 2.2 directive forms since
+ * shared-hosting Apache/LiteSpeed versions vary. Silently does nothing on
+ * webservers that don't read .htaccess (e.g. nginx) - that's a gap, but not
+ * a regression, since those setups were never relying on this file for
+ * protection in the first place.
+ */
+function freesiem_sentinel_ensure_ssl_directory_lockdown(string $directory): void
+{
+	$directory = rtrim($directory, '/\\');
+	if ($directory === '' || !file_exists($directory) || !freesiem_sentinel_path_is_writable($directory)) {
+		return;
+	}
+
+	$htaccess_path = $directory . '/.htaccess';
+	$expected = "<IfModule mod_authz_core.c>\n\tRequire all denied\n</IfModule>\n<IfModule !mod_authz_core.c>\n\tOrder allow,deny\n\tDeny from all\n</IfModule>\n";
+
+	if (file_exists($htaccess_path) && trim((string) file_get_contents($htaccess_path)) === trim($expected)) {
+		return;
+	}
+
+	file_put_contents($htaccess_path, $expected);
 }
 
 function freesiem_sentinel_detect_permission_denied_message(string $stdout, string $stderr): bool

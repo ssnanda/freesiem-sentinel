@@ -2660,6 +2660,12 @@ class Freesiem_Admin
 		$this->render_ssl_certificate_panel($certificate);
 		echo '</div>';
 
+		if ($resolved_provider === 'php-acme') {
+			echo '<div style="background:#fff;padding:18px;border:1px solid #dcdcde;border-radius:12px;">';
+			$this->render_ssl_php_acme_activation_guide($ssl_settings, $environment, $user_space);
+			echo '</div>';
+		}
+
 		echo '<div style="background:#fff;padding:18px;border:1px solid #dcdcde;border-radius:12px;">';
 		$this->render_ssl_nginx_section($ssl_settings, $environment, $ssl_state, $endpoint_status);
 		echo '</div>';
@@ -2788,6 +2794,54 @@ class Freesiem_Admin
 			}
 		}
 		echo '</details>';
+	}
+
+	/**
+	 * Shown only when the PHP ACME client is the active provider (no certbot,
+	 * no nginx apply available). This is the one thing "Issue Certificate"
+	 * does NOT do for you on shared hosting: a certbot/nginx VPS applies and
+	 * reloads itself, but on GoDaddy/Hostinger-style cPanel accounts nothing
+	 * terminates TLS with the freshly issued files until something installs
+	 * them into the host. Written up here after walking a real GoDaddy cPanel
+	 * account through it end to end.
+	 */
+	private function render_ssl_php_acme_activation_guide(array $ssl_settings, array $environment, array $user_space): void
+	{
+		$host = (string) ($environment['configured_host'] ?? '');
+		$config_dir = rtrim((string) ($user_space['config_dir'] ?? ''), '/\\');
+		$live_dir = $host !== '' && $config_dir !== '' ? $config_dir . '/live/' . $host : '';
+		$has_cpanel_creds = !empty($ssl_settings['cpanel_username']) && !empty($ssl_settings['cpanel_api_token']);
+
+		echo '<h2 style="margin-top:0;">' . esc_html__('Activating a PHP ACME Certificate', 'freesiem-sentinel') . '</h2>';
+		echo '<p style="margin-top:0;color:#646970;">' . esc_html__('The PHP ACME client issues and verifies a real Let\'s Encrypt certificate and writes it to disk - but on shared hosting, WordPress/PHP does not terminate HTTPS itself, so nothing here automatically becomes the certificate your visitors see. One extra step is needed, one way or another.', 'freesiem-sentinel') . '</p>';
+
+		echo '<p style="margin:14px 0 4px 0;"><strong>' . esc_html__('1. Check if it already installed automatically', 'freesiem-sentinel') . '</strong></p>';
+		echo '<p style="margin:0;color:#646970;">' . ($has_cpanel_creds
+			? esc_html__('cPanel auto-install credentials are configured, so the last Issue/Renew should have tried this already. Check the Logs tab for a "php_acme_cpanel_install" entry to see if it succeeded.', 'freesiem-sentinel')
+			: esc_html__('No cPanel auto-install credentials are configured below, so nothing was attempted automatically - this cert is sitting as files only for now.', 'freesiem-sentinel')) . ' ' . esc_html__('Check the Logs tab for a "php_acme_cpanel_install" entry either way.', 'freesiem-sentinel') . '</p>';
+
+		echo '<p style="margin:14px 0 4px 0;"><strong>' . esc_html__('2. If your host has cPanel, try its own AutoSSL first', 'freesiem-sentinel') . '</strong></p>';
+		echo '<p style="margin:0;color:#646970;">' . esc_html__('Many cPanel hosts (GoDaddy included) already run free Let\'s Encrypt automation independent of this plugin: cPanel -> Security -> SSL/TLS Status -> "Run AutoSSL" for your domain. If that\'s available, it\'s often the simplest way to get a valid cert installed.', 'freesiem-sentinel') . '</p>';
+
+		echo '<p style="margin:14px 0 4px 0;"><strong>' . esc_html__('3. Or let Sentinel install it automatically via cPanel', 'freesiem-sentinel') . '</strong></p>';
+		echo '<p style="margin:0;color:#646970;">' . esc_html__('Fill in the cPanel username and API token fields below (your cPanel username is usually the same as your account\'s home-directory folder name), Save, then click "Re-Issue Certificate" - saving the settings by itself does not trigger an install, only a fresh Issue/Renew does.', 'freesiem-sentinel') . '</p>';
+
+		echo '<p style="margin:14px 0 4px 0;"><strong>' . esc_html__('4. Or install it manually', 'freesiem-sentinel') . '</strong></p>';
+		echo '<ol style="margin:4px 0 0 20px;color:#646970;">';
+		echo '<li>' . sprintf(
+			/* translators: %s: filesystem path to the issued certificate's directory. */
+			esc_html__('In your host\'s File Manager (or FTP), find %s and download cert.pem, fullchain.pem, and privkey.pem.', 'freesiem-sentinel'),
+			'<code>' . esc_html($live_dir !== '' ? $live_dir : __('the path shown in "View Certificate" above', 'freesiem-sentinel')) . '</code>'
+		) . '</li>';
+		echo '<li>' . esc_html__('In cPanel: Security -> SSL/TLS -> "Manage SSL sites", select your domain.', 'freesiem-sentinel') . '</li>';
+		echo '<li>' . esc_html__('Certificate (CRT): upload/paste cert.pem - not fullchain.pem, cPanel rejects a multi-certificate file there as invalid.', 'freesiem-sentinel') . '</li>';
+		echo '<li>' . esc_html__('Private Key (KEY): upload/paste privkey.pem.', 'freesiem-sentinel') . '</li>';
+		echo '<li>' . esc_html__('Certificate Authority Bundle (CABUNDLE): leave this blank and click Install - cPanel auto-fetches the correct Let\'s Encrypt intermediate on its own in most cases. Only build a bundle manually (the second certificate block inside fullchain.pem, with the first block removed) if cPanel specifically complains that one is required.', 'freesiem-sentinel') . '</li>';
+		echo '<li>' . esc_html__('Click Install Certificate, then re-check the site in a private/incognito browser window.', 'freesiem-sentinel') . '</li>';
+		echo '</ol>';
+		echo '<p style="margin:10px 0 0 0;color:#646970;">' . esc_html__('Once confirmed working, delete any locally downloaded copies of these files from your computer - privkey.pem especially should not sit around longer than needed.', 'freesiem-sentinel') . '</p>';
+
+		echo '<p style="margin:14px 0 0 0;padding:10px 12px;border-radius:8px;background:#fef3c7;border:1px solid #fde68a;">' . esc_html__('Security note: this certificate\'s files live inside your webroot by default and get an automatic .htaccess (Require all denied) to block direct web access. If your host doesn\'t honor .htaccess (e.g. nginx instead of Apache/LiteSpeed), confirm the path above isn\'t reachable directly in a browser.', 'freesiem-sentinel') . '</p>';
 	}
 
 	private function render_ssl_nginx_section(array $ssl_settings, array $environment, array $ssl_state, array $endpoint_status): void
