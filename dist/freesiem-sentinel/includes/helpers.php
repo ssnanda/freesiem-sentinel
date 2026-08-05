@@ -981,6 +981,12 @@ function freesiem_sentinel_get_default_ssl_settings(): array
 		'auto_renew' => 0,
 		'use_staging' => 0,
 		'detailed_logs' => 0,
+		// 'auto' resolves to certbot when available, otherwise falls back to
+		// the built-in PHP ACME client - see freesiem_sentinel_resolve_ssl_provider().
+		'provider' => 'auto',
+		'cpanel_username' => '',
+		'cpanel_api_token' => '',
+		'cpanel_host_override' => '',
 	];
 }
 
@@ -993,6 +999,27 @@ function freesiem_sentinel_get_ssl_settings(): array
 	}
 
 	return wp_parse_args($saved, freesiem_sentinel_get_default_ssl_settings());
+}
+
+/**
+ * Resolves the effective SSL provider: 'auto' (the default) picks certbot
+ * when it's detected on the server, otherwise falls back to the built-in
+ * PHP ACME client so shared hosting without certbot (GoDaddy/Hostinger, etc.)
+ * still works. A user can also force 'certbot' or 'php-acme' explicitly.
+ */
+function freesiem_sentinel_resolve_ssl_provider(?array $ssl_settings = null, ?array $environment = null): string
+{
+	$ssl_settings = is_array($ssl_settings) ? $ssl_settings : freesiem_sentinel_get_ssl_settings();
+	$provider = (string) ($ssl_settings['provider'] ?? 'auto');
+
+	if (in_array($provider, ['certbot', 'php-acme'], true)) {
+		return $provider;
+	}
+
+	$certbot = is_array($environment) ? ($environment['certbot'] ?? null) : null;
+	$certbot_available = is_array($certbot) ? !empty($certbot['available']) : !empty(freesiem_sentinel_detect_certbot()['available']);
+
+	return $certbot_available ? 'certbot' : 'php-acme';
 }
 
 function freesiem_sentinel_recommend_ssl_webroot_path(?array $ssl_settings = null, ?array $environment = null, ?array $ssl_state = null): string
@@ -1062,6 +1089,16 @@ function freesiem_sentinel_sanitize_ssl_settings(array $settings): array
 	$settings['auto_renew'] = empty($settings['auto_renew']) ? 0 : 1;
 	$settings['use_staging'] = empty($settings['use_staging']) ? 0 : 1;
 	$settings['detailed_logs'] = empty($settings['detailed_logs']) ? 0 : 1;
+	$settings['provider'] = in_array((string) ($settings['provider'] ?? 'auto'), ['auto', 'certbot', 'php-acme'], true)
+		? (string) $settings['provider']
+		: 'auto';
+	$settings['cpanel_username'] = sanitize_text_field((string) ($settings['cpanel_username'] ?? ''));
+	// The caller (handle_save_ssl_settings()) is responsible for leaving this
+	// key out of its $updates array entirely when the form field was left
+	// blank, so a previously saved token survives - this just trims/keeps
+	// whatever value reaches here.
+	$settings['cpanel_api_token'] = trim((string) ($settings['cpanel_api_token'] ?? ''));
+	$settings['cpanel_host_override'] = trim(sanitize_text_field((string) ($settings['cpanel_host_override'] ?? '')));
 
 	return $settings;
 }
@@ -1720,6 +1757,7 @@ function freesiem_sentinel_get_ssl_environment_snapshot(?array $ssl_settings = n
 		'wp_content_writable' => freesiem_sentinel_path_is_writable($wp_content_dir),
 		'wp_cron_enabled' => !defined('DISABLE_WP_CRON') || !DISABLE_WP_CRON,
 		'http_support' => function_exists('wp_remote_get') && function_exists('wp_http_supports') && (wp_http_supports(['ssl' => false]) || wp_http_supports(['ssl' => true])),
+		'openssl_acme_support' => function_exists('openssl_pkey_new') && function_exists('openssl_sign') && function_exists('openssl_csr_new'),
 		'shell_functions' => $shell_functions,
 		'execution_support' => in_array(true, $shell_functions, true),
 		'is_https_configured' => $site_scheme === 'https' || $home_scheme === 'https',
@@ -1741,6 +1779,7 @@ function freesiem_sentinel_calculate_ssl_readiness(?array $ssl_settings = null, 
 	$has_method = in_array((string) ($ssl_settings['challenge_method'] ?? ''), ['webroot-http-01', 'standalone-http-01', 'manual-dns-01'], true);
 	$method_ready = freesiem_sentinel_ssl_challenge_ready($ssl_settings, $environment);
 	$required_core = $has_email && $has_host && $has_method;
+	$resolved_provider = freesiem_sentinel_resolve_ssl_provider($ssl_settings, $environment);
 	$blocker_codes = [];
 	$blocker_messages = [];
 	$warning_codes = [];
@@ -1771,17 +1810,32 @@ function freesiem_sentinel_calculate_ssl_readiness(?array $ssl_settings = null, 
 		$blocker_messages[] = __('Blocked: WordPress option storage could not be confirmed for SSL state updates.', 'freesiem-sentinel');
 	}
 
-	if (!$environment['execution_support']) {
-		$blocker_codes[] = 'command_execution_unavailable';
-		$blocker_messages[] = __('Blocked: No supported PHP command execution function is available on this server.', 'freesiem-sentinel');
+	if ($resolved_provider === 'certbot') {
+		if (!$environment['execution_support']) {
+			$blocker_codes[] = 'command_execution_unavailable';
+			$blocker_messages[] = __('Blocked: No supported PHP command execution function is available on this server.', 'freesiem-sentinel');
+		}
+
+		if (empty($environment['certbot']['available'])) {
+			$blocker_codes[] = 'certbot_missing';
+			$blocker_messages[] = __('Blocked: Certbot is not installed or not detectable on this server.', 'freesiem-sentinel');
+		}
+	} else {
+		// The built-in PHP ACME client needs neither shell execution nor
+		// certbot - it just needs PHP's OpenSSL extension and outbound HTTPS,
+		// which is exactly the shape of a locked-down shared host.
+		if (empty($environment['openssl_acme_support'])) {
+			$blocker_codes[] = 'openssl_acme_unsupported';
+			$blocker_messages[] = __('Blocked: The PHP OpenSSL extension on this server does not expose the functions the built-in ACME client needs.', 'freesiem-sentinel');
+		}
+
+		if (empty($environment['http_support'])) {
+			$blocker_codes[] = 'outbound_https_unavailable';
+			$blocker_messages[] = __('Blocked: This server cannot make outbound HTTPS requests, which the built-in ACME client needs to reach Let\'s Encrypt.', 'freesiem-sentinel');
+		}
 	}
 
-	if (empty($environment['certbot']['available'])) {
-		$blocker_codes[] = 'certbot_missing';
-		$blocker_messages[] = __('Blocked: Certbot is not installed or not detectable on this server.', 'freesiem-sentinel');
-	}
-
-	if ((string) ($ssl_settings['challenge_method'] ?? '') === 'webroot-http-01') {
+	if ($resolved_provider === 'certbot' && (string) ($ssl_settings['challenge_method'] ?? '') === 'webroot-http-01') {
 		$webroot = freesiem_sentinel_recommend_ssl_webroot_path($ssl_settings, $environment);
 
 		if ($webroot === '' || !file_exists($webroot) || !is_readable($webroot)) {
@@ -1789,6 +1843,11 @@ function freesiem_sentinel_calculate_ssl_readiness(?array $ssl_settings = null, 
 			$blocker_messages[] = __('Blocked: Webroot HTTP-01 requires a readable existing webroot path.', 'freesiem-sentinel');
 		}
 	}
+	// The php-acme provider always speaks HTTP-01 itself (via a built-in WP
+	// request responder, with a best-effort webroot file write as a second
+	// delivery path) regardless of the certbot-oriented challenge_method
+	// setting, so a missing/unreadable webroot there is a warning, not a
+	// hard blocker.
 
 	if (!$has_method) {
 		$warning_codes[] = 'missing_challenge_method';
@@ -2470,12 +2529,21 @@ function freesiem_sentinel_can_run_live_ssl_action(string $action, ?array $ssl_s
 	$method = (string) ($ssl_settings['challenge_method'] ?? 'webroot-http-01');
 	$state = freesiem_sentinel_get_ssl_state();
 	$certificate = freesiem_sentinel_get_certificate_view_data($state);
+	$resolved_provider = freesiem_sentinel_resolve_ssl_provider($ssl_settings, $environment);
 
-	if (empty($environment['certbot']['available'])) {
+	if ($resolved_provider === 'certbot' && empty($environment['certbot']['available'])) {
 		return ['allowed' => false, 'reason' => __('Certbot is not available on this server.', 'freesiem-sentinel')];
 	}
 
-	if (in_array($method, ['manual-dns-01'], true)) {
+	if ($resolved_provider === 'php-acme' && empty($environment['openssl_acme_support'])) {
+		return ['allowed' => false, 'reason' => __('The built-in PHP ACME client is not available: the OpenSSL PHP extension does not expose the functions it needs.', 'freesiem-sentinel')];
+	}
+
+	if ($resolved_provider === 'php-acme' && in_array($method, ['standalone-http-01', 'manual-dns-01'], true)) {
+		return ['allowed' => false, 'reason' => __('The built-in PHP ACME client currently only supports HTTP-01 validation; switch the challenge method to webroot-http-01.', 'freesiem-sentinel')];
+	}
+
+	if ($resolved_provider === 'certbot' && in_array($method, ['manual-dns-01'], true)) {
 		return ['allowed' => false, 'reason' => __('Manual DNS-01 is not fully automated for live execution in this version.', 'freesiem-sentinel')];
 	}
 
@@ -2496,9 +2564,14 @@ function freesiem_sentinel_can_run_live_ssl_action(string $action, ?array $ssl_s
 
 function freesiem_sentinel_execute_ssl_issue(?array $ssl_settings = null): array
 {
+	$ssl_settings = is_array($ssl_settings) ? $ssl_settings : freesiem_sentinel_get_ssl_settings();
 	$options = [];
 	if (!empty($_POST['force_reissue_existing_certificate'])) {
 		$options['force_reissue'] = true;
+	}
+
+	if (freesiem_sentinel_resolve_ssl_provider($ssl_settings) === 'php-acme') {
+		return freesiem_sentinel_execute_php_acme_action('issue', $ssl_settings, $options);
 	}
 
 	return freesiem_sentinel_execute_ssl_certbot_action('issue', $ssl_settings, $options);
@@ -2506,6 +2579,12 @@ function freesiem_sentinel_execute_ssl_issue(?array $ssl_settings = null): array
 
 function freesiem_sentinel_execute_ssl_renew(?array $ssl_settings = null): array
 {
+	$ssl_settings = is_array($ssl_settings) ? $ssl_settings : freesiem_sentinel_get_ssl_settings();
+
+	if (freesiem_sentinel_resolve_ssl_provider($ssl_settings) === 'php-acme') {
+		return freesiem_sentinel_execute_php_acme_action('renew', $ssl_settings, []);
+	}
+
 	return freesiem_sentinel_execute_ssl_certbot_action('renew', $ssl_settings);
 }
 
@@ -2653,6 +2732,331 @@ function freesiem_sentinel_execute_ssl_certbot_action(string $action, ?array $ss
 		'action_type' => $action,
 		'result_code' => $result_code,
 		'force_reissue' => $force_reissue,
+	];
+}
+
+/**
+ * Mirrors certbot's own default renewal window (only act within ~30 days of
+ * expiry). ACME v2 has no separate "renew" endpoint - a renewal is just a
+ * fresh order - so without this check a daily auto-renew cron would re-issue
+ * a brand new certificate every single day and quickly hit Let's Encrypt's
+ * rate limits (5 duplicate certs/week for the same domain).
+ */
+function freesiem_sentinel_php_acme_should_renew(array $ssl_state): bool
+{
+	$certificate = freesiem_sentinel_get_certificate_view_data($ssl_state);
+
+	if (empty($certificate['exists'])) {
+		return false;
+	}
+
+	$expires_timestamp = strtotime((string) ($certificate['expires_at'] ?? ''));
+	if ($expires_timestamp === false) {
+		return false;
+	}
+
+	return $expires_timestamp <= (time() + 30 * DAY_IN_SECONDS);
+}
+
+/**
+ * Stores the token/key-authorization pair for the HTTP-01 challenge currently
+ * in flight, and best-effort writes it as a plain file into the detected
+ * webroot too (WordPress's default .htaccess already exempts existing files
+ * from rewriting, so on Apache/LiteSpeed hosts - GoDaddy/Hostinger's usual
+ * stack - this is often the path that actually gets used).
+ */
+function freesiem_sentinel_prepare_acme_http_challenge(string $token, string $key_authorization, string $webroot): void
+{
+	$payload = ['token' => $token, 'key_authorization' => $key_authorization];
+	if (get_option('freesiem_sentinel_acme_pending_challenge', null) === null) {
+		add_option('freesiem_sentinel_acme_pending_challenge', $payload, '', false);
+	} else {
+		update_option('freesiem_sentinel_acme_pending_challenge', $payload, false);
+	}
+
+	$webroot = trim($webroot);
+	if ($webroot === '') {
+		return;
+	}
+
+	$dir = rtrim($webroot, '/\\') . '/.well-known/acme-challenge';
+	if (wp_mkdir_p($dir)) {
+		@file_put_contents($dir . '/' . $token, $key_authorization);
+	}
+}
+
+function freesiem_sentinel_cleanup_acme_http_challenge(string $token, string $webroot): void
+{
+	delete_option('freesiem_sentinel_acme_pending_challenge');
+
+	$webroot = trim($webroot);
+	if ($webroot === '') {
+		return;
+	}
+
+	$path = rtrim($webroot, '/\\') . '/.well-known/acme-challenge/' . $token;
+	if (file_exists($path)) {
+		@unlink($path);
+	}
+}
+
+/**
+ * The primary HTTP-01 delivery path: a virtual responder hooked on `init` at
+ * priority 0 (registered from Freesiem_Plugin::register()), so it runs well
+ * before any template_redirect-based HTTPS-force logic and can't be swallowed
+ * by a redirect. This means the built-in ACME client doesn't actually depend
+ * on the webroot file write succeeding, or on the auto-detected webroot path
+ * being correct - both real risks on shared hosting.
+ */
+function freesiem_sentinel_serve_acme_http_challenge(): void
+{
+	$uri = isset($_SERVER['REQUEST_URI']) ? (string) wp_unslash($_SERVER['REQUEST_URI']) : '';
+	$path = (string) wp_parse_url($uri, PHP_URL_PATH);
+
+	if (!preg_match('#/\.well-known/acme-challenge/([\w-]+)$#', $path, $matches)) {
+		return;
+	}
+
+	$pending = get_option('freesiem_sentinel_acme_pending_challenge', []);
+	if (!is_array($pending) || ($pending['token'] ?? '') !== $matches[1] || empty($pending['key_authorization'])) {
+		return;
+	}
+
+	header('Content-Type: text/plain; charset=utf-8');
+	echo (string) $pending['key_authorization'];
+	exit;
+}
+
+function freesiem_sentinel_execute_php_acme_action(string $action, ?array $ssl_settings = null, array $options = []): array
+{
+	$ssl_settings = is_array($ssl_settings) ? $ssl_settings : freesiem_sentinel_get_ssl_settings();
+	$environment = freesiem_sentinel_get_ssl_environment_snapshot($ssl_settings);
+	$preflight = freesiem_sentinel_run_ssl_preflight($ssl_settings);
+	$readiness = freesiem_sentinel_calculate_ssl_readiness($ssl_settings, $environment, $preflight);
+	$gate = freesiem_sentinel_can_run_live_ssl_action($action, $ssl_settings, $environment, $readiness);
+	$executed_at = freesiem_sentinel_get_iso8601_time();
+	$state = freesiem_sentinel_get_ssl_state();
+	$host = (string) ($environment['configured_host'] ?: $state['domain']);
+	$force_reissue = !empty($options['force_reissue']);
+	$status_key = $action === 'issue' ? 'last_issue_status' : 'last_renew_status';
+	$result_key = $action === 'issue' ? 'last_issue_result' : 'last_renew_result';
+	$at_key = $action === 'issue' ? 'last_issue_at' : 'last_renew_at';
+
+	if (empty($gate['allowed'])) {
+		freesiem_sentinel_update_ssl_state([
+			$status_key => 'blocked',
+			$result_key => $gate['reason'],
+			$at_key => $executed_at,
+		]);
+
+		return [
+			'success' => false,
+			'status' => 'blocked',
+			'summary' => $gate['reason'],
+			'command_preview' => '',
+			'execution' => null,
+			'verification' => null,
+			'executed_at' => $executed_at,
+			'action_type' => $action,
+			'result_code' => 'blocked',
+		];
+	}
+
+	// Renew only ever touches a certificate that already exists, exactly like
+	// the certbot path (auto-renew maintains an existing cert; the very first
+	// certificate always comes from an explicit Issue), and only within the
+	// renewal window unless the caller explicitly forced a re-issue.
+	if ($action === 'renew' && !$force_reissue && !freesiem_sentinel_php_acme_should_renew($state)) {
+		$certificate = freesiem_sentinel_get_certificate_view_data($state);
+		$summary = empty($certificate['exists'])
+			? __('No certificate exists yet for this host. Use Issue Certificate first.', 'freesiem-sentinel')
+			: __('Existing certificate detected; renewal is not due yet.', 'freesiem-sentinel');
+		freesiem_sentinel_update_ssl_state([
+			$status_key => 'no_action_needed',
+			$result_key => $summary,
+			$at_key => $executed_at,
+		]);
+
+		return [
+			'success' => true,
+			'status' => 'no_action_needed',
+			'summary' => $summary,
+			'command_preview' => '',
+			'execution' => null,
+			'verification' => null,
+			'executed_at' => $executed_at,
+			'action_type' => $action,
+			'result_code' => 'no_action_needed',
+		];
+	}
+
+	$user_space = freesiem_sentinel_get_ssl_user_space_paths($ssl_settings);
+	$webroot = freesiem_sentinel_recommend_ssl_webroot_path($ssl_settings, $environment, $state);
+	$client = new Freesiem_Acme_Client($ssl_settings);
+	$run_result = $client->run(
+		$host,
+		$user_space,
+		(string) ($ssl_settings['acme_contact_email'] ?? ''),
+		static function (string $token, string $key_authorization) use ($webroot): void {
+			freesiem_sentinel_prepare_acme_http_challenge($token, $key_authorization, $webroot);
+		},
+		static function (string $token) use ($webroot): void {
+			freesiem_sentinel_cleanup_acme_http_challenge($token, $webroot);
+		}
+	);
+
+	$verification = !empty($run_result['success'])
+		? freesiem_sentinel_verify_ssl_certificate($host, ['user_space' => $user_space])
+		: ['success' => false, 'status' => 'failed', 'summary' => __('Certificate verification was skipped because the PHP ACME client did not succeed.', 'freesiem-sentinel')];
+	$status = !empty($run_result['success']) ? ($verification['success'] ? 'success' : 'warning') : 'failed';
+	$summary = !empty($run_result['success']) ? (string) ($verification['summary'] ?? $run_result['summary']) : (string) $run_result['summary'];
+	$result_code = !empty($run_result['success']) ? 'completed' : 'failed';
+
+	$state_updates = [
+		'provider' => 'php-acme',
+		'domain' => $host,
+		'challenge_method' => 'webroot-http-01',
+		'last_action_type' => $action,
+		'last_action_result_code' => $result_code,
+		'current_ssl_mode' => 'php-acme-live-actions',
+		'user_space_base' => (string) ($user_space['root_dir'] ?? ''),
+		'user_space_config_dir' => (string) ($user_space['config_dir'] ?? ''),
+		'user_space_work_dir' => (string) ($user_space['work_dir'] ?? ''),
+		'user_space_logs_dir' => (string) ($user_space['logs_dir'] ?? ''),
+		'last_verification_status' => sanitize_key((string) ($verification['status'] ?? '')),
+		'last_verification_result' => sanitize_text_field((string) ($verification['summary'] ?? '')),
+	];
+
+	if (!empty($verification['metadata']) && is_array($verification['metadata'])) {
+		$state_updates = array_merge($state_updates, $verification['metadata']);
+	}
+
+	if ($action === 'issue') {
+		$state_updates['last_issue_status'] = $status;
+		$state_updates['last_issue_result'] = $summary;
+		$state_updates['last_issue_at'] = $executed_at;
+		if (!empty($run_result['success']) && !empty($verification['metadata']['issued_at'])) {
+			$state_updates['issued_at'] = $verification['metadata']['issued_at'];
+		}
+	} else {
+		$state_updates['last_renew_status'] = $status;
+		$state_updates['last_renew_result'] = $summary;
+		$state_updates['last_renew_at'] = $executed_at;
+	}
+
+	freesiem_sentinel_update_ssl_state($state_updates);
+
+	$cpanel_result = null;
+	if ($result_code === 'completed' && !empty($ssl_settings['cpanel_username']) && !empty($ssl_settings['cpanel_api_token'])) {
+		$cpanel_result = freesiem_sentinel_apply_ssl_to_cpanel($host, $user_space, $ssl_settings);
+		freesiem_sentinel_add_ssl_log(
+			freesiem_sentinel_ssl_result_log_level((string) ($cpanel_result['status'] ?? 'failed')),
+			(string) ($cpanel_result['summary'] ?? __('cPanel SSL install attempted.', 'freesiem-sentinel')),
+			'php_acme_cpanel_install',
+			['status' => (string) ($cpanel_result['status'] ?? 'failed')]
+		);
+	}
+
+	return [
+		'success' => !empty($run_result['success']) && !in_array((string) ($verification['status'] ?? ''), ['failed'], true),
+		'status' => $status,
+		'summary' => $summary,
+		'command_preview' => '',
+		'execution' => null,
+		'verification' => $verification,
+		'executed_at' => $executed_at,
+		'action_type' => $action,
+		'result_code' => $result_code,
+		'force_reissue' => $force_reissue,
+		'cpanel_install' => $cpanel_result,
+	];
+}
+
+/**
+ * Best-effort auto-install of an issued/renewed certificate into cPanel via
+ * UAPI (SSL::install_ssl) - this is the realistic auto-install path for
+ * GoDaddy's usual cPanel-based shared hosting. Mirrors the shape of
+ * freesiem_sentinel_apply_ssl_to_nginx(): it degrades to 'manual_required'
+ * rather than failing hard, since plenty of hosts (Hostinger's hPanel among
+ * them) have no comparable public API and the cert/key are still available
+ * to copy/paste manually from the Certificate panel.
+ *
+ * Note: implemented against cPanel's documented UAPI shape; it has not been
+ * exercised against a live cPanel account from this environment, so treat the
+ * first real run on an actual GoDaddy account as a validation step.
+ */
+function freesiem_sentinel_apply_ssl_to_cpanel(string $host, array $user_space, array $ssl_settings): array
+{
+	$username = trim((string) ($ssl_settings['cpanel_username'] ?? ''));
+	$token = trim((string) ($ssl_settings['cpanel_api_token'] ?? ''));
+
+	if ($username === '' || $token === '') {
+		return [
+			'success' => false,
+			'status' => 'manual_required',
+			'summary' => __('No cPanel API credentials are configured; install the issued certificate manually from the Certificate panel.', 'freesiem-sentinel'),
+		];
+	}
+
+	$config_dir = rtrim((string) ($user_space['config_dir'] ?? ''), '/\\');
+	$live_dir = $config_dir . '/live/' . $host;
+	$cert_pem = @file_get_contents($live_dir . '/cert.pem');
+	$key_pem = @file_get_contents($live_dir . '/privkey.pem');
+	$fullchain_pem = @file_get_contents($live_dir . '/fullchain.pem');
+
+	if (!is_string($cert_pem) || !is_string($key_pem) || !is_string($fullchain_pem)) {
+		return [
+			'success' => false,
+			'status' => 'failed',
+			'summary' => __('Could not read the issued certificate files to install into cPanel.', 'freesiem-sentinel'),
+		];
+	}
+
+	// The CA bundle is whatever is left of the fullchain after the leaf cert.
+	$cabundle = trim(str_replace(trim($cert_pem), '', $fullchain_pem));
+	$cpanel_host = trim((string) ($ssl_settings['cpanel_host_override'] ?? '')) ?: $host;
+	$url = 'https://' . $cpanel_host . ':2083/execute/SSL/install_ssl';
+
+	$response = wp_remote_post($url, [
+		'timeout' => 30,
+		'sslverify' => true,
+		'headers' => [
+			'Authorization' => 'cpanel ' . $username . ':' . $token,
+		],
+		'body' => [
+			'domain' => $host,
+			'cert' => $cert_pem,
+			'key' => $key_pem,
+			'cabundle' => $cabundle,
+		],
+	]);
+
+	if (is_wp_error($response)) {
+		return [
+			'success' => false,
+			'status' => 'manual_required',
+			'summary' => sprintf(__('Could not reach cPanel to install the certificate (%s). Install it manually from the Certificate panel.', 'freesiem-sentinel'), $response->get_error_message()),
+		];
+	}
+
+	$code = (int) wp_remote_retrieve_response_code($response);
+	$decoded = json_decode((string) wp_remote_retrieve_body($response), true);
+	$succeeded = $code >= 200 && $code < 300 && !empty($decoded['status']);
+
+	if (!$succeeded) {
+		$detail = is_array($decoded) && !empty($decoded['errors'][0]) ? (string) $decoded['errors'][0] : sprintf(__('HTTP %d from cPanel.', 'freesiem-sentinel'), $code);
+
+		return [
+			'success' => false,
+			'status' => 'manual_required',
+			'summary' => sprintf(__('cPanel did not accept the certificate: %s. Install it manually from the Certificate panel.', 'freesiem-sentinel'), $detail),
+		];
+	}
+
+	return [
+		'success' => true,
+		'status' => 'applied',
+		'summary' => __('The certificate was installed into cPanel automatically.', 'freesiem-sentinel'),
 	];
 }
 

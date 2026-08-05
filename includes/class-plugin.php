@@ -61,6 +61,10 @@ class Freesiem_Plugin
 		$this->tfa_auth->register();
 		$this->tfa_remote->register();
 		add_action('init', [$this, 'maybe_send_install_base_upgrade_event']);
+		// Priority 0 so the built-in ACME client's HTTP-01 challenge responder
+		// runs before any template_redirect-based HTTPS-force logic and can't
+		// be swallowed by a redirect.
+		add_action('init', 'freesiem_sentinel_serve_acme_http_challenge', 0);
 	}
 
 	public static function activate(): void

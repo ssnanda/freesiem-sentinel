@@ -662,7 +662,7 @@ class Freesiem_Admin
 		$recommended_webroot = freesiem_sentinel_recommend_ssl_webroot_path($existing_settings, $environment);
 		$submitted_webroot = isset($_POST['webroot_path']) ? trim((string) wp_unslash($_POST['webroot_path'])) : '';
 
-		$settings = freesiem_sentinel_update_ssl_settings([
+		$settings_update = [
 			'enable_management_ui' => 1,
 			'acme_contact_email' => isset($_POST['acme_contact_email']) ? sanitize_email(wp_unslash((string) $_POST['acme_contact_email'])) : '',
 			'hostname_override' => '',
@@ -676,7 +676,20 @@ class Freesiem_Admin
 			'auto_renew' => empty($_POST['auto_renew']) ? 0 : 1,
 			'use_staging' => empty($_POST['use_staging']) ? 0 : 1,
 			'detailed_logs' => empty($_POST['detailed_logs']) ? 0 : 1,
-		]);
+			'provider' => isset($_POST['provider']) ? sanitize_key(wp_unslash((string) $_POST['provider'])) : 'auto',
+			'cpanel_username' => isset($_POST['cpanel_username']) ? sanitize_text_field(wp_unslash((string) $_POST['cpanel_username'])) : '',
+			'cpanel_host_override' => isset($_POST['cpanel_host_override']) ? sanitize_text_field(wp_unslash((string) $_POST['cpanel_host_override'])) : '',
+		];
+
+		// Leave the token out of the update entirely when the field was left
+		// blank, so a previously saved token is preserved instead of erased -
+		// the same write-once masked-secret UX used for other credentials.
+		$submitted_token = isset($_POST['cpanel_api_token']) ? trim(wp_unslash((string) $_POST['cpanel_api_token'])) : '';
+		if ($submitted_token !== '') {
+			$settings_update['cpanel_api_token'] = $submitted_token;
+		}
+
+		$settings = freesiem_sentinel_update_ssl_settings($settings_update);
 
 		$readiness = freesiem_sentinel_calculate_ssl_readiness($settings);
 		freesiem_sentinel_add_ssl_log(
@@ -2617,6 +2630,7 @@ class Freesiem_Admin
 		$lineage_exists = freesiem_sentinel_ssl_lineage_exists((string) ($environment['configured_host'] ?? ''), ['user_space' => ['config_dir' => $user_space_config]]);
 		$issue_gate = freesiem_sentinel_can_run_live_ssl_action('issue', $ssl_settings, $environment, $readiness);
 		$renew_gate = freesiem_sentinel_can_run_live_ssl_action('renew', $ssl_settings, $environment, $readiness);
+		$resolved_provider = freesiem_sentinel_resolve_ssl_provider($ssl_settings, $environment);
 
 		$this->render_ssl_action_bar($issue_gate, $renew_gate, $integration, $lineage_exists, $ssl_settings);
 
@@ -2624,7 +2638,11 @@ class Freesiem_Admin
 		$this->render_summary_stat(__('Domain', 'freesiem-sentinel'), $environment['configured_host'] !== '' ? $environment['configured_host'] : __('Unavailable', 'freesiem-sentinel'));
 		$this->render_summary_stat(__('HTTPS', 'freesiem-sentinel'), (string) ($endpoint_status['https'] ?? __('Unavailable', 'freesiem-sentinel')), __('WordPress HTTPS', 'freesiem-sentinel'), $environment['is_https_configured'] ? __('Yes', 'freesiem-sentinel') : __('No', 'freesiem-sentinel'));
 		$this->render_summary_stat(__('Redirect', 'freesiem-sentinel'), (string) ($endpoint_status['redirect'] ?? __('Unavailable', 'freesiem-sentinel')), __('Force HTTPS', 'freesiem-sentinel'), !empty($ssl_settings['force_https']) ? __('Enabled', 'freesiem-sentinel') : __('Off', 'freesiem-sentinel'));
-		$this->render_summary_stat(__('Certbot', 'freesiem-sentinel'), !empty($environment['certbot']['available']) ? __('Installed', 'freesiem-sentinel') : __('Missing', 'freesiem-sentinel'), __('Version', 'freesiem-sentinel'), !empty($environment['certbot']['version']) ? (string) $environment['certbot']['version'] : __('Unavailable', 'freesiem-sentinel'));
+		if ($resolved_provider === 'php-acme') {
+			$this->render_summary_stat(__('Provider', 'freesiem-sentinel'), __('PHP ACME (built-in)', 'freesiem-sentinel'), __('OpenSSL support', 'freesiem-sentinel'), !empty($environment['openssl_acme_support']) ? __('Yes', 'freesiem-sentinel') : __('No', 'freesiem-sentinel'));
+		} else {
+			$this->render_summary_stat(__('Provider', 'freesiem-sentinel'), !empty($environment['certbot']['available']) ? __('Certbot', 'freesiem-sentinel') : __('Certbot (missing)', 'freesiem-sentinel'), __('Version', 'freesiem-sentinel'), !empty($environment['certbot']['version']) ? (string) $environment['certbot']['version'] : __('Unavailable', 'freesiem-sentinel'));
+		}
 		$this->render_summary_stat(__('Certificate', 'freesiem-sentinel'), !empty($certificate['exists']) ? (!empty($certificate['is_staging_certificate']) ? __('Staging cert', 'freesiem-sentinel') : __('Present', 'freesiem-sentinel')) : __('Not found', 'freesiem-sentinel'), __('Nginx', 'freesiem-sentinel'), in_array((string) ($integration['mode'] ?? ''), ['patch', 'pending_root_finalize'], true) ? __('Ready', 'freesiem-sentinel') : __('Needs setup', 'freesiem-sentinel'));
 		$this->render_summary_stat(__('HSTS', 'freesiem-sentinel'), (string) ($endpoint_status['hsts'] ?? __('Unavailable', 'freesiem-sentinel')), __('Configured', 'freesiem-sentinel'), !empty($ssl_settings['hsts_enabled']) ? __('Enabled', 'freesiem-sentinel') : __('Off', 'freesiem-sentinel'));
 		echo '</div>';
@@ -2690,11 +2708,13 @@ class Freesiem_Admin
 	{
 		$webroot = freesiem_sentinel_recommend_ssl_webroot_path($ssl_settings, $environment, $ssl_state);
 
+		$resolved_provider = freesiem_sentinel_resolve_ssl_provider($ssl_settings, $environment);
+
 		echo '<h2 style="margin-top:0;">' . esc_html__('Core SSL Settings', 'freesiem-sentinel') . '</h2>';
 		echo '<form method="post" action="' . esc_url(admin_url('admin-post.php')) . '" style="margin:0;">';
 		wp_nonce_field(FREESIEM_SENTINEL_NONCE_ACTION);
 		echo '<input type="hidden" name="action" value="freesiem_sentinel_save_ssl_settings" />';
-		echo '<div style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;align-items:end;">';
+		echo '<div style="display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;align-items:end;">';
 		echo '<div><label for="freesiem-ssl-email" style="display:block;font-weight:600;margin-bottom:6px;">' . esc_html__('Email', 'freesiem-sentinel') . '</label><input id="freesiem-ssl-email" type="email" name="acme_contact_email" value="' . esc_attr((string) ($ssl_settings['acme_contact_email'] ?? '')) . '" class="regular-text" style="width:100%;max-width:none;" /></div>';
 		echo '<div><label for="freesiem-ssl-webroot" style="display:block;font-weight:600;margin-bottom:6px;">' . esc_html__('Webroot', 'freesiem-sentinel') . '</label><input id="freesiem-ssl-webroot" type="text" name="webroot_path" value="' . esc_attr($webroot) . '" class="regular-text" style="width:100%;max-width:none;" /></div>';
 		echo '<div><label for="freesiem-ssl-challenge" style="display:block;font-weight:600;margin-bottom:6px;">' . esc_html__('Challenge method', 'freesiem-sentinel') . '</label><select id="freesiem-ssl-challenge" name="challenge_method" style="width:100%;max-width:none;">';
@@ -2706,6 +2726,15 @@ class Freesiem_Admin
 			echo '<option value="' . esc_attr($value) . '" ' . selected((string) ($ssl_settings['challenge_method'] ?? 'webroot-http-01'), $value, false) . '>' . esc_html($label) . '</option>';
 		}
 		echo '</select></div>';
+		echo '<div><label for="freesiem-ssl-provider" style="display:block;font-weight:600;margin-bottom:6px;">' . esc_html__('Certificate provider', 'freesiem-sentinel') . '</label><select id="freesiem-ssl-provider" name="provider" style="width:100%;max-width:none;">';
+		foreach ([
+			'auto' => __('Automatic (recommended)', 'freesiem-sentinel'),
+			'certbot' => __('Certbot (shell required)', 'freesiem-sentinel'),
+			'php-acme' => __('PHP ACME client (no shell required)', 'freesiem-sentinel'),
+		] as $value => $label) {
+			echo '<option value="' . esc_attr($value) . '" ' . selected((string) ($ssl_settings['provider'] ?? 'auto'), $value, false) . '>' . esc_html($label) . '</option>';
+		}
+		echo '</select></div>';
 		echo '</div>';
 		echo '<div style="display:flex;gap:14px;flex-wrap:wrap;align-items:center;margin-top:12px;">';
 		echo '<label><input type="checkbox" name="force_https" value="1" ' . checked(!empty($ssl_settings['force_https']), true, false) . ' /> ' . esc_html__('Force HTTPS', 'freesiem-sentinel') . '</label>';
@@ -2715,6 +2744,23 @@ class Freesiem_Admin
 		echo '<label><input type="checkbox" name="detailed_logs" value="1" ' . checked(!empty($ssl_settings['detailed_logs']), true, false) . ' /> ' . esc_html__('Detailed logs', 'freesiem-sentinel') . '</label>';
 		echo '</div>';
 		echo '<p style="margin:10px 0 0 0;color:#646970;">' . esc_html__('Webroot is auto-populated from nginx when available and falls back to WordPress paths if needed. HSTS remains stored-only in this version. Auto-renew runs a daily background check and renews the certificate automatically once it is within its renewal window.', 'freesiem-sentinel') . '</p>';
+		echo '<p style="margin:6px 0 0 0;color:#646970;">' . sprintf(
+			/* translators: %s: resolved provider label, e.g. "Certbot" or "PHP ACME client". */
+			esc_html__('"Automatic" currently resolves to: %s.', 'freesiem-sentinel'),
+			'<strong>' . esc_html($resolved_provider === 'certbot' ? __('Certbot', 'freesiem-sentinel') : __('PHP ACME client (no shell required)', 'freesiem-sentinel')) . '</strong>'
+		) . ' ' . esc_html__('The PHP ACME client only supports webroot-http-01 today; it ignores standalone-http-01/manual-dns-01.', 'freesiem-sentinel') . '</p>';
+
+		echo '<div style="margin-top:16px;padding-top:14px;border-top:1px solid #dcdcde;">';
+		echo '<h3 style="margin:0 0 6px 0;">' . esc_html__('cPanel auto-install (optional)', 'freesiem-sentinel') . '</h3>';
+		echo '<p style="margin:0 0 10px 0;color:#646970;">' . esc_html__('When the PHP ACME client issues or renews a certificate, Sentinel will try to install it into cPanel automatically via UAPI (GoDaddy\'s usual shared-hosting stack). Leave blank to skip auto-install and copy the certificate manually from the Certificate panel instead - this is the normal path on hosts without cPanel, such as Hostinger.', 'freesiem-sentinel') . '</p>';
+		echo '<div style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;">';
+		echo '<div><label for="freesiem-cpanel-username" style="display:block;font-weight:600;margin-bottom:6px;">' . esc_html__('cPanel username', 'freesiem-sentinel') . '</label><input id="freesiem-cpanel-username" type="text" name="cpanel_username" value="' . esc_attr((string) ($ssl_settings['cpanel_username'] ?? '')) . '" class="regular-text" style="width:100%;max-width:none;" /></div>';
+		echo '<div><label for="freesiem-cpanel-token" style="display:block;font-weight:600;margin-bottom:6px;">' . esc_html__('cPanel API token', 'freesiem-sentinel') . '</label><input id="freesiem-cpanel-token" type="password" name="cpanel_api_token" value="" autocomplete="new-password" placeholder="' . esc_attr(!empty($ssl_settings['cpanel_api_token']) ? freesiem_sentinel_mask_secret((string) $ssl_settings['cpanel_api_token']) : __('Not set', 'freesiem-sentinel')) . '" class="regular-text" style="width:100%;max-width:none;" /></div>';
+		echo '<div><label for="freesiem-cpanel-host" style="display:block;font-weight:600;margin-bottom:6px;">' . esc_html__('cPanel host override', 'freesiem-sentinel') . '</label><input id="freesiem-cpanel-host" type="text" name="cpanel_host_override" value="' . esc_attr((string) ($ssl_settings['cpanel_host_override'] ?? '')) . '" placeholder="' . esc_attr($environment['configured_host'] ?? '') . '" class="regular-text" style="width:100%;max-width:none;" /></div>';
+		echo '</div>';
+		echo '<p style="margin:8px 0 0 0;color:#646970;">' . esc_html__('The token field is left blank on reload for security; leave it blank to keep the currently saved token, or type a new one to replace it.', 'freesiem-sentinel') . '</p>';
+		echo '</div>';
+
 		echo '<p style="margin:12px 0 0 0;">';
 		submit_button(__('Save SSL Settings', 'freesiem-sentinel'), 'secondary', '', false);
 		echo '</p>';
