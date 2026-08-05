@@ -4876,187 +4876,20 @@ add_action('admin_notices', function (): void {
 	synchy_render_notice();
 });
 
-function synchy_get_admin_bar_sync_status(): array
-{
-	$status = synchy_get_sync_status();
-	$job = synchy_get_visible_sync_job();
-	$scope_status = synchy_get_sync_scope_status(synchy_get_site_sync_options());
-	$job_status = (string) ($job['status'] ?? '');
-	$status_state = (string) ($status['status'] ?? '');
-
-	if ($job_status === 'running' || $status_state === 'running') {
-		return ['label' => __('Syncing...', 'synchy'), 'state' => 'running'];
-	}
-
-	if (in_array($job_status, ['paused', 'failed_partial'], true)) {
-		return ['label' => __('Needs Attention', 'synchy'), 'state' => 'warning'];
-	}
-
-	if ($status_state === 'error') {
-		return ['label' => __('Sync Error', 'synchy'), 'state' => 'error'];
-	}
-
-	if ($status_state === 'pending') {
-		return ['label' => __('Out of Sync', 'synchy'), 'state' => 'warning'];
-	}
-
-	if (!empty($scope_status['hasPendingBaseline']) || !in_array($status_state, ['success', 'idle'], true)) {
-		return ['label' => __('Out of Sync', 'synchy'), 'state' => 'warning'];
-	}
-
-	return ['label' => __('In Sync', 'synchy'), 'state' => 'success'];
-}
-
 add_action('admin_bar_menu', function (WP_Admin_Bar $admin_bar): void {
 	if (!current_user_can('manage_options')) {
 		return;
 	}
 
-	$sync_url = admin_url('admin.php?page=synchy-site-sync');
-	$sync_status = synchy_get_admin_bar_sync_status();
-	$push_enabled = (string) $sync_status['state'] === 'warning' && (string) $sync_status['label'] === __('Out of Sync', 'synchy');
-
 	$admin_bar->add_node([
 		'id' => 'synchy-site-sync-version',
 		'title' => esc_html(synchy_get_site_sync_version_display_label()),
-		'href' => $sync_url,
+		'href' => admin_url('admin.php?page=synchy-site-sync'),
 		'meta' => [
 			'title' => synchy_get_site_sync_version_display_title(),
 		],
 	]);
-
-	$admin_bar->add_node([
-		'id' => 'synchy-site-sync-status',
-		'title' => sprintf(
-			'<span class="synchy-admin-bar-status__prefix">%s</span> %s',
-			esc_html__('Status:', 'synchy'),
-			esc_html((string) $sync_status['label'])
-		),
-		'href' => $sync_url,
-		'meta' => [
-			'class' => 'synchy-admin-bar-status synchy-admin-bar-status--' . sanitize_html_class((string) $sync_status['state']),
-			'title' => __('Click to check Sync status now', 'synchy'),
-		],
-	]);
-
-	$admin_bar->add_node([
-		'id' => 'synchy-site-sync-push',
-		'title' => '<span class="dashicons dashicons-upload" aria-hidden="true"></span>' . esc_html__('Push', 'synchy'),
-		'href' => $push_enabled ? '#' : false,
-		'meta' => [
-			'class' => 'synchy-admin-bar-push' . ($push_enabled ? '' : ' synchy-admin-bar-push--disabled'),
-			'title' => $push_enabled ? __('Preview and push changes now', 'synchy') : __('Push is available when the site is out of sync', 'synchy'),
-			'aria-disabled' => $push_enabled ? 'false' : 'true',
-		],
-	]);
 }, 90);
-
-function synchy_enqueue_admin_bar_push_script(): void
-{
-	if (!is_admin_bar_showing() || !current_user_can('manage_options')) {
-		return;
-	}
-
-	$script_path = plugin_dir_path(__FILE__) . 'assets/admin-bar-push.js';
-
-	if (!file_exists($script_path)) {
-		return;
-	}
-
-	$status = synchy_get_admin_bar_sync_status();
-	$scope_status = synchy_get_sync_scope_status(synchy_get_site_sync_options());
-	$enabled = (string) $status['state'] === 'warning' && (string) $status['label'] === __('Out of Sync', 'synchy');
-
-	wp_enqueue_script('synchy-admin-bar-push', plugin_dir_url(__FILE__) . 'assets/admin-bar-push.js', [], (string) filemtime($script_path), true);
-	wp_localize_script('synchy-admin-bar-push', 'synchyAdminBarPushConfig', [
-		'ajaxUrl' => admin_url('admin-ajax.php'),
-		'nonce' => wp_create_nonce('synchy_sync_ajax'),
-		'enabled' => $enabled,
-		'requiresBaseline' => !empty($scope_status['hasPendingBaseline']),
-		'destination' => (string) (synchy_get_site_sync_options()['destination_url'] ?? ''),
-		'pushLabel' => __('Push', 'synchy'),
-		'preparingLabel' => __('Preparing...', 'synchy'),
-		'checkingLabel' => __('Checking...', 'synchy'),
-		'syncingLabel' => __('Syncing...', 'synchy'),
-		'inSyncLabel' => __('In Sync', 'synchy'),
-		'outOfSyncLabel' => __('Out of Sync', 'synchy'),
-		'errorLabel' => __('Sync Error', 'synchy'),
-		'confirmSync' => __('Sync the previewed changes to the destination site now?', 'synchy'),
-		'confirmFull' => __('Run a full Sync for the selected scopes and send all tracked files and rows to the destination site now?', 'synchy'),
-		'noChangesMessage' => __('No pending changes were found. The site is in sync.', 'synchy'),
-		'unknownError' => __('Backup & Restore hit an unexpected Sync error.', 'synchy'),
-	]);
-}
-
-add_action('admin_enqueue_scripts', 'synchy_enqueue_admin_bar_push_script');
-add_action('wp_enqueue_scripts', 'synchy_enqueue_admin_bar_push_script');
-
-function synchy_render_admin_bar_sync_styles(): void
-{
-	if (!is_admin_bar_showing() || !current_user_can('manage_options')) {
-		return;
-	}
-	?>
-	<style id="synchy-admin-bar-sync-styles">
-		#wpadminbar #wp-admin-bar-synchy-site-sync-status > .ab-item,
-		#wpadminbar #wp-admin-bar-synchy-site-sync-push > .ab-item {
-			box-sizing: border-box;
-			min-height: 26px;
-			margin: 3px 4px;
-			padding: 0 12px;
-			border-radius: 999px;
-			font-weight: 800;
-			line-height: 26px;
-		}
-		#wpadminbar #wp-admin-bar-synchy-site-sync-status > .ab-item {
-			border: 1px solid rgba(255, 255, 255, 0.38);
-			color: #08130d;
-			text-shadow: 0 1px 0 rgba(255, 255, 255, 0.28);
-			cursor: pointer;
-		}
-		#wpadminbar .synchy-admin-bar-status--success > .ab-item { background: #39ed83; }
-		#wpadminbar .synchy-admin-bar-status--warning > .ab-item { background: #ffd84a; }
-		#wpadminbar .synchy-admin-bar-status--error > .ab-item { background: #ff5b65; color: #fff; text-shadow: none; }
-		#wpadminbar .synchy-admin-bar-status--running > .ab-item { background: #47c8ff; }
-		#wpadminbar .synchy-admin-bar-status__prefix { opacity: 0.72; text-transform: uppercase; }
-		#wpadminbar #wp-admin-bar-synchy-site-sync-push > .ab-item {
-			border: 1px solid #ff90dc;
-			background: linear-gradient(135deg, #ff2fac, #a84dff);
-			box-shadow: 0 0 12px rgba(255, 47, 172, 0.42);
-			color: #fff;
-			text-transform: uppercase;
-		}
-		#wpadminbar #wp-admin-bar-synchy-site-sync-push > .ab-item:hover,
-		#wpadminbar #wp-admin-bar-synchy-site-sync-push > .ab-item:focus {
-			background: linear-gradient(135deg, #ff62c1, #bd72ff);
-			color: #fff;
-		}
-		#wpadminbar #wp-admin-bar-synchy-site-sync-push.synchy-admin-bar-push--disabled > .ab-item {
-			border-color: #777;
-			background: #555;
-			box-shadow: none;
-			color: #aaa;
-			cursor: not-allowed;
-			opacity: 0.72;
-		}
-		#wpadminbar #wp-admin-bar-synchy-site-sync-push.synchy-admin-bar-push--busy > .ab-item {
-			cursor: progress;
-			animation: synchy-admin-bar-push-pulse 1s ease-in-out infinite alternate;
-		}
-		@keyframes synchy-admin-bar-push-pulse { to { filter: brightness(1.25); } }
-		#wpadminbar #wp-admin-bar-synchy-site-sync-push .dashicons {
-			width: 16px;
-			height: 16px;
-			margin: 5px 5px 0 0;
-			font-size: 16px;
-			line-height: 16px;
-		}
-	</style>
-	<?php
-}
-
-add_action('admin_head', 'synchy_render_admin_bar_sync_styles');
-add_action('wp_head', 'synchy_render_admin_bar_sync_styles');
 
 add_action('wp_footer', function (): void {
 	if (is_admin() || !current_user_can('manage_options')) {
