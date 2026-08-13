@@ -8348,6 +8348,20 @@ function synchy_apply_sync_option_rows(array $rows)
 		}
 
 		$option_value = array_key_exists('option_value', $row) ? maybe_unserialize($row['option_value']) : null;
+
+		// active_plugins is pushed as a whole-array snapshot of the source's active plugins, but
+		// applying it verbatim would deactivate anything active on the destination only (plugin
+		// state drift, destination-specific plugins) and only activate what the source happens to
+		// have active right now. Sync should never flip an existing destination plugin's state --
+		// it should only turn on plugins that are newly active on the source, so this unions the
+		// two lists instead of overwriting.
+		if ($option_name === 'active_plugins' && is_array($option_value)) {
+			$incoming_active = array_values(array_unique(array_filter($option_value, 'is_string')));
+			$destination_active = get_option('active_plugins', []);
+			$destination_active = is_array($destination_active) ? array_values(array_unique(array_filter($destination_active, 'is_string'))) : [];
+			$option_value = array_values(array_unique(array_merge($destination_active, $incoming_active)));
+		}
+
 		$autoload = synchy_normalize_sync_option_autoload($row['autoload'] ?? null);
 		$exists = get_option($option_name, null);
 
