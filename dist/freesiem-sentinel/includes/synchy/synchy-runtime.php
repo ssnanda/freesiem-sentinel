@@ -3140,6 +3140,152 @@ function synchy_get_nav_menu_taxonomy_scope_ids(): array
 	];
 }
 
+/**
+ * Scans a set of wp_options rows (typically an "Options" scope delta) for a nav_menu_locations
+ * mapping and returns every menu term_id it references. Checks both the standalone
+ * `nav_menu_locations` option (classic themes) and every `theme_mods_{stylesheet}` row, since
+ * block/FSE-adjacent themes store the same location=>term_id mapping as just one key inside that
+ * single serialized array alongside everything else the theme keeps via
+ * set_theme_mod()/get_theme_mod() -- footer widths, brand colors, whatever. Editing any one of
+ * those unrelated keys re-syncs the whole row, dragging nav_menu_locations along even though no
+ * menu location was actually touched.
+ */
+function synchy_get_nav_menu_location_term_ids_from_option_rows(array $option_rows): array
+{
+	$term_ids = [];
+
+	foreach ($option_rows as $row) {
+		if (!is_array($row)) {
+			continue;
+		}
+
+		$option_name = (string) ($row['option_name'] ?? '');
+
+		if ($option_name !== 'nav_menu_locations' && !str_starts_with($option_name, 'theme_mods_')) {
+			continue;
+		}
+
+		$value = maybe_unserialize($row['option_value'] ?? '');
+		$locations = $option_name === 'nav_menu_locations'
+			? $value
+			: (is_array($value) ? ($value['nav_menu_locations'] ?? null) : null);
+
+		if (!is_array($locations)) {
+			continue;
+		}
+
+		foreach ($locations as $term_id) {
+			$term_id = (int) $term_id;
+
+			if ($term_id > 0) {
+				$term_ids[] = $term_id;
+			}
+		}
+	}
+
+	return array_values(array_unique($term_ids));
+}
+
+/**
+ * Forces the complete current terms/term_taxonomy/term_relationships/posts/postmeta needed to
+ * render the given nav_menu term_ids into $tables, merging with whatever those tables already
+ * hold (e.g. a normal db_taxonomies delta) rather than clobbering it.
+ *
+ * Exists so that when nav_menu_locations changes purely as a side effect of an unrelated
+ * theme_mods_* edit -- with "Taxonomies" not even selected for this sync -- the destination still
+ * receives everything synchy_repair_synced_nav_menus() needs to remap the location to the right
+ * menu over there. Without this, the destination has no way to know what source term_id 26 (say)
+ * even was: nav_menu_locations silently starts pointing at whatever term_id 26 happens to mean
+ * locally (often nothing), and the repair pass has no terms/term_taxonomy rows to match a menu
+ * slug against, so it can't fix what it can't see.
+ *
+ * Returns the number of rows newly added across all five tables, for the caller's total_rows tally.
+ */
+function synchy_force_nav_menu_snapshot_for_term_ids(array &$tables, array $specs, array $term_ids): int
+{
+	global $wpdb;
+
+	if ($term_ids === []) {
+		return 0;
+	}
+
+	$terms = synchy_fetch_rows_by_ids($wpdb->terms, 'term_id', $term_ids);
+
+	$term_taxonomy = array_values(array_filter(
+		synchy_fetch_rows_by_ids($wpdb->term_taxonomy, 'term_id', $term_ids),
+		static fn(array $row): bool => (string) ($row['taxonomy'] ?? '') === 'nav_menu'
+	));
+
+	$term_taxonomy_ids = array_values(array_unique(array_map(
+		static fn(array $row): int => (int) ($row['term_taxonomy_id'] ?? 0),
+		$term_taxonomy
+	)));
+
+	$term_relationships = synchy_fetch_rows_by_ids($wpdb->term_relationships, 'term_taxonomy_id', $term_taxonomy_ids);
+
+	$menu_item_ids = array_values(array_unique(array_map(
+		static fn(array $row): int => (int) ($row['object_id'] ?? 0),
+		$term_relationships
+	)));
+
+	$posts = array_values(array_filter(
+		synchy_fetch_rows_by_ids($wpdb->posts, 'ID', $menu_item_ids),
+		static fn(array $row): bool => (string) ($row['post_type'] ?? '') === 'nav_menu_item'
+	));
+
+	$postmeta = synchy_fetch_rows_by_ids($wpdb->postmeta, 'post_id', $menu_item_ids);
+
+	$forced = [
+		$wpdb->terms => $terms,
+		$wpdb->term_taxonomy => $term_taxonomy,
+		$wpdb->term_relationships => $term_relationships,
+		$wpdb->posts => $posts,
+		$wpdb->postmeta => $postmeta,
+	];
+
+	$added = 0;
+
+	foreach ($forced as $table => $rows) {
+		if ($rows === [] || !isset($specs[$table])) {
+			continue;
+		}
+
+		$key_columns = $specs[$table]['key_columns'];
+		$existing_rows = array_values(array_filter((array) ($tables[$table]['rows'] ?? []), 'is_array'));
+		$existing_keys = array_flip(array_map(
+			static fn(array $row): string => synchy_get_sync_row_key($row, $key_columns),
+			$existing_rows
+		));
+
+		$merged = $existing_rows;
+
+		foreach ($rows as $row) {
+			$key = synchy_get_sync_row_key($row, $key_columns);
+
+			if (isset($existing_keys[$key])) {
+				continue;
+			}
+
+			$merged[] = $row;
+			$existing_keys[$key] = true;
+			$added++;
+		}
+
+		$tables[$table] = [
+			'scope_id' => (string) ($tables[$table]['scope_id'] ?? 'db_options'),
+			'key_columns' => $key_columns,
+			'rows' => $merged,
+			'row_ids' => array_map(
+				static fn(array $row): string => synchy_get_sync_row_key($row, $key_columns),
+				$merged
+			),
+			'update_columns' => $specs[$table]['update_columns'] ?? [],
+		];
+	}
+
+	return $added;
+}
+
 function synchy_merge_forced_nav_menu_sync_rows(string $table, array $all_rows, array $delta_rows, array $key_columns, array $nav_menu_scope): array
 {
 	global $wpdb;
@@ -3441,6 +3587,18 @@ function synchy_build_sync_database_delta(array $state, array $selected_scope_id
 				'update_columns' => $specs[$wpdb->options]['update_columns'],
 			];
 			$total_rows += count($options_delta['rows']);
+
+			// See synchy_get_nav_menu_location_term_ids_from_option_rows() / synchy_force_nav_menu_snapshot_for_term_ids():
+			// an Options-only sync (Taxonomies unselected, or selected but this particular menu's
+			// terms didn't otherwise change) can still carry a changed nav_menu_locations mapping
+			// via theme_mods_*. Without forcing the referenced menu's snapshot through here too,
+			// the destination has no terms/term_taxonomy data to repair that mapping against, and
+			// a location silently starts pointing at whatever the source term_id means locally.
+			$nav_menu_location_term_ids = synchy_get_nav_menu_location_term_ids_from_option_rows($options_delta['rows']);
+
+			if ($nav_menu_location_term_ids !== []) {
+				$total_rows += synchy_force_nav_menu_snapshot_for_term_ids($tables, $specs, $nav_menu_location_term_ids);
+			}
 		}
 	}
 
