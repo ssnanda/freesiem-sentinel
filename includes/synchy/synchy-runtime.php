@@ -3565,6 +3565,69 @@ function synchy_get_changed_post_ids_for_sync(int $last_sync_time): array
 	return is_array($rows) ? array_values(array_map('intval', $rows)) : [];
 }
 
+/**
+ * Read-only inventory of what a "Purge & Sync" could remove on this site -- reporting only, no
+ * deletion happens here. Split by post_type (not the single Content-scope bucket everything else
+ * uses) because Purge needs independent Posts/Pages/Plugins checkboxes, unlike the rest of Sync
+ * which treats all post types as one "Posts & Post Meta" unit.
+ */
+function synchy_get_protected_plugin_folder_names(): array
+{
+	$names = ['freesiem-sentinel', 'hostinger', 'hostinger-ai-assistant', 'hostinger-easy-onboarding', 'synchy'];
+
+	if (defined('FREESIEM_SENTINEL_SLUG') && FREESIEM_SENTINEL_SLUG !== '') {
+		$names[] = trim((string) FREESIEM_SENTINEL_SLUG, '/');
+	}
+
+	if (defined('FREESIEM_SENTINEL_PLUGIN_BASENAME') && FREESIEM_SENTINEL_PLUGIN_BASENAME !== '') {
+		$plugin_root = strtok((string) FREESIEM_SENTINEL_PLUGIN_BASENAME, '/');
+
+		if (is_string($plugin_root) && $plugin_root !== '') {
+			$names[] = sanitize_file_name($plugin_root);
+		}
+	}
+
+	return array_values(array_unique($names));
+}
+
+function synchy_build_site_purge_inventory(): array
+{
+	global $wpdb;
+
+	$posts = $wpdb->get_col($wpdb->prepare(
+		'SELECT `ID` FROM `' . str_replace('`', '``', $wpdb->posts) . '` WHERE `post_type` = %s AND `post_status` != %s',
+		'post',
+		'auto-draft'
+	));
+	$pages = $wpdb->get_col($wpdb->prepare(
+		'SELECT `ID` FROM `' . str_replace('`', '``', $wpdb->posts) . '` WHERE `post_type` = %s AND `post_status` != %s',
+		'page',
+		'auto-draft'
+	));
+
+	$plugin_dir = wp_normalize_path(WP_CONTENT_DIR . '/plugins');
+	$protected = synchy_get_protected_plugin_folder_names();
+	$plugin_folders = [];
+
+	if (is_dir($plugin_dir)) {
+		foreach (scandir($plugin_dir) ?: [] as $entry) {
+			if ($entry === '.' || $entry === '..' || !is_dir($plugin_dir . '/' . $entry)) {
+				continue;
+			}
+
+			if (!in_array($entry, $protected, true)) {
+				$plugin_folders[] = $entry;
+			}
+		}
+	}
+
+	return [
+		'posts' => array_values(array_map('intval', is_array($posts) ? $posts : [])),
+		'pages' => array_values(array_map('intval', is_array($pages) ? $pages : [])),
+		'pluginFolders' => array_values($plugin_folders),
+	];
+}
+
 function synchy_get_form_plugin_sync_table_specs(): array
 {
 	global $wpdb;
@@ -13947,6 +14010,18 @@ add_action('rest_api_init', function (): void {
 				update_option(SYNCHY_SITE_ROLE_OPTION, $requested_role, true);
 
 				return rest_ensure_response(['success' => true, 'role' => $requested_role]);
+			},
+			'permission_callback' => $permission,
+		]
+	);
+
+	register_rest_route(
+		'synchy/v1',
+		'/purge/inventory',
+		[
+			'methods' => 'GET',
+			'callback' => static function () {
+				return rest_ensure_response(synchy_build_site_purge_inventory());
 			},
 			'permission_callback' => $permission,
 		]
