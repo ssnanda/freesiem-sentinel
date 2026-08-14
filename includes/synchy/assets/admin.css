@@ -1630,3 +1630,40 @@
 		align-items: stretch;
 	}
 }
+
+.synchy-help-icon-button {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	padding: 0 6px !important;
+}
+
+.synchy-help-icon-button .dashicons {
+	width: 18px;
+	height: 18px;
+	font-size: 18px;
+}
+
+.synchy-scope-help__list {
+	margin: 0 0 16px;
+	padding-left: 20px;
+	list-style: disc;
+}
+
+.synchy-scope-help__list li {
+	margin-bottom: 8px;
+}
+
+.synchy-sync-scope-toggle-grid {
+	display: grid;
+	grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+	gap: 10px 20px;
+	margin: 12px 0 16px;
+}
+
+.synchy-sync-scope-toggle {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	font-weight: 600;
+}

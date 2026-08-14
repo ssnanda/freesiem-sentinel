@@ -12696,7 +12696,46 @@ function synchy_render_incremental_site_sync_page(array $current): void
 					</div>
 				</div>
 
+				<?php foreach ($scope_definitions as $scope_id => $scope) : ?>
+					<input
+						type="hidden"
+						data-synchy-sync-scope
+						data-scope-id="<?php echo esc_attr((string) $scope_id); ?>"
+						value="<?php echo !empty($options[(string) $scope['option_key']]) ? '1' : '0'; ?>"
+					/>
+				<?php endforeach; ?>
 			</form>
+
+			<div class="synchy-panel synchy-sync-scope-toggles">
+				<h2><?php esc_html_e('Sync Scope', 'synchy'); ?></h2>
+				<p class="synchy-field-note"><?php esc_html_e('Turn off anything you do not want this Sync connection to ever touch. Click the help icon above for what each one means in plain terms.', 'synchy'); ?></p>
+				<form method="post" action="<?php echo esc_url(synchy_get_site_sync_save_url()); ?>" class="synchy-form" data-synchy-scope-toggle-form>
+					<?php synchy_render_site_sync_save_fields(); ?>
+					<?php /* destination_url/username aren't preserved-if-blank the way the saved app password is
+					(see synchy_sanitize_site_sync_options()) -- carry the current values forward so submitting only
+					the scope toggles below can't blank out the connection. */ ?>
+					<input type="hidden" name="<?php echo esc_attr(SYNCHY_SITE_SYNC_OPTIONS); ?>[destination_url]" value="<?php echo esc_attr((string) $options['destination_url']); ?>" />
+					<input type="hidden" name="<?php echo esc_attr(SYNCHY_SITE_SYNC_OPTIONS); ?>[destination_username]" value="<?php echo esc_attr((string) $options['destination_username']); ?>" />
+					<input type="hidden" name="<?php echo esc_attr(SYNCHY_SITE_SYNC_OPTIONS); ?>[verify_ssl]" value="<?php echo !empty($options['verify_ssl']) ? '1' : '0'; ?>" />
+					<input type="hidden" name="<?php echo esc_attr(SYNCHY_SITE_SYNC_OPTIONS); ?>[sync_scope_selection_present]" value="1" />
+					<div class="synchy-sync-scope-toggle-grid">
+						<?php foreach ($scope_definitions as $scope_id => $scope) : ?>
+							<label class="synchy-sync-scope-toggle" data-synchy-scope-toggle-label data-scope-id="<?php echo esc_attr((string) $scope_id); ?>">
+								<input
+									type="checkbox"
+									name="<?php echo esc_attr(SYNCHY_SITE_SYNC_OPTIONS); ?>[<?php echo esc_attr((string) $scope['option_key']); ?>]"
+									value="1"
+									data-synchy-scope-toggle-checkbox
+									data-scope-id="<?php echo esc_attr((string) $scope_id); ?>"
+									<?php checked(!empty($options[(string) $scope['option_key']])); ?>
+								/>
+								<span><?php echo esc_html((string) $scope['label']); ?></span>
+							</label>
+						<?php endforeach; ?>
+					</div>
+					<button type="submit" class="button button-primary"><?php esc_html_e('Save Sync Scope', 'synchy'); ?></button>
+				</form>
+			</div>
 		</div>
 	</div>
 	<?php

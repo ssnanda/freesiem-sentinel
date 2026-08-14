@@ -1858,6 +1858,25 @@
 		updateActionButtons();
 	});
 	testButton.addEventListener("click", runTestConnection);
+
+	const scopeHelpOpenButton = document.querySelector("[data-synchy-scope-help-open]");
+	const scopeHelpModal = document.querySelector("[data-synchy-scope-help-modal]");
+
+	if (scopeHelpOpenButton && scopeHelpModal) {
+		const closeScopeHelp = () => {
+			scopeHelpModal.classList.add("is-hidden");
+			scopeHelpModal.setAttribute("aria-hidden", "true");
+		};
+
+		scopeHelpOpenButton.addEventListener("click", () => {
+			scopeHelpModal.classList.remove("is-hidden");
+			scopeHelpModal.setAttribute("aria-hidden", "false");
+		});
+
+		scopeHelpModal.querySelectorAll("[data-synchy-scope-help-close]").forEach((closeEl) => {
+			closeEl.addEventListener("click", closeScopeHelp);
+		});
+	}
 	if (updateRemoteButton) {
 		updateRemoteButton.addEventListener("click", updateRemoteSynchy);
 	}
