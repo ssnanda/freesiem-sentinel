@@ -797,6 +797,16 @@ function synchy_get_ajcore_protected_table_suffixes(): array
 		'aj_portal_files',
 		'aj_portal_file_users',
 		'aj_forms_leads',
+		// Not AJCore, but caught by this same filter (it's the only gate the Forms scope's table
+		// list runs through): WP Formy and Fluent Forms submission/log/analytics data. The Forms
+		// scope should carry form *definitions* between sites, never real visitor submissions.
+		'formy_leads',
+		'formy_lead_notes',
+		'fluentform_entry_details',
+		'fluentform_submissions',
+		'fluentform_submission_meta',
+		'fluentform_logs',
+		'fluentform_form_analytics',
 		'aj_forms_lead_notes',
 	];
 }
@@ -1176,7 +1186,7 @@ function synchy_sanitize_site_sync_options($value): array
 		}
 	}
 
-	foreach ($scope_definitions as $scope) {
+	foreach ($scope_definitions as $scope_id => $scope) {
 		$option_key = (string) $scope['option_key'];
 
 		if ($scope_input_present) {
@@ -1189,7 +1199,16 @@ function synchy_sanitize_site_sync_options($value): array
 			continue;
 		}
 
-		$sanitized[$option_key] = synchy_is_production_like_destination($sanitized) && (string) ($scope['group'] ?? '') === 'database' ? 0 : 1;
+		// Pages, Posts, and Menus (db_content/db_options/db_taxonomies) are what "sync my site"
+		// means to most users, so they default on even toward a production-looking destination.
+		// Forms (db_wp_formy) stays gated behind synchy_is_production_like_destination() -- it's
+		// third-party plugin data, not something every user is expecting to move by default.
+		$is_default_on_database_scope = in_array($scope_id, ['db_content', 'db_options', 'db_taxonomies'], true);
+		$sanitized[$option_key] = synchy_is_production_like_destination($sanitized)
+			&& (string) ($scope['group'] ?? '') === 'database'
+			&& !$is_default_on_database_scope
+			? 0
+			: 1;
 	}
 
 	return $sanitized;
@@ -2197,6 +2216,11 @@ function synchy_mark_sync_baseline_complete(array $raw_options)
 		isset($state['file_paths']) && is_array($state['file_paths']) ? $state['file_paths'] : [],
 		synchy_get_sync_current_file_paths_by_scope(synchy_get_selected_sync_scope_ids($options, 'files'))
 	);
+
+	if (in_array('db_content', $selected_scope_ids, true)) {
+		$state['content_post_ids'] = synchy_get_changed_post_ids_for_sync(0);
+	}
+
 	$site_version = synchy_build_next_site_sync_version($options, 'manual-baseline-' . gmdate('YmdHis', $sync_time), 'baseline');
 	$state['site_version'] = $site_version;
 
@@ -2309,6 +2333,9 @@ function synchy_get_sync_state(): array
 			static fn($paths): array => array_values(array_unique(array_filter(array_map('strval', is_array($paths) ? $paths : []), static fn(string $path): bool => $path !== ''))),
 			$decoded['file_paths']
 		)
+		: [];
+	$decoded['content_post_ids'] = isset($decoded['content_post_ids']) && is_array($decoded['content_post_ids'])
+		? array_values(array_unique(array_map('intval', $decoded['content_post_ids'])))
 		: [];
 
 	return $decoded;
@@ -2814,7 +2841,12 @@ function synchy_collect_sync_file_delta(array $state, array $selected_scope_ids,
 		sort($current_scope_paths);
 		$current_file_paths[$scope_id] = $current_scope_paths;
 
-		if (!$force_full && $scope_last_sync_time > 0 && $previous_scope_paths !== []) {
+		// Deletion diffing must run on Full Sync too, not just incremental Push -- it only ever
+		// compares against this scope's own previously-synced file list (never touches anything
+		// on the destination that Synchy didn't put there itself), so there's no extra risk in
+		// running it here; skipping it just meant Full Sync could never remove a file that was
+		// deleted locally, which contradicts what "Full Sync" implies to anyone using it.
+		if ($scope_last_sync_time > 0 && $previous_scope_paths !== []) {
 			$deleted_scope_paths = array_values(array_diff($previous_scope_paths, $current_scope_paths));
 
 			if ($deleted_scope_paths !== []) {
@@ -3456,6 +3488,8 @@ function synchy_build_sync_database_delta(array $state, array $selected_scope_id
 
 	$content_baseline = false;
 	$content_post_ids = [];
+	$content_all_post_ids = [];
+	$content_deleted_post_ids = [];
 
 	if ($content_selected) {
 		$content_last_sync = max(0, (int) ($scope_sync_times['db_content'] ?? 0));
@@ -3465,9 +3499,25 @@ function synchy_build_sync_database_delta(array $state, array $selected_scope_id
 			$baseline_scopes[] = 'db_content';
 		}
 
+		$content_all_post_ids = synchy_get_changed_post_ids_for_sync(0);
 		$content_post_ids = $content_baseline
-			? synchy_get_changed_post_ids_for_sync(0)
+			? $content_all_post_ids
 			: synchy_get_changed_post_ids_for_sync($content_last_sync);
+
+		// A post that's gone from the source entirely never shows up as a "changed" row, so the
+		// normal delta above can never catch it -- this compares the full ID list against the
+		// full list from the last sync (not gated on $force_full: Full Sync should delete too,
+		// same reasoning as the file-deletion fix above). No previous snapshot yet just means
+		// nothing to diff against, not "nothing was deleted".
+		if (!$content_baseline) {
+			$previous_content_post_ids = isset($state['content_post_ids']) && is_array($state['content_post_ids'])
+				? array_map('intval', $state['content_post_ids'])
+				: [];
+
+			if ($previous_content_post_ids !== []) {
+				$content_deleted_post_ids = array_values(array_diff($previous_content_post_ids, $content_all_post_ids));
+			}
+		}
 	}
 
 	$taxonomy_baseline = false;
@@ -3675,6 +3725,8 @@ function synchy_build_sync_database_delta(array $state, array $selected_scope_id
 		'current_fingerprints' => $current_fingerprints,
 		'baseline_scopes' => array_values(array_unique($baseline_scopes)),
 		'selected_scopes' => array_values($selected_scope_ids),
+		'content_all_post_ids' => $content_all_post_ids,
+		'deleted_post_ids' => $content_deleted_post_ids,
 	];
 }
 
@@ -3879,6 +3931,7 @@ function synchy_build_sync_manifest(array $file_delta, array $db_delta, int $syn
 			'totalRows' => (int) ($db_delta['total_rows'] ?? 0),
 			'tableCounts' => (array) ($db_delta['table_counts'] ?? []),
 			'tables' => $tables,
+			'deletedPostIds' => array_values(array_unique(array_map('intval', (array) ($db_delta['deleted_post_ids'] ?? [])))),
 		],
 	];
 }
@@ -4147,6 +4200,9 @@ function synchy_prepare_sync_payload(array $options, array $selection = [], bool
 			isset($state['file_paths']) && is_array($state['file_paths']) ? $state['file_paths'] : [],
 			(array) ($file_delta['current_file_paths'] ?? [])
 		),
+		'content_post_ids' => isset($db_delta['content_all_post_ids'])
+			? array_values(array_unique(array_map('intval', (array) $db_delta['content_all_post_ids'])))
+			: (isset($state['content_post_ids']) && is_array($state['content_post_ids']) ? $state['content_post_ids'] : []),
 		'site_version' => $site_version,
 	];
 
@@ -9370,6 +9426,39 @@ function synchy_apply_sync_deleted_paths(array $manifest): array|WP_Error
 	];
 }
 
+function synchy_apply_sync_deleted_posts(array $manifest): array
+{
+	$post_ids = array_values(array_unique(array_filter(
+		array_map(static fn($id): int => (int) $id, (array) ($manifest['database']['deletedPostIds'] ?? [])),
+		static fn(int $id): bool => $id > 0
+	)));
+
+	if (!function_exists('wp_delete_post')) {
+		require_once ABSPATH . 'wp-admin/includes/post.php';
+	}
+
+	$deleted = 0;
+
+	foreach ($post_ids as $post_id) {
+		if (get_post($post_id) === null) {
+			continue;
+		}
+
+		// Force-delete (skip Trash) and let core cascade postmeta, comments, term
+		// relationships, and -- for attachments -- the underlying file. This is the
+		// same file the deletedPaths pass would already be removing for Uploads, so
+		// this is not a second deletion path for the file, only for its post row.
+		if (wp_delete_post($post_id, true) !== false) {
+			$deleted++;
+		}
+	}
+
+	return [
+		'deletedPosts' => $deleted,
+		'deletedPostIds' => $post_ids,
+	];
+}
+
 function synchy_handle_remote_sync_request(WP_REST_Request $request)
 {
 	if (!class_exists('ZipArchive')) {
@@ -9462,6 +9551,8 @@ function synchy_handle_remote_sync_request(WP_REST_Request $request)
 			return new WP_Error($deleted_result->get_error_code(), $deleted_result->get_error_message(), ['status' => 400]);
 		}
 
+		$deleted_posts_result = synchy_apply_sync_deleted_posts($manifest);
+
 		$synced_at = max(0, (int) ($manifest['syncedAt'] ?? time()));
 		$files_synced = (int) ($manifest['files']['count'] ?? 0);
 		$db_rows_synced = (int) ($prepared_sql['totalRows'] ?? 0);
@@ -9482,16 +9573,18 @@ function synchy_handle_remote_sync_request(WP_REST_Request $request)
 			'lastSyncTime' => $synced_at,
 			'siteVersion' => $site_version,
 			'message' => sprintf(
-				/* translators: 1: file count, 2: row count, 3: deleted file count */
-				__('Applied Sync with %1$d files, %2$d DB rows, and %3$d deleted files on the destination site.', 'synchy'),
+				/* translators: 1: file count, 2: row count, 3: deleted file count, 4: deleted post count */
+				__('Applied Sync with %1$d files, %2$d DB rows, %3$d deleted files, and %4$d deleted posts on the destination site.', 'synchy'),
 				$files_synced,
 				$db_rows_synced,
-				(int) ($deleted_result['deletedFiles'] ?? 0)
+				(int) ($deleted_result['deletedFiles'] ?? 0),
+				(int) ($deleted_posts_result['deletedPosts'] ?? 0)
 			),
 			'optionRowsApplied' => $applied_option_rows,
 			'navMenuRepair' => $nav_menu_repair,
 			'deletedFiles' => (int) ($deleted_result['deletedFiles'] ?? 0),
 			'deletedDirs' => (int) ($deleted_result['deletedDirs'] ?? 0),
+			'deletedPosts' => (int) ($deleted_posts_result['deletedPosts'] ?? 0),
 		]);
 		synchy_apply_site_sync_version($site_version);
 
@@ -9505,14 +9598,16 @@ function synchy_handle_remote_sync_request(WP_REST_Request $request)
 			'lastSyncTime' => $synced_at,
 			'siteVersion' => $site_version,
 			'message' => sprintf(
-				/* translators: 1: file count, 2: row count, 3: deleted file count */
-				__('Synced %1$d files, %2$d DB rows, and %3$d deleted files on the destination site.', 'synchy'),
+				/* translators: 1: file count, 2: row count, 3: deleted file count, 4: deleted post count */
+				__('Synced %1$d files, %2$d DB rows, %3$d deleted files, and %4$d deleted posts on the destination site.', 'synchy'),
 				$files_synced,
 				$db_rows_synced,
-				(int) ($deleted_result['deletedFiles'] ?? 0)
+				(int) ($deleted_result['deletedFiles'] ?? 0),
+				(int) ($deleted_posts_result['deletedPosts'] ?? 0)
 			),
 			'deletedFiles' => (int) ($deleted_result['deletedFiles'] ?? 0),
 			'deletedDirs' => (int) ($deleted_result['deletedDirs'] ?? 0),
+			'deletedPosts' => (int) ($deleted_posts_result['deletedPosts'] ?? 0),
 			'navMenuRepair' => $nav_menu_repair,
 		]);
 	} finally {
