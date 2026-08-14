@@ -30,6 +30,7 @@ const SYNCHY_SITE_SYNC_SITE_ID_OPTION = 'synchy_site_sync_site_id';
 const SYNCHY_SITE_SYNC_ACTIVE_PROFILE_OPTION = 'synchy_site_sync_active_profile';
 const SYNCHY_SITE_ROLE_OPTION = 'synchy_site_role';
 const SYNCHY_SITE_ROLE_LOCKED_OPTION = 'synchy_site_role_locked';
+const SYNCHY_SYNC_DISABLED_OPTION = 'synchy_sync_disabled';
 const SYNCHY_SYNC_RECEIVE_HISTORY_OPTION = 'synchy_sync_receive_history';
 const SYNCHY_IMPORT_OPTIONS = 'synchy_import_options';
 const SYNCHY_IMPORT_RESULT_OPTION = 'synchy_import_result';
@@ -770,6 +771,17 @@ function synchy_is_live_site_role(): bool
 function synchy_is_site_role_locked(): bool
 {
 	return (bool) get_option(SYNCHY_SITE_ROLE_LOCKED_OPTION, false);
+}
+
+/**
+ * A real block, not a UI hint: when on, this site refuses every incoming Sync/self-update
+ * request at the REST layer, regardless of who's authenticated or what they're sending. Distinct
+ * from Site Role, which only affects what this site's own page shows -- this is meant for "I
+ * need Live completely safe from any dev site pushing to it right now," independent of role.
+ */
+function synchy_is_sync_disabled(): bool
+{
+	return (bool) get_option(SYNCHY_SYNC_DISABLED_OPTION, false);
 }
 
 /**
@@ -9698,6 +9710,14 @@ function synchy_apply_sync_deleted_posts(array $manifest): array
 
 function synchy_handle_remote_sync_request(WP_REST_Request $request)
 {
+	if (synchy_is_sync_disabled()) {
+		return new WP_Error(
+			'synchy_sync_disabled',
+			__('Incoming Sync is disabled on this site. Turn it off in the "This site is" panel to allow it.', 'synchy'),
+			['status' => 403]
+		);
+	}
+
 	if (!class_exists('ZipArchive')) {
 		return new WP_Error('synchy_sync_zip_missing', __('ZipArchive is not available on the destination site.', 'synchy'), ['status' => 500]);
 	}
@@ -12635,19 +12655,36 @@ function synchy_render_incremental_site_sync_page(array $current): void
 		<?php synchy_render_notice(); ?>
 		<div class="synchy-shell">
 			<div class="synchy-panel synchy-site-role-panel">
-				<form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" class="synchy-form synchy-input-row">
+				<form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" class="synchy-form">
 					<input type="hidden" name="action" value="synchy_save_site_role" />
 					<?php wp_nonce_field('synchy_save_site_role', 'synchy_site_role_nonce'); ?>
-					<label for="synchy-site-role-select"><strong><?php esc_html_e('This site is:', 'synchy'); ?></strong></label>
-					<select id="synchy-site-role-select" name="synchy_site_role">
-						<?php foreach ($site_role_labels as $role_key => $role_label) : ?>
-							<option value="<?php echo esc_attr($role_key); ?>" <?php selected($site_role, $role_key); ?>><?php echo esc_html($role_label); ?></option>
-						<?php endforeach; ?>
-					</select>
-					<button type="submit" class="button"><?php esc_html_e('Save', 'synchy'); ?></button>
-					<?php if ($site_role === 'live') : ?>
-						<span class="synchy-badge synchy-badge--attention"><?php esc_html_e('Push controls hidden on this site', 'synchy'); ?></span>
-					<?php endif; ?>
+					<div class="synchy-input-row synchy-site-role-row">
+						<strong class="synchy-site-role-label"><?php esc_html_e('This site is:', 'synchy'); ?></strong>
+						<div class="synchy-role-group" role="radiogroup">
+							<?php foreach ($site_role_labels as $role_key => $role_label) : ?>
+								<?php $role_input_id = 'synchy-site-role-' . ($role_key === '' ? 'unset' : $role_key); ?>
+								<input
+									type="radio"
+									id="<?php echo esc_attr($role_input_id); ?>"
+									name="synchy_site_role"
+									value="<?php echo esc_attr($role_key); ?>"
+									class="synchy-role-option-input"
+									<?php checked($site_role, $role_key); ?>
+								/>
+								<label for="<?php echo esc_attr($role_input_id); ?>" class="synchy-role-option synchy-role-option--<?php echo esc_attr($role_key === '' ? 'unset' : $role_key); ?>">
+									<?php echo esc_html($role_label); ?>
+								</label>
+							<?php endforeach; ?>
+						</div>
+						<button type="submit" class="button button-primary"><?php esc_html_e('Save', 'synchy'); ?></button>
+						<?php if ($site_role === 'live') : ?>
+							<span class="synchy-badge synchy-badge--attention"><?php esc_html_e('Push controls hidden on this site', 'synchy'); ?></span>
+						<?php endif; ?>
+					</div>
+					<label class="synchy-sync-disabled-toggle">
+						<input type="checkbox" name="synchy_sync_disabled" value="1" <?php checked(synchy_is_sync_disabled()); ?> />
+						<span><?php esc_html_e('Disable incoming Sync on this site (blocks every dev/source site from pushing here, regardless of role)', 'synchy'); ?></span>
+					</label>
 				</form>
 			</div>
 
@@ -13317,6 +13354,7 @@ add_action('admin_post_synchy_save_site_role', function (): void {
 	// set" again -- so it's locked from here on: no remote Test+Update+Preview from any source
 	// site should ever be able to silently override this deliberate local choice again.
 	update_option(SYNCHY_SITE_ROLE_LOCKED_OPTION, true, true);
+	update_option(SYNCHY_SYNC_DISABLED_OPTION, !empty($_POST['synchy_sync_disabled']), true);
 
 	$redirect = wp_get_referer();
 
@@ -13928,6 +13966,14 @@ add_action('rest_api_init', function (): void {
 		[
 			'methods' => 'POST',
 			'callback' => static function (WP_REST_Request $request) {
+				if (synchy_is_sync_disabled()) {
+					return new WP_Error(
+						'synchy_sync_disabled',
+						__('Incoming Sync is disabled on this site. Turn it off in the "This site is" panel to allow it.', 'synchy'),
+						['status' => 403]
+					);
+				}
+
 				$body = $request->get_body();
 
 				if ($body === '') {
