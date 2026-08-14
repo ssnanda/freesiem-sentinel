@@ -3628,6 +3628,110 @@ function synchy_build_site_purge_inventory(): array
 	];
 }
 
+/**
+ * Runs a full local Export synchronously, in one request, looping synchy_process_export_job()
+ * until it finishes -- Purge's forced-backup step needs a single "click and wait" action, not the
+ * chunked/polled flow the Export tab normally drives from the browser.
+ */
+function synchy_purge_run_backup_export()
+{
+	$job = synchy_start_export_job(synchy_get_export_options(), true);
+
+	if (is_wp_error($job)) {
+		return $job;
+	}
+
+	$iterations = 0;
+
+	while (($job['status'] ?? '') === 'running' && $iterations < 1000) {
+		$job = synchy_process_export_job($job);
+		$iterations++;
+	}
+
+	if (($job['status'] ?? '') !== 'complete') {
+		return new WP_Error(
+			'synchy_purge_backup_failed',
+			(string) ($job['message'] ?? __('The backup export did not finish successfully.', 'synchy'))
+		);
+	}
+
+	return $job;
+}
+
+/**
+ * Purge deletes content on the *destination*, so that's what must be backed up -- this triggers
+ * a real Export run on the destination itself via REST, not a local one. Local Export was the
+ * wrong site to back up: it protects the source's own content, not what Purge is about to remove.
+ */
+function synchy_purge_run_remote_backup_export(array $options)
+{
+	$result = synchy_site_sync_remote_request($options, 'purge/backup', 'POST', ['timeout' => 300]);
+
+	if (is_wp_error($result)) {
+		return $result;
+	}
+
+	synchy_set_purge_backup_verified($options);
+
+	return $result;
+}
+
+function synchy_get_purge_backup_verified_transient_key(array $options): string
+{
+	return 'synchy_purge_backup_ok_' . md5((string) ($options['destination_url'] ?? ''));
+}
+
+function synchy_set_purge_backup_verified(array $options): void
+{
+	set_transient(synchy_get_purge_backup_verified_transient_key($options), time(), 30 * MINUTE_IN_SECONDS);
+}
+
+function synchy_purge_backup_is_recent(array $options): bool
+{
+	return (bool) get_transient(synchy_get_purge_backup_verified_transient_key($options));
+}
+
+/**
+ * Diffs the destination's actual current inventory against this site's -- items on the
+ * destination that don't exist here at all, scoped to whichever of posts/pages/pluginFolders the
+ * caller selected. Always recomputed fresh (never trusts a client-supplied list), both for the
+ * dry-run preview and again, independently, right before the real delete executes.
+ */
+function synchy_build_purge_diff(array $options, array $selected_scopes): array
+{
+	$remote = synchy_site_sync_remote_request($options, 'purge/inventory', 'GET', ['timeout' => 30]);
+
+	if (is_wp_error($remote)) {
+		return $remote;
+	}
+
+	$local = synchy_build_site_purge_inventory();
+	$diff = ['posts' => [], 'pages' => [], 'pluginFolders' => []];
+
+	if (in_array('posts', $selected_scopes, true)) {
+		$diff['posts'] = array_values(array_diff(
+			array_map('intval', (array) ($remote['posts'] ?? [])),
+			$local['posts']
+		));
+	}
+
+	if (in_array('pages', $selected_scopes, true)) {
+		$diff['pages'] = array_values(array_diff(
+			array_map('intval', (array) ($remote['pages'] ?? [])),
+			$local['pages']
+		));
+	}
+
+	if (in_array('pluginFolders', $selected_scopes, true)) {
+		$diff['pluginFolders'] = array_values(array_diff(
+			array_map('strval', (array) ($remote['pluginFolders'] ?? [])),
+			$local['pluginFolders']
+		));
+	}
+
+	return $diff;
+}
+
 function synchy_get_form_plugin_sync_table_specs(): array
 {
 	global $wpdb;
@@ -9777,6 +9881,97 @@ function synchy_apply_sync_deleted_posts(array $manifest): array
 	];
 }
 
+/**
+ * The actual destructive step of Purge & Sync, run on the destination. Deliberately its own
+ * function/endpoint, never reachable through the normal Sync pipeline -- every input is
+ * re-validated here regardless of what the caller claims, because this is the one place in the
+ * whole plugin that permanently removes content the destination created on its own.
+ */
+function synchy_apply_site_purge(array $post_ids, array $page_ids, array $plugin_folders): array
+{
+	if (!function_exists('wp_delete_post')) {
+		require_once ABSPATH . 'wp-admin/includes/post.php';
+	}
+
+	$deleted_posts = 0;
+
+	foreach (array_unique(array_map('intval', $post_ids)) as $post_id) {
+		if ($post_id <= 0) {
+			continue;
+		}
+
+		$post = get_post($post_id);
+
+		if ($post === null || $post->post_type !== 'post') {
+			continue;
+		}
+
+		if (wp_delete_post($post_id, true) !== false) {
+			$deleted_posts++;
+		}
+	}
+
+	$deleted_pages = 0;
+
+	foreach (array_unique(array_map('intval', $page_ids)) as $page_id) {
+		if ($page_id <= 0) {
+			continue;
+		}
+
+		$page = get_post($page_id);
+
+		if ($page === null || $page->post_type !== 'page') {
+			continue;
+		}
+
+		if (wp_delete_post($page_id, true) !== false) {
+			$deleted_pages++;
+		}
+	}
+
+	$protected = synchy_get_protected_plugin_folder_names();
+	$plugin_dir = wp_normalize_path(WP_CONTENT_DIR . '/plugins');
+	$deleted_plugin_folders = [];
+
+	foreach (array_unique(array_map('sanitize_file_name', $plugin_folders)) as $folder) {
+		if ($folder === '' || in_array($folder, $protected, true)) {
+			continue;
+		}
+
+		$folder_path = wp_normalize_path($plugin_dir . '/' . $folder);
+
+		// Must resolve to a direct child of the plugins directory -- refuses anything that
+		// escapes it (../), and refuses if it somehow isn't actually inside plugins/ at all.
+		if (dirname($folder_path) !== $plugin_dir || !is_dir($folder_path)) {
+			continue;
+		}
+
+		if (function_exists('deactivate_plugins')) {
+			foreach ((array) get_option('active_plugins', []) as $active_plugin) {
+				if (str_starts_with((string) $active_plugin, $folder . '/')) {
+					deactivate_plugins((string) $active_plugin, true, false);
+				}
+			}
+		}
+
+		synchy_rrmdir($folder_path);
+
+		// synchy_rrmdir() returns void, so success is confirmed by the directory actually
+		// being gone afterward rather than trusting a return value that doesn't exist.
+		clearstatcache(true, $folder_path);
+
+		if (!is_dir($folder_path)) {
+			$deleted_plugin_folders[] = $folder;
+		}
+	}
+
+	return [
+		'deletedPosts' => $deleted_posts,
+		'deletedPages' => $deleted_pages,
+		'deletedPluginFolders' => $deleted_plugin_folders,
+	];
+}
+
 function synchy_handle_remote_sync_request(WP_REST_Request $request)
 {
 	if (synchy_is_sync_disabled()) {
@@ -13021,6 +13216,59 @@ function synchy_render_incremental_site_sync_page(array $current): void
 				</form>
 			</div>
 
+			<p class="synchy-purge-trigger-row">
+				<button type="button" class="synchy-purge-trigger" data-synchy-purge-open>purge</button>
+			</p>
+
+			<div class="synchy-modal is-hidden" data-synchy-purge-modal aria-hidden="true">
+				<div class="synchy-modal__backdrop" data-synchy-purge-close></div>
+				<div class="synchy-modal__dialog synchy-purge-dialog" role="dialog" aria-modal="true" aria-labelledby="synchy-purge-title">
+					<div class="synchy-modal__header">
+						<h2 id="synchy-purge-title"><?php esc_html_e('Purge & Sync (Beta)', 'synchy'); ?></h2>
+						<button type="button" class="button-link" data-synchy-purge-close><?php esc_html_e('Close', 'synchy'); ?></button>
+					</div>
+
+					<div data-synchy-purge-step="beta">
+						<p class="synchy-field-note synchy-field-note--warning">
+							<?php esc_html_e('This is a Beta feature. It permanently deletes content on the destination site that does not exist on this site -- posts, pages, and/or plugin folders, depending on what you select later. There is no undo through Sync. Read every step before continuing.', 'synchy'); ?>
+						</p>
+						<button type="button" class="button button-primary" data-synchy-purge-ack-beta><?php esc_html_e('I understand, continue', 'synchy'); ?></button>
+					</div>
+
+					<div data-synchy-purge-step="backup" class="is-hidden">
+						<p class="synchy-field-note"><?php esc_html_e('Before anything can be deleted, the destination must be backed up. This runs a real Export of the destination site right now.', 'synchy'); ?></p>
+						<button type="button" class="button button-primary" data-synchy-purge-run-backup><?php esc_html_e('Run destination backup now', 'synchy'); ?></button>
+						<p class="synchy-field-note" data-synchy-purge-backup-status></p>
+					</div>
+
+					<div data-synchy-purge-step="scopes" class="is-hidden">
+						<p class="synchy-field-note"><?php esc_html_e('Backup confirmed. Choose what to purge:', 'synchy'); ?></p>
+						<label class="synchy-sync-scope-toggle"><input type="checkbox" data-synchy-purge-scope value="posts" /> <span><?php esc_html_e('Purge Posts', 'synchy'); ?></span></label>
+						<label class="synchy-sync-scope-toggle"><input type="checkbox" data-synchy-purge-scope value="pages" /> <span><?php esc_html_e('Purge Pages', 'synchy'); ?></span></label>
+						<label class="synchy-sync-scope-toggle"><input type="checkbox" data-synchy-purge-scope value="pluginFolders" /> <span><?php esc_html_e('Purge Plugins', 'synchy'); ?></span></label>
+						<br />
+						<button type="button" class="button button-primary" data-synchy-purge-preview><?php esc_html_e('Preview what will be deleted', 'synchy'); ?></button>
+					</div>
+
+					<div data-synchy-purge-step="dryrun" class="is-hidden">
+						<p class="synchy-field-note synchy-field-note--warning" data-synchy-purge-dryrun-summary></p>
+						<div data-synchy-purge-dryrun-list></div>
+						<button type="button" class="button button-primary" data-synchy-purge-to-confirm><?php esc_html_e('Continue to final confirmation', 'synchy'); ?></button>
+					</div>
+
+					<div data-synchy-purge-step="confirm" class="is-hidden">
+						<p class="synchy-field-note synchy-field-note--warning"><?php esc_html_e('This cannot be undone through Sync. Type PURGE exactly to confirm.', 'synchy'); ?></p>
+						<input type="text" data-synchy-purge-confirm-text placeholder="PURGE" />
+						<button type="button" class="button synchy-action-button synchy-action-button--danger" data-synchy-purge-execute><?php esc_html_e('Execute Purge', 'synchy'); ?></button>
+					</div>
+
+					<div data-synchy-purge-step="result" class="is-hidden">
+						<p class="synchy-field-note" data-synchy-purge-result-message></p>
+						<button type="button" class="button" data-synchy-purge-close><?php esc_html_e('Close', 'synchy'); ?></button>
+					</div>
+				</div>
+			</div>
+
 			<?php endif; ?>
 		</div>
 	</div>
@@ -13640,6 +13888,119 @@ add_action('wp_ajax_synchy_update_remote_synchy', function (): void {
 	]);
 });
 
+// --- Purge & Sync (Beta) -----------------------------------------------------------------
+// Every step below re-checks capability + nonce independently, even though they're only ever
+// called in sequence from the wizard -- each one is destructive-adjacent enough that it must
+// stand on its own if called directly.
+
+add_action('wp_ajax_synchy_purge_run_backup', function (): void {
+	if (!current_user_can('manage_options')) {
+		wp_send_json_error(['message' => __('You are not allowed to run a Synchy backup.', 'synchy')], 403);
+	}
+
+	check_ajax_referer('synchy_sync_ajax', 'nonce');
+
+	$options = synchy_get_site_sync_options();
+	$result = synchy_purge_run_remote_backup_export($options);
+
+	if (is_wp_error($result)) {
+		wp_send_json_error(['message' => $result->get_error_message()], 400);
+	}
+
+	wp_send_json_success([
+		'message' => __('Backup export of the destination completed. It is safe to continue.', 'synchy'),
+		'createdAt' => (string) ($result['createdAt'] ?? gmdate('c')),
+	]);
+});
+
+add_action('wp_ajax_synchy_purge_preview', function (): void {
+	if (!current_user_can('manage_options')) {
+		wp_send_json_error(['message' => __('You are not allowed to preview a Synchy Purge.', 'synchy')], 403);
+	}
+
+	check_ajax_referer('synchy_sync_ajax', 'nonce');
+
+	$options = synchy_get_site_sync_options();
+
+	if (!synchy_purge_backup_is_recent($options)) {
+		wp_send_json_error(['message' => __('No recent backup found. Run the backup step again before previewing a Purge.', 'synchy')], 409);
+	}
+
+	$scopes = array_values(array_intersect(
+		(array) ($_POST['scopes'] ?? []),
+		['posts', 'pages', 'pluginFolders']
+	));
+
+	if ($scopes === []) {
+		wp_send_json_error(['message' => __('Select at least one Purge scope.', 'synchy')], 400);
+	}
+
+	$diff = synchy_build_purge_diff($options, $scopes);
+
+	if (is_wp_error($diff)) {
+		wp_send_json_error(['message' => $diff->get_error_message()], 400);
+	}
+
+	wp_send_json_success(['diff' => $diff]);
+});
+
+add_action('wp_ajax_synchy_purge_execute', function (): void {
+	if (!current_user_can('manage_options')) {
+		wp_send_json_error(['message' => __('You are not allowed to run a Synchy Purge.', 'synchy')], 403);
+	}
+
+	check_ajax_referer('synchy_sync_ajax', 'nonce');
+
+	$confirm_text = isset($_POST['confirm_text']) ? sanitize_text_field(wp_unslash((string) $_POST['confirm_text'])) : '';
+
+	if (strtoupper(trim($confirm_text)) !== 'PURGE') {
+		wp_send_json_error(['message' => __('Type PURGE exactly to confirm.', 'synchy')], 400);
+	}
+
+	$options = synchy_get_site_sync_options();
+
+	if (!synchy_purge_backup_is_recent($options)) {
+		wp_send_json_error(['message' => __('No recent backup found. Start over from the backup step before Purge can run.', 'synchy')], 409);
+	}
+
+	$scopes = array_values(array_intersect(
+		(array) ($_POST['scopes'] ?? []),
+		['posts', 'pages', 'pluginFolders']
+	));
+
+	if ($scopes === []) {
+		wp_send_json_error(['message' => __('Select at least one Purge scope.', 'synchy')], 400);
+	}
+
+	// Recomputed fresh right here, never trusting whatever the dry-run step showed the browser --
+	// the list that actually gets deleted is always this request's own diff, not a stale one.
+	$diff = synchy_build_purge_diff($options, $scopes);
+
+	if (is_wp_error($diff)) {
+		wp_send_json_error(['message' => $diff->get_error_message()], 400);
+	}
+
+	$result = synchy_site_sync_remote_request(
+		$options,
+		'purge/execute',
+		'POST',
+		[
+			'timeout' => 60,
+			'body' => [
+				'postIds' => $diff['posts'],
+				'pageIds' => $diff['pages'],
+				'pluginFolders' => $diff['pluginFolders'],
+			],
+		]
+	);
+
+	if (is_wp_error($result)) {
+		wp_send_json_error(['message' => $result->get_error_message()], 400);
+	}
+
+	wp_send_json_success(['result' => $result]);
+});
+
 add_action('wp_ajax_synchy_mark_sync_baseline_complete', function (): void {
 	if (!current_user_can('manage_options')) {
 		wp_send_json_error(['message' => __('You are not allowed to mark a Synchy Sync baseline.', 'synchy')], 403);
@@ -14022,6 +14383,60 @@ add_action('rest_api_init', function (): void {
 			'methods' => 'GET',
 			'callback' => static function () {
 				return rest_ensure_response(synchy_build_site_purge_inventory());
+			},
+			'permission_callback' => $permission,
+		]
+	);
+
+	register_rest_route(
+		'synchy/v1',
+		'/purge/backup',
+		[
+			'methods' => 'POST',
+			'callback' => static function () {
+				$job = synchy_purge_run_backup_export();
+
+				if (is_wp_error($job)) {
+					return $job;
+				}
+
+				return rest_ensure_response(['success' => true, 'createdAt' => gmdate('c')]);
+			},
+			'permission_callback' => $permission,
+		]
+	);
+
+	register_rest_route(
+		'synchy/v1',
+		'/purge/execute',
+		[
+			'methods' => 'POST',
+			'callback' => static function (WP_REST_Request $request) {
+				if (synchy_is_sync_disabled()) {
+					return new WP_Error(
+						'synchy_sync_disabled',
+						__('Incoming Sync is disabled on this site. Turn it off in the "This site is" panel to allow it.', 'synchy'),
+						['status' => 403]
+					);
+				}
+
+				$post_ids = array_map('intval', (array) $request->get_param('postIds'));
+				$page_ids = array_map('intval', (array) $request->get_param('pageIds'));
+				$plugin_folders = array_map('sanitize_file_name', (array) $request->get_param('pluginFolders'));
+
+				$result = synchy_apply_site_purge($post_ids, $page_ids, $plugin_folders);
+				$purge_user = wp_get_current_user();
+				synchy_record_sync_receive_history_entry([
+					'sourceUrl' => '',
+					'updatedBy' => $purge_user instanceof WP_User ? (string) $purge_user->user_login : '',
+					'mode' => 'purge',
+					'filesSynced' => 0,
+					'dbRowsSynced' => 0,
+					'deletedFiles' => count((array) $result['deletedPluginFolders']),
+					'deletedPosts' => (int) $result['deletedPosts'] + (int) $result['deletedPages'],
+				]);
+
+				return rest_ensure_response($result);
 			},
 			'permission_callback' => $permission,
 		]

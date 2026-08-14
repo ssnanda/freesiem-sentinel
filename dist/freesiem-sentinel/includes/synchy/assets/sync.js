@@ -1889,6 +1889,173 @@
 			closeEl.addEventListener("click", closeScopeHelp);
 		});
 	}
+
+	// --- Purge & Sync (Beta) ---------------------------------------------------------------
+	// Every step is a one-way door forward except Close, which always resets all the way back
+	// to "beta" -- there is no "resume where I left off" here on purpose, per the design: doing
+	// a second Purge later must repeat the whole dance, not just re-select more checkboxes.
+	const purgeOpenButton = document.querySelector("[data-synchy-purge-open]");
+	const purgeModal = document.querySelector("[data-synchy-purge-modal]");
+
+	if (purgeOpenButton && purgeModal) {
+		let purgeDryRunDiff = null;
+
+		const purgeSteps = Array.from(purgeModal.querySelectorAll("[data-synchy-purge-step]"));
+		const showPurgeStep = (stepName) => {
+			purgeSteps.forEach((stepEl) => {
+				stepEl.classList.toggle("is-hidden", stepEl.dataset.synchyPurgeStep !== stepName);
+			});
+		};
+
+		const resetPurgeWizard = () => {
+			purgeDryRunDiff = null;
+			const backupStatus = purgeModal.querySelector("[data-synchy-purge-backup-status]");
+			if (backupStatus) {
+				backupStatus.textContent = "";
+			}
+			purgeModal.querySelectorAll("[data-synchy-purge-scope]").forEach((checkbox) => {
+				checkbox.checked = false;
+			});
+			const confirmInput = purgeModal.querySelector("[data-synchy-purge-confirm-text]");
+			if (confirmInput) {
+				confirmInput.value = "";
+			}
+			showPurgeStep("beta");
+		};
+
+		const closePurgeModal = () => {
+			purgeModal.classList.add("is-hidden");
+			purgeModal.setAttribute("aria-hidden", "true");
+			resetPurgeWizard();
+		};
+
+		purgeOpenButton.addEventListener("click", () => {
+			resetPurgeWizard();
+			purgeModal.classList.remove("is-hidden");
+			purgeModal.setAttribute("aria-hidden", "false");
+		});
+
+		purgeModal.querySelectorAll("[data-synchy-purge-close]").forEach((closeEl) => {
+			closeEl.addEventListener("click", closePurgeModal);
+		});
+
+		const purgeAckBetaButton = purgeModal.querySelector("[data-synchy-purge-ack-beta]");
+		if (purgeAckBetaButton) {
+			purgeAckBetaButton.addEventListener("click", () => showPurgeStep("backup"));
+		}
+
+		const purgeRunBackupButton = purgeModal.querySelector("[data-synchy-purge-run-backup]");
+		if (purgeRunBackupButton) {
+			purgeRunBackupButton.addEventListener("click", async () => {
+				const status = purgeModal.querySelector("[data-synchy-purge-backup-status]");
+				purgeRunBackupButton.disabled = true;
+				if (status) {
+					status.textContent = "Running destination backup... this can take a while, keep this tab open.";
+				}
+
+				try {
+					const data = await sendAjax("synchy_purge_run_backup");
+					if (status) {
+						status.textContent = data.message || "Backup completed.";
+					}
+					showPurgeStep("scopes");
+				} catch (error) {
+					if (status) {
+						status.textContent = error.message;
+					}
+				} finally {
+					purgeRunBackupButton.disabled = false;
+				}
+			});
+		}
+
+		const getPurgeSelectedScopes = () =>
+			Array.from(purgeModal.querySelectorAll("[data-synchy-purge-scope]:checked")).map((el) => el.value);
+
+		const purgePreviewButton = purgeModal.querySelector("[data-synchy-purge-preview]");
+		if (purgePreviewButton) {
+			purgePreviewButton.addEventListener("click", async () => {
+				const scopes = getPurgeSelectedScopes();
+				if (scopes.length === 0) {
+					window.alert("Select at least one Purge scope.");
+					return;
+				}
+
+				purgePreviewButton.disabled = true;
+
+				try {
+					const fields = {};
+					scopes.forEach((scope, index) => {
+						fields[`scopes[${index}]`] = scope;
+					});
+					const data = await sendAjax("synchy_purge_preview", fields);
+					purgeDryRunDiff = data.diff || {};
+					const postsCount = (purgeDryRunDiff.posts || []).length;
+					const pagesCount = (purgeDryRunDiff.pages || []).length;
+					const pluginsCount = (purgeDryRunDiff.pluginFolders || []).length;
+
+					const summaryEl = purgeModal.querySelector("[data-synchy-purge-dryrun-summary]");
+					if (summaryEl) {
+						summaryEl.textContent = `This will permanently delete: ${postsCount} posts, ${pagesCount} pages, ${pluginsCount} plugin folders on the destination.`;
+					}
+
+					const listEl = purgeModal.querySelector("[data-synchy-purge-dryrun-list]");
+					if (listEl) {
+						const renderIds = (label, ids) => (ids.length ? `<p><strong>${label}:</strong> ${ids.slice(0, 50).join(", ")}${ids.length > 50 ? "…" : ""}</p>` : "");
+						listEl.innerHTML = renderIds("Post IDs", purgeDryRunDiff.posts || [])
+							+ renderIds("Page IDs", purgeDryRunDiff.pages || [])
+							+ renderIds("Plugin folders", purgeDryRunDiff.pluginFolders || []);
+					}
+
+					showPurgeStep("dryrun");
+				} catch (error) {
+					window.alert(error.message);
+				} finally {
+					purgePreviewButton.disabled = false;
+				}
+			});
+		}
+
+		const purgeToConfirmButton = purgeModal.querySelector("[data-synchy-purge-to-confirm]");
+		if (purgeToConfirmButton) {
+			purgeToConfirmButton.addEventListener("click", () => showPurgeStep("confirm"));
+		}
+
+		const purgeExecuteButton = purgeModal.querySelector("[data-synchy-purge-execute]");
+		if (purgeExecuteButton) {
+			purgeExecuteButton.addEventListener("click", async () => {
+				const confirmInput = purgeModal.querySelector("[data-synchy-purge-confirm-text]");
+				const confirmText = confirmInput ? confirmInput.value : "";
+
+				if ((confirmText || "").trim().toUpperCase() !== "PURGE") {
+					window.alert("Type PURGE exactly to confirm.");
+					return;
+				}
+
+				const scopes = getPurgeSelectedScopes();
+				purgeExecuteButton.disabled = true;
+
+				try {
+					const fields = { confirm_text: confirmText };
+					scopes.forEach((scope, index) => {
+						fields[`scopes[${index}]`] = scope;
+					});
+					const data = await sendAjax("synchy_purge_execute", fields);
+					const result = data.result || {};
+					const resultMessage = purgeModal.querySelector("[data-synchy-purge-result-message]");
+					if (resultMessage) {
+						resultMessage.textContent = `Purge complete. Deleted ${result.deletedPosts || 0} posts, ${result.deletedPages || 0} pages, ${(result.deletedPluginFolders || []).length} plugin folders.`;
+					}
+					showPurgeStep("result");
+				} catch (error) {
+					window.alert(error.message);
+				} finally {
+					purgeExecuteButton.disabled = false;
+				}
+			});
+		}
+	}
+
 	if (updateRemoteButton) {
 		updateRemoteButton.addEventListener("click", updateRemoteSynchy);
 	}
