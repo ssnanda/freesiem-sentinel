@@ -693,7 +693,11 @@
 		const dirty = getConnectionDirty();
 
 		saveButton.disabled = busy || !dirty;
-		testButton.disabled = busy || !hasConnectionCoreValues() || hasConfirmedConnection();
+		// Deliberately not gated on hasConfirmedConnection(): a confirmed connection is not a
+		// reason to lock this button forever -- there's no other way to manually re-verify (e.g.
+		// after updating Sentinel on the destination) without first editing a field just to make
+		// the form "dirty" again.
+		testButton.disabled = busy || !hasConnectionCoreValues();
 
 		if (!inlineConnectionStatus) {
 			return;
