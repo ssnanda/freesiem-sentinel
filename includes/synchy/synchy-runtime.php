@@ -962,6 +962,108 @@ function synchy_get_sync_scope_groups(): array
 	];
 }
 
+/**
+ * Plain-language "what does Sync actually do" content for the admin, not the internal
+ * scope/table names -- and built fresh from what's actually installed and actually turned
+ * on right now, not a fixed description that can drift out of sync with reality.
+ */
+function synchy_build_sync_scope_help_sections(array $options): array
+{
+	$selected = synchy_get_selected_sync_scope_ids($options);
+	$has = static fn(string $scope_id): bool => in_array($scope_id, $selected, true);
+
+	if (!function_exists('get_plugins')) {
+		require_once ABSPATH . 'wp-admin/includes/plugin.php';
+	}
+
+	$installed_plugins = get_plugins();
+	$installed_themes = wp_get_themes();
+	$active_theme = wp_get_theme();
+
+	$has_ajcore = array_key_exists('ajcore/ajcore.php', $installed_plugins);
+	$has_site_kit = array_key_exists('google-site-kit/google-site-kit.php', $installed_plugins);
+	$has_formy_or_fluentforms = array_filter(
+		synchy_get_wp_formy_sync_tables(),
+		static fn(string $table): bool => !str_contains($table, 'aj_forms_')
+	) !== [];
+
+	$syncs = [];
+	$never_syncs = [
+		__('User accounts, logins, and passwords', 'synchy'),
+		__('Comments', 'synchy'),
+		__("This site's own web address (each site keeps its own)", 'synchy'),
+		__("Backup & Restore's own plugin files (updated separately, via Update Live Sentinel)", 'synchy'),
+	];
+
+	if ($has('files_plugins') || $has('files_themes') || $has('files_uploads') || $has('files_mu_plugins')) {
+		$file_kinds = array_filter([
+			$has('files_plugins') ? __('plugins', 'synchy') : '',
+			$has('files_themes') ? __('themes', 'synchy') : '',
+			$has('files_uploads') ? __('media/uploads', 'synchy') : '',
+			$has('files_mu_plugins') ? __('must-use plugins', 'synchy') : '',
+		]);
+		$syncs[] = sprintf(
+			/* translators: %s: comma-separated list of file kinds */
+			__('Files for: %s — including removing files you delete locally', 'synchy'),
+			implode(', ', $file_kinds)
+		);
+	}
+
+	if ($has('db_content')) {
+		$syncs[] = __('Pages, posts, and any custom content — matches your dev site exactly, including deleting anything you delete locally', 'synchy');
+	}
+
+	if ($has('db_options')) {
+		$syncs[] = __('Site settings — active theme, colors/branding, homepage, widgets', 'synchy');
+	}
+
+	if ($has('db_taxonomies')) {
+		$syncs[] = __('Categories, tags, and (together with Site settings and Content) Menus', 'synchy');
+	}
+
+	if ($has('db_wp_formy')) {
+		$syncs[] = __('The forms themselves (fields, layout, embed tags) for your form plugins — not the entries people submit', 'synchy');
+	} else {
+		$never_syncs[] = __('Forms (Forms is currently turned off — form changes will not reach the live site)', 'synchy');
+	}
+
+	foreach (['files_plugins', 'files_themes', 'files_uploads', 'files_mu_plugins', 'db_content', 'db_options', 'db_taxonomies'] as $off_scope_id) {
+		if (!$has($off_scope_id)) {
+			$definition = synchy_get_sync_scope_definitions()[$off_scope_id] ?? [];
+			$never_syncs[] = sprintf(
+				/* translators: %s: scope label */
+				__('%s (currently turned off)', 'synchy'),
+				(string) ($definition['label'] ?? $off_scope_id)
+			);
+		}
+	}
+
+	if ($has_ajcore) {
+		$never_syncs[] = __('AJ Core: customer leads/form submissions, client portal data, Stripe/product data, and its connection settings (Live Chat, API keys) — only its plugin code and form definitions sync', 'synchy');
+	}
+
+	if ($has_formy_or_fluentforms) {
+		$never_syncs[] = __('WP Formy / Fluent Forms: real visitor submissions never sync, only the forms themselves', 'synchy');
+	}
+
+	if ($has_site_kit) {
+		$never_syncs[] = __('Google Site Kit is installed but not specially protected yet — its settings will sync like any normal plugin setting unless protection is added', 'synchy');
+	}
+
+	$theme_names = array_values(array_map(
+		static fn($theme): string => (string) $theme->get('Name'),
+		$installed_themes
+	));
+
+	return [
+		'syncs' => $syncs,
+		'neverSyncs' => $never_syncs,
+		'activeTheme' => (string) $active_theme->get('Name'),
+		'installedThemes' => $theme_names,
+		'installedPluginCount' => count($installed_plugins),
+	];
+}
+
 function synchy_get_sync_top_level_entries(string $path, array $excluded = []): array
 {
 	if ($path === '' || !is_dir($path)) {
@@ -12379,7 +12481,11 @@ function synchy_render_incremental_site_sync_page(array $current): void
 		<div class="synchy-shell">
 			<form method="post" action="<?php echo esc_url(synchy_get_site_sync_save_url()); ?>" class="synchy-form" data-synchy-sync-form>
 				<?php synchy_render_site_sync_save_fields(); ?>
-				<input type="hidden" name="<?php echo esc_attr(SYNCHY_SITE_SYNC_OPTIONS); ?>[sync_scope_selection_present]" value="1" />
+				<?php /* No sync_scope_selection_present flag here on purpose: there is no working checkbox UI on this
+				page that lets an admin change scopes, so this form must never claim to be submitting scope changes --
+				doing so with no scope values actually present would make synchy_sanitize_site_sync_options() zero out
+				every scope on the very next Preview/Push/Full Sync click. Scopes are read from the saved options via
+				the $existing fallback below instead. */ ?>
 
 				<div class="synchy-grid synchy-sync-workflow-grid">
 					<div class="synchy-panel synchy-sync-control-panel" data-synchy-sync-status-panel data-synchy-sync-pending-panel>
@@ -12389,10 +12495,15 @@ function synchy_render_incremental_site_sync_page(array $current): void
 						</div>
 						<p class="synchy-status-line" data-synchy-sync-status-summary><?php echo esc_html($status_summary); ?></p>
 
+						<?php $sync_scope_help = synchy_build_sync_scope_help_sections($options); ?>
+
 						<div class="synchy-input-row synchy-sync-action-row">
 							<button type="button" class="button synchy-action-button synchy-action-button--preview" data-synchy-preview-sync><?php esc_html_e('Preview', 'synchy'); ?></button>
 							<button type="button" class="button button-primary button-large synchy-action-button synchy-action-button--push" data-synchy-run-sync disabled><?php echo esc_html($run_button_label); ?></button>
 							<button type="button" class="button synchy-action-button synchy-action-button--full" data-synchy-run-full-sync disabled><?php esc_html_e('Full Sync', 'synchy'); ?></button>
+							<button type="button" class="button synchy-help-icon-button" data-synchy-scope-help-open aria-label="<?php esc_attr_e('What does Sync include and exclude?', 'synchy'); ?>" title="<?php esc_attr_e('What does Sync include and exclude?', 'synchy'); ?>">
+								<span class="dashicons dashicons-editor-help" aria-hidden="true"></span>
+							</button>
 							<button type="button" class="button synchy-action-button synchy-action-button--muted" data-synchy-pause-sync disabled><?php esc_html_e('Pause Sync', 'synchy'); ?></button>
 							<button type="button" class="button synchy-action-button synchy-action-button--muted" data-synchy-resume-sync disabled><?php esc_html_e('Resume Sync', 'synchy'); ?></button>
 							<button type="button" class="button button-link-delete synchy-action-button synchy-action-button--danger" data-synchy-reset-sync><?php esc_html_e('Cancel', 'synchy'); ?></button>
@@ -12407,6 +12518,39 @@ function synchy_render_incremental_site_sync_page(array $current): void
 							);
 							?>
 						</p>
+
+						<div class="synchy-modal is-hidden" data-synchy-scope-help-modal aria-hidden="true">
+							<div class="synchy-modal__backdrop" data-synchy-scope-help-close></div>
+							<div class="synchy-modal__dialog" role="dialog" aria-modal="true" aria-labelledby="synchy-scope-help-title">
+								<div class="synchy-modal__header">
+									<h2 id="synchy-scope-help-title"><?php esc_html_e('What Sync includes and excludes', 'synchy'); ?></h2>
+									<button type="button" class="button-link" data-synchy-scope-help-close><?php esc_html_e('Close', 'synchy'); ?></button>
+								</div>
+								<p class="synchy-field-note">
+									<?php
+									printf(
+										/* translators: 1: active theme name, 2: installed theme count, 3: installed plugin count */
+										esc_html__('Active theme: %1$s. %2$d theme(s) and %3$d plugin(s) installed on this site.', 'synchy'),
+										esc_html((string) $sync_scope_help['activeTheme']),
+										count($sync_scope_help['installedThemes']),
+										(int) $sync_scope_help['installedPluginCount']
+									);
+									?>
+								</p>
+								<h3><?php esc_html_e('Syncs to the live site right now:', 'synchy'); ?></h3>
+								<ul class="synchy-scope-help__list">
+									<?php foreach ($sync_scope_help['syncs'] as $line) : ?>
+										<li><?php echo esc_html($line); ?></li>
+									<?php endforeach; ?>
+								</ul>
+								<h3><?php esc_html_e('Never syncs:', 'synchy'); ?></h3>
+								<ul class="synchy-scope-help__list">
+									<?php foreach ($sync_scope_help['neverSyncs'] as $line) : ?>
+										<li><?php echo esc_html($line); ?></li>
+									<?php endforeach; ?>
+								</ul>
+							</div>
+						</div>
 
 						<div class="synchy-status-pending-grid">
 							<div class="synchy-stage-status synchy-stage-status--compact">
@@ -12549,64 +12693,6 @@ function synchy_render_incremental_site_sync_page(array $current): void
 								<p class="synchy-field-note is-hidden" data-synchy-override-site-version-message></p>
 							</div>
 						</div>
-					</div>
-				</div>
-
-				<?php synchy_render_sync_readme_panel($options); ?>
-
-				<div class="synchy-panel synchy-sync-scope-panel">
-					<div class="synchy-stack__split">
-						<div>
-							<h2><?php esc_html_e('Sync Scope', 'synchy'); ?></h2>
-							<p class="synchy-field-note"><?php esc_html_e('Choose exactly what this Sync should control on the selected destination. Unchecked scopes are ignored.', 'synchy'); ?></p>
-						</div>
-					</div>
-					<div class="synchy-sync-scope-table">
-						<?php foreach ($scope_definitions as $scope_id => $scope) : ?>
-							<?php $tracked_items = synchy_get_sync_scope_tracked_items((string) $scope_id); ?>
-							<input
-								type="hidden"
-								name="<?php echo esc_attr(SYNCHY_SITE_SYNC_OPTIONS); ?>[<?php echo esc_attr((string) $scope['option_key']); ?>]"
-								value="<?php echo !empty($options[(string) $scope['option_key']]) ? '1' : '0'; ?>"
-								data-synchy-sync-scope
-								data-scope-id="<?php echo esc_attr((string) $scope_id); ?>"
-							/>
-							<div class="synchy-sync-scope-table__row" data-synchy-sync-scope-row data-scope-id="<?php echo esc_attr((string) $scope_id); ?>">
-								<div class="synchy-sync-scope-table__name">
-									<strong><?php echo esc_html((string) $scope['label']); ?></strong>
-									<span><?php echo esc_html((string) $scope['description']); ?></span>
-									<?php if ($tracked_items !== []) : ?>
-										<details class="synchy-sync-scope-table__tracked">
-											<summary>
-												<?php
-												printf(
-													/* translators: %d: number of tracked items */
-													esc_html__('Tracked items (%d)', 'synchy'),
-													count($tracked_items)
-												);
-												?>
-											</summary>
-											<ul class="synchy-sync-scope-table__tracked-list">
-												<?php foreach ($tracked_items as $tracked_item) : ?>
-													<li class="synchy-text-break"><?php echo esc_html((string) $tracked_item); ?></li>
-												<?php endforeach; ?>
-											</ul>
-										</details>
-									<?php endif; ?>
-								</div>
-								<div class="synchy-sync-scope-table__status">
-									<span class="synchy-badge synchy-badge--muted" data-synchy-sync-scope-status>
-										<?php
-										echo esc_html(
-											in_array((string) $scope_id, $scope_status['pendingBaselineScopeIds'], true)
-												? __('Needs baseline', 'synchy')
-												: __('Ready for preview', 'synchy')
-										);
-										?>
-									</span>
-								</div>
-							</div>
-						<?php endforeach; ?>
 					</div>
 				</div>
 
