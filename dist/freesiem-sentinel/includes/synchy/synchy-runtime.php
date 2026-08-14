@@ -7533,7 +7533,21 @@ function synchy_apply_self_update_package(string $zip_path)
 			return $copied;
 		}
 
+		// The files on disk are now the new version, but PHP's opcode cache can keep serving the
+		// compiled bytecode of the old files to every request after this one -- including the
+		// very next connection check -- until something invalidates it. A full reset here is the
+		// only way to guarantee the update takes effect immediately rather than "eventually,
+		// whenever this cache entry happens to expire on its own."
+		if (function_exists('opcache_reset')) {
+			opcache_reset();
+		}
+
 		return [
+			// synchy_get_display_version() still reflects this request's already-loaded copy of
+			// the old file -- PHP constants can't be redefined mid-request even after an opcache
+			// reset -- so this response's pluginVersion is expected to lag by one request. The
+			// next request (e.g. the connection re-check right after this call) is what actually
+			// confirms the new version.
 			'pluginVersion' => synchy_get_display_version(),
 			'pluginDirectory' => $destination_dir,
 		];
