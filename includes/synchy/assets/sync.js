@@ -1970,4 +1970,26 @@
 
 	updateConnectionControls();
 	updateActionButtons();
+
+	// Error text in the Pending Changes panel (e.g. "Incoming Sync is disabled on the
+	// destination") is easy to miss at normal size/color -- this watches the badge rather than
+	// touching every call site that can set an error, so it stays correct even for error paths
+	// added later.
+	if (previewBadge && previewMessage) {
+		const errorBadgeTexts = new Set([
+			config.strings.error || "Error",
+			config.strings.previewError || "Preview failed",
+		]);
+		const updatePreviewErrorEmphasis = () => {
+			const isError = errorBadgeTexts.has((previewBadge.textContent || "").trim());
+			previewMessage.classList.toggle("synchy-preview-message--error", isError);
+		};
+
+		new MutationObserver(updatePreviewErrorEmphasis).observe(previewBadge, {
+			childList: true,
+			characterData: true,
+			subtree: true,
+		});
+		updatePreviewErrorEmphasis();
+	}
 })();
