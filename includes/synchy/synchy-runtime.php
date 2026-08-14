@@ -7485,6 +7485,31 @@ function synchy_copy_directory_contents(string $source_dir, string $destination_
 	return true;
 }
 
+/**
+ * Called on the destination right after this plugin's own PHP files change on disk. Several
+ * independent layers can keep serving the pre-change bytecode/response even though the file is
+ * already correct, and each needs its own explicit invalidation -- there's no single call that
+ * covers all of them, and none of them reliably self-heal on a short timer on typical hosting
+ * (opcache is commonly configured with validate_timestamps off precisely so it never re-checks
+ * disk on its own; LiteSpeed's own cache is unrelated to opcache and needs its own purge).
+ */
+function synchy_bust_destination_code_caches(): void
+{
+	if (function_exists('opcache_reset')) {
+		opcache_reset();
+	}
+
+	wp_cache_flush();
+
+	if (has_action('litespeed_purge_all')) {
+		do_action('litespeed_purge_all');
+	}
+
+	if (class_exists('\LiteSpeed\Purge') && method_exists('\LiteSpeed\Purge', 'purge_all')) {
+		\LiteSpeed\Purge::purge_all();
+	}
+}
+
 function synchy_apply_self_update_package(string $zip_path)
 {
 	if (!class_exists('ZipArchive')) {
@@ -7533,14 +7558,10 @@ function synchy_apply_self_update_package(string $zip_path)
 			return $copied;
 		}
 
-		// The files on disk are now the new version, but PHP's opcode cache can keep serving the
-		// compiled bytecode of the old files to every request after this one -- including the
-		// very next connection check -- until something invalidates it. A full reset here is the
-		// only way to guarantee the update takes effect immediately rather than "eventually,
-		// whenever this cache entry happens to expire on its own."
-		if (function_exists('opcache_reset')) {
-			opcache_reset();
-		}
+		// The files on disk are now the new version, but PHP's opcode cache (and, on this host,
+		// LiteSpeed's own cache) can keep serving the pre-update response to every request after
+		// this one -- including the very next connection check -- until something invalidates it.
+		synchy_bust_destination_code_caches();
 
 		return [
 			// synchy_get_display_version() still reflects this request's already-loaded copy of
@@ -9668,6 +9689,12 @@ function synchy_handle_remote_sync_request(WP_REST_Request $request)
 		}
 
 		$deleted_posts_result = synchy_apply_sync_deleted_posts($manifest);
+
+		// Any PHP file this Sync just wrote (plugin/theme code, not just Sentinel's own self-update
+		// path above) can be served stale by the same opcache/LiteSpeed caching until this runs.
+		if ((int) ($manifest['files']['count'] ?? 0) > 0) {
+			synchy_bust_destination_code_caches();
+		}
 
 		$synced_at = max(0, (int) ($manifest['syncedAt'] ?? time()));
 		$files_synced = (int) ($manifest['files']['count'] ?? 0);
