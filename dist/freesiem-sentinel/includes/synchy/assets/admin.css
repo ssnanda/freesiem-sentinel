@@ -1854,3 +1854,13 @@
 	font-weight: 800 !important;
 	line-height: 1.4;
 }
+
+.synchy-field-note--warning {
+	margin-top: 8px;
+	padding: 10px 14px;
+	border-radius: 10px;
+	background: #fffbeb;
+	border: 1px solid #fde68a;
+	color: #92400e;
+	font-weight: 600;
+}

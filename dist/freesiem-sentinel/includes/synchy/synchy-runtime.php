@@ -3095,6 +3095,12 @@ function synchy_should_sync_option_name(string $option_name): bool
 	$excluded = [
 		'home',
 		'siteurl',
+		// The site's real point of contact for password resets, comment moderation, and every
+		// other WP-generated notification -- same reasoning as home/siteurl: this identifies
+		// *this* site, not the content, and every site must keep its own regardless of scope.
+		'admin_email',
+		'new_admin_email',
+		'admin_email_lifespan',
 		'auto_plugin_theme_update_emails',
 		'auto_update_core_dev',
 		'auto_update_core_major',
@@ -12729,6 +12735,9 @@ function synchy_render_incremental_site_sync_page(array $current): void
 								esc_html((string) ($options['destination_url'] ?: __('the destination URL above', 'synchy')))
 							);
 							?>
+						</p>
+						<p class="synchy-field-note synchy-field-note--warning">
+							<?php esc_html_e('Sync only adds/updates content that came from this site -- it never removes pages or posts the destination already had on its own. If an old page stops showing in a menu after Sync, it still exists on the destination; remove it there manually if you don\'t want it.', 'synchy'); ?>
 						</p>
 
 						<div class="synchy-modal is-hidden" data-synchy-scope-help-modal aria-hidden="true">
