@@ -1635,13 +1635,15 @@
 	display: inline-flex;
 	align-items: center;
 	justify-content: center;
-	padding: 0 6px !important;
+	width: 32px;
+	height: 32px;
+	padding: 0 !important;
+	border-radius: 50%;
+	color: #2271b1;
 }
 
-.synchy-help-icon-button .dashicons {
-	width: 18px;
-	height: 18px;
-	font-size: 18px;
+.synchy-help-icon-svg {
+	display: block;
 }
 
 .synchy-scope-help__list {
@@ -1666,4 +1668,28 @@
 	align-items: center;
 	gap: 8px;
 	font-weight: 600;
+}
+
+.synchy-site-role-panel {
+	padding: 12px 16px;
+}
+
+.synchy-site-role-panel .synchy-input-row {
+	align-items: center;
+	flex-wrap: wrap;
+	gap: 10px;
+}
+
+.synchy-live-site-notice {
+	border-left: 4px solid #d63638;
+}
+
+.synchy-sync-history-table {
+	margin-top: 12px;
+}
+
+.synchy-sync-history-table th,
+.synchy-sync-history-table td {
+	padding: 8px 10px;
+	text-align: left;
 }

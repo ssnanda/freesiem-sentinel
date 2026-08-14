@@ -1869,6 +1869,13 @@
 		};
 
 		scopeHelpOpenButton.addEventListener("click", () => {
+			const isOpen = !scopeHelpModal.classList.contains("is-hidden");
+
+			if (isOpen) {
+				closeScopeHelp();
+				return;
+			}
+
 			scopeHelpModal.classList.remove("is-hidden");
 			scopeHelpModal.setAttribute("aria-hidden", "false");
 		});

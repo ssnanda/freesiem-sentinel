@@ -28,6 +28,8 @@ const SYNCHY_SYNC_JOB_OPTION = 'synchy_sync_job';
 const SYNCHY_SYNC_CONNECTION_STATE_OPTION = 'synchy_sync_connection_state';
 const SYNCHY_SITE_SYNC_SITE_ID_OPTION = 'synchy_site_sync_site_id';
 const SYNCHY_SITE_SYNC_ACTIVE_PROFILE_OPTION = 'synchy_site_sync_active_profile';
+const SYNCHY_SITE_ROLE_OPTION = 'synchy_site_role';
+const SYNCHY_SYNC_RECEIVE_HISTORY_OPTION = 'synchy_sync_receive_history';
 const SYNCHY_IMPORT_OPTIONS = 'synchy_import_options';
 const SYNCHY_IMPORT_RESULT_OPTION = 'synchy_import_result';
 const SYNCHY_NOTICE_PREFIX = 'synchy_admin_notice_';
@@ -735,6 +737,52 @@ function synchy_site_sync_option_key(string $base, string $profile_id = ''): str
 	}
 
 	return $profile_id === 'a' ? $base : $base . '_' . $profile_id;
+}
+
+/**
+ * The site's own declared role (Live/QA/Development) -- not tied to any one destination profile,
+ * this is about what this WordPress install itself is, so it's stored as a single site-wide value
+ * rather than going through synchy_site_sync_option_key().
+ */
+function synchy_get_site_role_labels(): array
+{
+	return [
+		'' => __('Not set', 'synchy'),
+		'live' => __('Live / Production', 'synchy'),
+		'qa' => __('QA / Staging', 'synchy'),
+		'dev' => __('Development', 'synchy'),
+	];
+}
+
+function synchy_get_site_role(): string
+{
+	$role = (string) get_option(SYNCHY_SITE_ROLE_OPTION, '');
+
+	return array_key_exists($role, synchy_get_site_role_labels()) ? $role : '';
+}
+
+function synchy_is_live_site_role(): bool
+{
+	return synchy_get_site_role() === 'live';
+}
+
+/**
+ * Audit trail of Syncs this site has received -- what came in, when, and from where -- kept
+ * mainly for sites marked Live, where the normal "push from here" controls are hidden entirely
+ * and this history is the only visibility into what's landed on the site.
+ */
+function synchy_record_sync_receive_history_entry(array $entry): void
+{
+	$history = synchy_get_sync_receive_history();
+	array_unshift($history, array_merge($entry, ['at' => gmdate('c')]));
+	update_option(SYNCHY_SYNC_RECEIVE_HISTORY_OPTION, array_slice($history, 0, 50), false);
+}
+
+function synchy_get_sync_receive_history(): array
+{
+	$history = get_option(SYNCHY_SYNC_RECEIVE_HISTORY_OPTION, []);
+
+	return is_array($history) ? array_values(array_filter($history, 'is_array')) : [];
 }
 
 function synchy_get_site_sync_profile_option_bases(): array
@@ -7563,6 +7611,17 @@ function synchy_apply_self_update_package(string $zip_path)
 		// this one -- including the very next connection check -- until something invalidates it.
 		synchy_bust_destination_code_caches();
 
+		$self_update_user = wp_get_current_user();
+		synchy_record_sync_receive_history_entry([
+			'sourceUrl' => '',
+			'updatedBy' => $self_update_user instanceof WP_User ? (string) $self_update_user->user_login : '',
+			'mode' => 'self_update',
+			'filesSynced' => 0,
+			'dbRowsSynced' => 0,
+			'deletedFiles' => 0,
+			'deletedPosts' => 0,
+		]);
+
 		return [
 			// synchy_get_display_version() still reflects this request's already-loaded copy of
 			// the old file -- PHP constants can't be redefined mid-request even after an opcache
@@ -9730,6 +9789,17 @@ function synchy_handle_remote_sync_request(WP_REST_Request $request)
 			'deletedPosts' => (int) ($deleted_posts_result['deletedPosts'] ?? 0),
 		]);
 		synchy_apply_site_sync_version($site_version);
+
+		$history_user = wp_get_current_user();
+		synchy_record_sync_receive_history_entry([
+			'sourceUrl' => (string) ($manifest['source']['homeUrl'] ?? $manifest['source']['siteUrl'] ?? ''),
+			'updatedBy' => $history_user instanceof WP_User ? (string) $history_user->user_login : '',
+			'mode' => $mode,
+			'filesSynced' => $files_synced,
+			'dbRowsSynced' => $db_rows_synced,
+			'deletedFiles' => (int) ($deleted_result['deletedFiles'] ?? 0),
+			'deletedPosts' => (int) ($deleted_posts_result['deletedPosts'] ?? 0),
+		]);
 
 		synchy_clear_sync_caches();
 
@@ -12517,9 +12587,34 @@ function synchy_render_incremental_site_sync_page(array $current): void
 		$connection_inline_badge = __('Incomplete', 'synchy');
 	}
 	?>
+	<?php
+	$site_role = synchy_get_site_role();
+	$site_role_labels = synchy_get_site_role_labels();
+	?>
 	<div class="wrap synchy-admin">
 		<?php synchy_render_notice(); ?>
 		<div class="synchy-shell">
+			<div class="synchy-panel synchy-site-role-panel">
+				<form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" class="synchy-form synchy-input-row">
+					<input type="hidden" name="action" value="synchy_save_site_role" />
+					<?php wp_nonce_field('synchy_save_site_role', 'synchy_site_role_nonce'); ?>
+					<label for="synchy-site-role-select"><strong><?php esc_html_e('This site is:', 'synchy'); ?></strong></label>
+					<select id="synchy-site-role-select" name="synchy_site_role">
+						<?php foreach ($site_role_labels as $role_key => $role_label) : ?>
+							<option value="<?php echo esc_attr($role_key); ?>" <?php selected($site_role, $role_key); ?>><?php echo esc_html($role_label); ?></option>
+						<?php endforeach; ?>
+					</select>
+					<button type="submit" class="button"><?php esc_html_e('Save', 'synchy'); ?></button>
+					<?php if ($site_role === 'live') : ?>
+						<span class="synchy-badge synchy-badge--attention"><?php esc_html_e('Push controls hidden on this site', 'synchy'); ?></span>
+					<?php endif; ?>
+				</form>
+			</div>
+
+			<?php if ($site_role === 'live') : ?>
+				<?php synchy_render_live_site_sync_view(); ?>
+			<?php else : ?>
+
 			<form method="post" action="<?php echo esc_url(synchy_get_site_sync_save_url()); ?>" class="synchy-form" data-synchy-sync-form>
 				<?php synchy_render_site_sync_save_fields(); ?>
 				<?php /* No sync_scope_selection_present flag here on purpose: there is no working checkbox UI on this
@@ -12543,7 +12638,10 @@ function synchy_render_incremental_site_sync_page(array $current): void
 							<button type="button" class="button button-primary button-large synchy-action-button synchy-action-button--push" data-synchy-run-sync disabled><?php echo esc_html($run_button_label); ?></button>
 							<button type="button" class="button synchy-action-button synchy-action-button--full" data-synchy-run-full-sync disabled><?php esc_html_e('Full Sync', 'synchy'); ?></button>
 							<button type="button" class="button synchy-help-icon-button" data-synchy-scope-help-open aria-label="<?php esc_attr_e('What does Sync include and exclude?', 'synchy'); ?>" title="<?php esc_attr_e('What does Sync include and exclude?', 'synchy'); ?>">
-								<span class="dashicons dashicons-editor-help" aria-hidden="true"></span>
+								<svg class="synchy-help-icon-svg" viewBox="0 0 20 20" width="16" height="16" aria-hidden="true" focusable="false">
+									<circle cx="10" cy="10" r="9" fill="none" stroke="currentColor" stroke-width="1.6" />
+									<text x="10" y="14.5" text-anchor="middle" font-size="11" font-family="inherit" font-weight="700" fill="currentColor">?</text>
+								</svg>
 							</button>
 							<button type="button" class="button synchy-action-button synchy-action-button--muted" data-synchy-pause-sync disabled><?php esc_html_e('Pause Sync', 'synchy'); ?></button>
 							<button type="button" class="button synchy-action-button synchy-action-button--muted" data-synchy-resume-sync disabled><?php esc_html_e('Resume Sync', 'synchy'); ?></button>
@@ -12777,7 +12875,65 @@ function synchy_render_incremental_site_sync_page(array $current): void
 					<button type="submit" class="button button-primary"><?php esc_html_e('Save Sync Scope', 'synchy'); ?></button>
 				</form>
 			</div>
+
+			<?php endif; ?>
 		</div>
+	</div>
+	<?php
+}
+
+function synchy_render_live_site_sync_view(): void
+{
+	$history = synchy_get_sync_receive_history();
+	?>
+	<div class="synchy-panel synchy-live-site-notice">
+		<h2><?php esc_html_e('This is your Live site', 'synchy'); ?></h2>
+		<p class="synchy-field-note">
+			<?php esc_html_e('Push controls (Preview, Full Sync, destination connection) are hidden here on purpose -- a Live site should only ever receive a Sync, never send one. Change this in the "This site is" selector above if that\'s wrong.', 'synchy'); ?>
+		</p>
+	</div>
+
+	<div class="synchy-panel synchy-sync-history-panel">
+		<h2><?php esc_html_e('Sync History', 'synchy'); ?></h2>
+		<p class="synchy-field-note"><?php esc_html_e('What this site has received, when, and from where -- most recent first.', 'synchy'); ?></p>
+		<?php if ($history === []) : ?>
+			<p class="synchy-field-note"><?php esc_html_e('No Syncs have landed on this site yet.', 'synchy'); ?></p>
+		<?php else : ?>
+			<table class="widefat synchy-sync-history-table">
+				<thead>
+					<tr>
+						<th><?php esc_html_e('When', 'synchy'); ?></th>
+						<th><?php esc_html_e('From', 'synchy'); ?></th>
+						<th><?php esc_html_e('By', 'synchy'); ?></th>
+						<th><?php esc_html_e('What', 'synchy'); ?></th>
+					</tr>
+				</thead>
+				<tbody>
+					<?php foreach ($history as $entry) : ?>
+						<?php
+						$at = strtotime((string) ($entry['at'] ?? ''));
+						$mode = (string) ($entry['mode'] ?? '');
+						$what = $mode === 'self_update'
+							? __('Sentinel plugin self-update', 'synchy')
+							: sprintf(
+								/* translators: 1: file count, 2: db row count, 3: deleted file count, 4: deleted post count */
+								__('%1$d files, %2$d DB rows, %3$d deleted files, %4$d deleted posts', 'synchy'),
+								(int) ($entry['filesSynced'] ?? 0),
+								(int) ($entry['dbRowsSynced'] ?? 0),
+								(int) ($entry['deletedFiles'] ?? 0),
+								(int) ($entry['deletedPosts'] ?? 0)
+							);
+						?>
+						<tr>
+							<td><?php echo esc_html($at > 0 ? get_date_from_gmt(gmdate('Y-m-d H:i:s', $at), get_option('date_format') . ' ' . get_option('time_format')) : '—'); ?></td>
+							<td><?php echo esc_html((string) ($entry['sourceUrl'] ?? '') ?: '—'); ?></td>
+							<td><?php echo esc_html((string) ($entry['updatedBy'] ?? '') ?: '—'); ?></td>
+							<td><?php echo esc_html($what); ?></td>
+						</tr>
+					<?php endforeach; ?>
+				</tbody>
+			</table>
+		<?php endif; ?>
 	</div>
 	<?php
 }
@@ -13110,6 +13266,27 @@ add_action('admin_init', function (): void {
 
 add_action('admin_post_synchy_save_site_sync_options', 'synchy_handle_save_site_sync_options');
 add_action('admin_post_synchy_switch_site_sync_profile', 'synchy_handle_switch_site_sync_profile');
+add_action('admin_post_synchy_save_site_role', function (): void {
+	if (!current_user_can('manage_options')) {
+		wp_die(esc_html__('You are not allowed to change the Site Role.', 'synchy'), 403);
+	}
+
+	check_admin_referer('synchy_save_site_role', 'synchy_site_role_nonce');
+
+	$role = isset($_POST['synchy_site_role']) ? sanitize_key(wp_unslash((string) $_POST['synchy_site_role'])) : '';
+	$role = array_key_exists($role, synchy_get_site_role_labels()) ? $role : '';
+
+	update_option(SYNCHY_SITE_ROLE_OPTION, $role, true);
+
+	$redirect = wp_get_referer();
+
+	if (!$redirect) {
+		$redirect = admin_url('admin.php?page=freesiem-synchy&tab=sync');
+	}
+
+	wp_safe_redirect(add_query_arg('settings-updated', 'true', remove_query_arg('settings-updated', $redirect)));
+	exit;
+});
 
 add_action('wp_ajax_synchy_start_export', function (): void {
 	if (!current_user_can('manage_options')) {
