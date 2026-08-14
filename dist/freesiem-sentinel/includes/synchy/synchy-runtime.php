@@ -29,6 +29,7 @@ const SYNCHY_SYNC_CONNECTION_STATE_OPTION = 'synchy_sync_connection_state';
 const SYNCHY_SITE_SYNC_SITE_ID_OPTION = 'synchy_site_sync_site_id';
 const SYNCHY_SITE_SYNC_ACTIVE_PROFILE_OPTION = 'synchy_site_sync_active_profile';
 const SYNCHY_SITE_ROLE_OPTION = 'synchy_site_role';
+const SYNCHY_SITE_ROLE_LOCKED_OPTION = 'synchy_site_role_locked';
 const SYNCHY_SYNC_RECEIVE_HISTORY_OPTION = 'synchy_sync_receive_history';
 const SYNCHY_IMPORT_OPTIONS = 'synchy_import_options';
 const SYNCHY_IMPORT_RESULT_OPTION = 'synchy_import_result';
@@ -764,6 +765,28 @@ function synchy_get_site_role(): string
 function synchy_is_live_site_role(): bool
 {
 	return synchy_get_site_role() === 'live';
+}
+
+function synchy_is_site_role_locked(): bool
+{
+	return (bool) get_option(SYNCHY_SITE_ROLE_LOCKED_OPTION, false);
+}
+
+/**
+ * Sets this site's own role automatically (never asked for by a human here) -- used when a
+ * successful Test + Update + Preview implies what each side of the connection is. Never touches
+ * a site that has ever had its role explicitly saved locally; that's what "locked" means, and it
+ * exists so an automatic guess can never quietly override a deliberate local choice.
+ */
+function synchy_maybe_auto_set_site_role(string $role): bool
+{
+	if (synchy_is_site_role_locked() || !array_key_exists($role, synchy_get_site_role_labels()) || $role === '') {
+		return false;
+	}
+
+	update_option(SYNCHY_SITE_ROLE_OPTION, $role, true);
+
+	return true;
 }
 
 /**
@@ -7273,6 +7296,24 @@ function synchy_test_site_sync_connection(array $options)
 	return $response;
 }
 
+/**
+ * Best-effort: tells the destination "you're the Live/Production side of this connection." The
+ * destination is free to refuse (synchy_site_role_locked, if a human already set its role there
+ * directly) -- that refusal is expected and meaningful, not a failure to swallow.
+ */
+function synchy_try_set_remote_site_role(array $options, string $role)
+{
+	return synchy_site_sync_remote_request(
+		$options,
+		'site-role',
+		'POST',
+		[
+			'timeout' => 20,
+			'body' => ['role' => $role],
+		]
+	);
+}
+
 function synchy_build_self_update_package()
 {
 	if (!class_exists('ZipArchive')) {
@@ -12637,11 +12678,8 @@ function synchy_render_incremental_site_sync_page(array $current): void
 							<button type="button" class="button synchy-action-button synchy-action-button--preview" data-synchy-preview-sync><?php esc_html_e('Preview', 'synchy'); ?></button>
 							<button type="button" class="button button-primary button-large synchy-action-button synchy-action-button--push" data-synchy-run-sync disabled><?php echo esc_html($run_button_label); ?></button>
 							<button type="button" class="button synchy-action-button synchy-action-button--full" data-synchy-run-full-sync disabled><?php esc_html_e('Full Sync', 'synchy'); ?></button>
-							<button type="button" class="button synchy-help-icon-button" data-synchy-scope-help-open aria-label="<?php esc_attr_e('What does Sync include and exclude?', 'synchy'); ?>" title="<?php esc_attr_e('What does Sync include and exclude?', 'synchy'); ?>">
-								<svg class="synchy-help-icon-svg" viewBox="0 0 20 20" width="16" height="16" aria-hidden="true" focusable="false">
-									<circle cx="10" cy="10" r="9" fill="none" stroke="currentColor" stroke-width="1.6" />
-									<text x="10" y="14.5" text-anchor="middle" font-size="11" font-family="inherit" font-weight="700" fill="currentColor">?</text>
-								</svg>
+							<button type="button" class="button synchy-action-button synchy-action-button--help" data-synchy-scope-help-open title="<?php esc_attr_e('What does Sync include and exclude?', 'synchy'); ?>">
+								<?php esc_html_e('What Syncs?', 'synchy'); ?>
 							</button>
 							<button type="button" class="button synchy-action-button synchy-action-button--muted" data-synchy-pause-sync disabled><?php esc_html_e('Pause Sync', 'synchy'); ?></button>
 							<button type="button" class="button synchy-action-button synchy-action-button--muted" data-synchy-resume-sync disabled><?php esc_html_e('Resume Sync', 'synchy'); ?></button>
@@ -13277,6 +13315,10 @@ add_action('admin_post_synchy_save_site_role', function (): void {
 	$role = array_key_exists($role, synchy_get_site_role_labels()) ? $role : '';
 
 	update_option(SYNCHY_SITE_ROLE_OPTION, $role, true);
+	// A human just explicitly chose a role on this site's own page -- including choosing "Not
+	// set" again -- so it's locked from here on: no remote Test+Update+Preview from any source
+	// site should ever be able to silently override this deliberate local choice again.
+	update_option(SYNCHY_SITE_ROLE_LOCKED_OPTION, true, true);
 
 	$redirect = wp_get_referer();
 
@@ -13474,9 +13516,19 @@ add_action('wp_ajax_synchy_update_remote_synchy', function (): void {
 		synchy_store_sync_connection_success($options, $remote_site);
 	}
 
+	// A successful Test + Update + Preview is exactly the moment both sides of this connection
+	// are confirmed and known: this site is the one initiating a push (QA/Staging), the other end
+	// is the one receiving it (Live/Production). Neither side is touched if it's locked -- see
+	// synchy_maybe_auto_set_site_role() / the site-role REST route.
+	synchy_maybe_auto_set_site_role('qa');
+	$remote_role_result = synchy_try_set_remote_site_role($options, 'live');
+	$remote_role_locked = is_wp_error($remote_role_result) && $remote_role_result->get_error_code() === 'synchy_site_role_locked';
+
 	wp_send_json_success([
 		'message' => (string) ($result['message'] ?? __('Synchy updated the destination plugin successfully.', 'synchy')),
 		'remoteSite' => is_wp_error($remote_site) ? [] : $remote_site,
+		'remoteRoleLocked' => $remote_role_locked,
+		'remoteRoleMessage' => $remote_role_locked ? $remote_role_result->get_error_message() : '',
 	]);
 });
 
@@ -13822,6 +13874,34 @@ add_action('rest_api_init', function (): void {
 						'receiverMode' => 'root_installer_package_upload',
 					]
 				);
+			},
+			'permission_callback' => $permission,
+		]
+	);
+
+	register_rest_route(
+		'synchy/v1',
+		'/site-role',
+		[
+			'methods' => 'POST',
+			'callback' => static function (WP_REST_Request $request) {
+				$requested_role = sanitize_key((string) $request->get_param('role'));
+
+				if (!array_key_exists($requested_role, synchy_get_site_role_labels()) || $requested_role === '') {
+					return new WP_Error('synchy_site_role_invalid', __('Synchy received an invalid site role.', 'synchy'), ['status' => 400]);
+				}
+
+				if (synchy_is_site_role_locked()) {
+					return new WP_Error(
+						'synchy_site_role_locked',
+						__('This site\'s role was set manually on its own Sync page and is locked -- it cannot be changed remotely.', 'synchy'),
+						['status' => 409]
+					);
+				}
+
+				update_option(SYNCHY_SITE_ROLE_OPTION, $requested_role, true);
+
+				return rest_ensure_response(['success' => true, 'role' => $requested_role]);
 			},
 			'permission_callback' => $permission,
 		]

@@ -1631,19 +1631,10 @@
 	}
 }
 
-.synchy-help-icon-button {
-	display: inline-flex;
-	align-items: center;
-	justify-content: center;
-	width: 32px;
-	height: 32px;
-	padding: 0 !important;
-	border-radius: 50%;
-	color: #2271b1;
-}
-
-.synchy-help-icon-svg {
-	display: block;
+.synchy-action-button--help {
+	border-color: #64748b !important;
+	background: linear-gradient(135deg, #f8fafc 0%, #e2e8f0 100%) !important;
+	color: #334155 !important;
 }
 
 .synchy-scope-help__list {

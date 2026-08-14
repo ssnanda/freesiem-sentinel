@@ -869,7 +869,11 @@
 
 		try {
 			const data = await sendAjax("synchy_update_remote_synchy");
-			const successMessage = data.message || config.strings.destinationUpdated || "Destination Sentinel updated.";
+			let successMessage = data.message || config.strings.destinationUpdated || "Destination Sentinel updated.";
+
+			if (data.remoteRoleLocked) {
+				successMessage += " | " + (config.strings.remoteRoleLocked || "Live override — not allowed: the destination's role is locked and was not changed.") + (data.remoteRoleMessage ? ` (${data.remoteRoleMessage})` : "");
+			}
 
 			updateRemoteNote.textContent = successMessage;
 			previewBadge.textContent = config.strings.success || "Success";
