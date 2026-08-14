@@ -12580,7 +12580,6 @@ function synchy_render_incremental_site_sync_page(array $current): void
 		$status_mode,
 		$status_duration
 	);
-	$run_button_label = $scope_status['hasPendingBaseline'] ? __('Start Baseline', 'synchy') : __('Push', 'synchy');
 
 	if ($status_state === 'success') {
 		$status_badge = __('In Sync', 'synchy');
@@ -12676,8 +12675,7 @@ function synchy_render_incremental_site_sync_page(array $current): void
 
 						<div class="synchy-input-row synchy-sync-action-row">
 							<button type="button" class="button synchy-action-button synchy-action-button--preview" data-synchy-preview-sync><?php esc_html_e('Preview', 'synchy'); ?></button>
-							<button type="button" class="button button-primary button-large synchy-action-button synchy-action-button--push" data-synchy-run-sync disabled><?php echo esc_html($run_button_label); ?></button>
-							<button type="button" class="button synchy-action-button synchy-action-button--full" data-synchy-run-full-sync disabled><?php esc_html_e('Full Sync', 'synchy'); ?></button>
+							<button type="button" class="button button-primary button-large synchy-action-button synchy-action-button--full" data-synchy-run-full-sync disabled><?php esc_html_e('Full Sync', 'synchy'); ?></button>
 							<button type="button" class="button synchy-action-button synchy-action-button--help" data-synchy-scope-help-open title="<?php esc_attr_e('What does Sync include and exclude?', 'synchy'); ?>">
 								<?php esc_html_e('What Syncs?', 'synchy'); ?>
 							</button>

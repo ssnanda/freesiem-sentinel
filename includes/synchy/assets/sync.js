@@ -50,7 +50,6 @@
 		!form ||
 		!testButton ||
 		!previewButton ||
-		!runButton ||
 		!fullSyncButton ||
 		!pauseSyncButton ||
 		!resumeSyncButton ||
@@ -740,12 +739,14 @@
 		const resumableFullSync = getHasResumableFullSync();
 
 		previewButton.disabled = busy || !hasSelection;
-		runButton.disabled = busy || !hasSelection || runningFullSync || resumableFullSync || (latestPreview !== null && ((hasFullSyncPreview && !hasBatchedBaselinePreview) || !hasPreviewChanges || !hasSelectedPreviewItems));
+		if (runButton) {
+			runButton.disabled = busy || !hasSelection || runningFullSync || resumableFullSync || (latestPreview !== null && ((hasFullSyncPreview && !hasBatchedBaselinePreview) || !hasPreviewChanges || !hasSelectedPreviewItems));
+			runButton.textContent = busy ? (config.strings.syncingAction || "Syncing...") : runLabel;
+		}
 		fullSyncButton.disabled = (busy && !runningFullSync) || !hasSelection || runningFullSync || resumableFullSync || (hasFullSyncPreview && (!hasPreviewChanges || !hasSelectedPreviewItems));
 		pauseSyncButton.disabled = !runningFullSync;
 		resumeSyncButton.disabled = runningFullSync || !resumableFullSync;
 		resetSyncButton.disabled = busy;
-		runButton.textContent = busy ? (config.strings.syncingAction || "Syncing...") : runLabel;
 		fullSyncButton.textContent = hasFullSyncPreview
 			? (busy ? (config.strings.syncingAction || "Syncing...") : (config.strings.startFullSync || "Run Full Sync"))
 			: (config.strings.fullSync || "Full Sync");
@@ -1903,14 +1904,16 @@
 
 		runPreview("full");
 	});
-	runButton.addEventListener("click", () => {
-		if (latestPreview === null) {
-			runPreview("delta", true);
-			return;
-		}
+	if (runButton) {
+		runButton.addEventListener("click", () => {
+			if (latestPreview === null) {
+				runPreview("delta", true);
+				return;
+			}
 
-		runSync();
-	});
+			runSync();
+		});
+	}
 	pauseSyncButton.addEventListener("click", pauseFullSync);
 	resumeSyncButton.addEventListener("click", resumeFullSync);
 	resetSyncButton.addEventListener("click", resetSyncState);
