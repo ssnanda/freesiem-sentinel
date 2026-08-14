@@ -1946,24 +1946,85 @@
 
 		const purgeRunBackupButton = purgeModal.querySelector("[data-synchy-purge-run-backup]");
 		if (purgeRunBackupButton) {
+			// Chunked start + poll, not one long blocking call -- a single request that waits for
+			// the whole export was tried first and confirmed to get killed by the destination
+			// server's own execution time limit on a large site (raw HTTP 500, no clean error).
+			//
+			// A single phase (e.g. scanning 50k+ files) can still take longer than one HTTP
+			// round-trip is willing to wait -- confirmed directly: a continue call timed out
+			// client-side, but the destination kept running it in the background regardless
+			// (ignore_user_abort) and had actually finished by the next check. So a timeout here
+			// means "poll again," not "failed" -- only a real error status from the destination
+			// itself stops the loop.
+			let purgeBackupRetries = 0;
+			const maxPurgeBackupRetries = 40;
+
+			const pollPurgeBackup = async (jobId, status) => {
+				try {
+					const data = await sendAjax("synchy_purge_backup_continue", { job_id: jobId });
+					const job = data.job || {};
+					purgeBackupRetries = 0;
+
+					if (status) {
+						status.textContent = `${job.message || "Backing up..."} (${job.progress || 0}%)`;
+					}
+
+					if (job.status === "complete") {
+						if (status) {
+							status.textContent = "Destination backup completed. It is safe to continue.";
+						}
+						purgeRunBackupButton.disabled = false;
+						showPurgeStep("scopes");
+						return;
+					}
+
+					if (job.status === "error") {
+						if (status) {
+							status.textContent = job.message || "Backup failed.";
+						}
+						purgeRunBackupButton.disabled = false;
+						return;
+					}
+
+					window.setTimeout(() => pollPurgeBackup(jobId, status), 800);
+				} catch (error) {
+					purgeBackupRetries += 1;
+
+					if (purgeBackupRetries > maxPurgeBackupRetries) {
+						if (status) {
+							status.textContent = `${error.message} -- gave up after ${maxPurgeBackupRetries} retries. The destination may still be working; reopening Purge later may show it already finished.`;
+						}
+						purgeRunBackupButton.disabled = false;
+						return;
+					}
+
+					if (status) {
+						status.textContent = `Still waiting on the destination (a slow step is still running there)... retrying. (${error.message})`;
+					}
+					window.setTimeout(() => pollPurgeBackup(jobId, status), 1500);
+				}
+			};
+
 			purgeRunBackupButton.addEventListener("click", async () => {
 				const status = purgeModal.querySelector("[data-synchy-purge-backup-status]");
 				purgeRunBackupButton.disabled = true;
 				if (status) {
-					status.textContent = "Running destination backup... this can take a while, keep this tab open.";
+					status.textContent = "Starting destination backup... keep this tab open.";
 				}
 
 				try {
-					const data = await sendAjax("synchy_purge_run_backup");
-					if (status) {
-						status.textContent = data.message || "Backup completed.";
+					const data = await sendAjax("synchy_purge_backup_start");
+					const jobId = data.job?.id;
+
+					if (!jobId) {
+						throw new Error("Backup did not start correctly.");
 					}
-					showPurgeStep("scopes");
+
+					window.setTimeout(() => pollPurgeBackup(jobId, status), 500);
 				} catch (error) {
 					if (status) {
 						status.textContent = error.message;
 					}
-				} finally {
 					purgeRunBackupButton.disabled = false;
 				}
 			});

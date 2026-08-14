@@ -3659,19 +3659,33 @@ function synchy_purge_run_backup_export()
 }
 
 /**
- * Purge deletes content on the *destination*, so that's what must be backed up -- this triggers
+ * Purge deletes content on the *destination*, so that's what must be backed up -- these trigger
  * a real Export run on the destination itself via REST, not a local one. Local Export was the
  * wrong site to back up: it protects the source's own content, not what Purge is about to remove.
+ *
+ * Deliberately chunked (start, then repeated continue calls), the same pattern the Export tab
+ * itself already uses -- a single request that loops until the whole export finishes was tried
+ * first and confirmed broken in practice: on a large site it runs past the destination server's
+ * own execution time limit and gets killed with a raw HTTP 500, no matter how patient the
+ * *source* is willing to be waiting for a response.
  */
-function synchy_purge_run_remote_backup_export(array $options)
+function synchy_purge_start_remote_backup(array $options)
 {
-	$result = synchy_site_sync_remote_request($options, 'purge/backup', 'POST', ['timeout' => 300]);
+	return synchy_site_sync_remote_request($options, 'purge/backup/start', 'POST', ['timeout' => 30]);
+}
 
-	if (is_wp_error($result)) {
-		return $result;
+function synchy_purge_continue_remote_backup(array $options, string $job_id)
+{
+	$result = synchy_site_sync_remote_request(
+		$options,
+		'purge/backup/continue',
+		'POST',
+		['timeout' => 90, 'body' => ['job_id' => $job_id]]
+	);
+
+	if (!is_wp_error($result) && (string) ($result['job']['status'] ?? '') === 'complete') {
+		synchy_set_purge_backup_verified($options);
 	}
-
-	synchy_set_purge_backup_verified($options);
 
 	return $result;
 }
@@ -13893,7 +13907,7 @@ add_action('wp_ajax_synchy_update_remote_synchy', function (): void {
 // called in sequence from the wizard -- each one is destructive-adjacent enough that it must
 // stand on its own if called directly.
 
-add_action('wp_ajax_synchy_purge_run_backup', function (): void {
+add_action('wp_ajax_synchy_purge_backup_start', function (): void {
 	if (!current_user_can('manage_options')) {
 		wp_send_json_error(['message' => __('You are not allowed to run a Synchy backup.', 'synchy')], 403);
 	}
@@ -13901,16 +13915,36 @@ add_action('wp_ajax_synchy_purge_run_backup', function (): void {
 	check_ajax_referer('synchy_sync_ajax', 'nonce');
 
 	$options = synchy_get_site_sync_options();
-	$result = synchy_purge_run_remote_backup_export($options);
+	$result = synchy_purge_start_remote_backup($options);
 
 	if (is_wp_error($result)) {
 		wp_send_json_error(['message' => $result->get_error_message()], 400);
 	}
 
-	wp_send_json_success([
-		'message' => __('Backup export of the destination completed. It is safe to continue.', 'synchy'),
-		'createdAt' => (string) ($result['createdAt'] ?? gmdate('c')),
-	]);
+	wp_send_json_success(['job' => $result['job'] ?? []]);
+});
+
+add_action('wp_ajax_synchy_purge_backup_continue', function (): void {
+	if (!current_user_can('manage_options')) {
+		wp_send_json_error(['message' => __('You are not allowed to run a Synchy backup.', 'synchy')], 403);
+	}
+
+	check_ajax_referer('synchy_sync_ajax', 'nonce');
+
+	$job_id = isset($_POST['job_id']) ? sanitize_text_field(wp_unslash((string) $_POST['job_id'])) : '';
+
+	if ($job_id === '') {
+		wp_send_json_error(['message' => __('Missing backup job id.', 'synchy')], 400);
+	}
+
+	$options = synchy_get_site_sync_options();
+	$result = synchy_purge_continue_remote_backup($options, $job_id);
+
+	if (is_wp_error($result)) {
+		wp_send_json_error(['message' => $result->get_error_message()], 400);
+	}
+
+	wp_send_json_success(['job' => $result['job'] ?? []]);
 });
 
 add_action('wp_ajax_synchy_purge_preview', function (): void {
@@ -14390,17 +14424,56 @@ add_action('rest_api_init', function (): void {
 
 	register_rest_route(
 		'synchy/v1',
-		'/purge/backup',
+		'/purge/backup/start',
 		[
 			'methods' => 'POST',
 			'callback' => static function () {
-				$job = synchy_purge_run_backup_export();
+				$job = synchy_start_export_job(synchy_get_export_options(), true);
 
 				if (is_wp_error($job)) {
 					return $job;
 				}
 
-				return rest_ensure_response(['success' => true, 'createdAt' => gmdate('c')]);
+				return rest_ensure_response(['job' => synchy_build_job_response($job)]);
+			},
+			'permission_callback' => $permission,
+		]
+	);
+
+	register_rest_route(
+		'synchy/v1',
+		'/purge/backup/continue',
+		[
+			'methods' => 'POST',
+			'callback' => static function (WP_REST_Request $request) {
+				$job_id = sanitize_text_field((string) $request->get_param('job_id'));
+				$job = synchy_get_export_job();
+
+				if ($job === [] || $job_id === '' || $job_id !== (string) ($job['job_id'] ?? '')) {
+					return new WP_Error('synchy_purge_backup_job_missing', __('Synchy could not find the destination backup job.', 'synchy'), ['status' => 404]);
+				}
+
+				// A client timing out and retrying does not mean the previous call stopped running
+				// server-side (synchy_process_export_job() sets ignore_user_abort(true) precisely
+				// so a slow phase keeps going) -- without this lock, a retry racing an still-running
+				// call corrupts the job by advancing the same state machine from two places at once.
+				// Confirmed happening in practice before this lock existed. A locked retry just
+				// reports the job's current state instead of triggering a second transition.
+				$lock_key = 'synchy_purge_backup_lock_' . $job_id;
+
+				if (get_transient($lock_key)) {
+					return rest_ensure_response(['job' => synchy_build_job_response($job)]);
+				}
+
+				set_transient($lock_key, 1, 5 * MINUTE_IN_SECONDS);
+
+				try {
+					$job = synchy_process_export_job($job);
+				} finally {
+					delete_transient($lock_key);
+				}
+
+				return rest_ensure_response(['job' => synchy_build_job_response($job)]);
 			},
 			'permission_callback' => $permission,
 		]
