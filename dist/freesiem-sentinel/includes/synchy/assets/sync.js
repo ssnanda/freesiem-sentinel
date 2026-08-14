@@ -414,28 +414,21 @@
 		const jobStatus = String(currentJob?.status || "");
 		const savedStatus = String(currentStatus?.status || "");
 
-		if (isTerminalSyncStatus(savedStatus) && !["running", "paused", "failed_partial"].includes(jobStatus)) {
+		// This panel is only for a job that is genuinely mid-flight (running/paused/failed
+		// mid-way). Merely having a Preview's batch plan on hand (hasBatchPlan, previously)
+		// used to be enough to fall through here, and once here, effectiveStatus defaulted to
+		// the literal string "running" whenever neither status was actually "running" -- so a
+		// Preview alone (status "pending", no job) rendered a fake "Sync Job Running" banner
+		// with a false "do not make changes" warning even though nothing had been started.
+		const isFullSyncJobActive = currentJob?.runMode === "full" && ["running", "paused", "failed_partial"].includes(jobStatus);
+		const isActive = isFullSyncJobActive || savedStatus === "running";
+
+		if (!isActive) {
 			setRunningWarningVisible(false);
 			return;
 		}
 
-		const hasFullSyncContext = currentJob?.runMode === "full"
-			|| latestPreviewMode === "full"
-			|| latestPreviewMode === "baseline-full";
-		const hasBatchPlan = hasFullSyncContext && (Number(currentJob?.totalBatches || latestFullSyncPlan?.totalBatches || 0) > 0
-			|| (Array.isArray(currentJob?.batches) && currentJob.batches.length > 0)
-			|| (Array.isArray(latestFullSyncPlan?.batches) && latestFullSyncPlan.batches.length > 0));
-
-		if (
-			(currentJob?.runMode !== "full" || !["running", "paused", "failed_partial"].includes(jobStatus))
-			&& !(savedStatus === "running")
-			&& !hasBatchPlan
-		) {
-			setRunningWarningVisible(false);
-			return;
-		}
-
-		const effectiveStatus = jobStatus || savedStatus || "running";
+		const effectiveStatus = jobStatus || savedStatus;
 		previewBadge.textContent = effectiveStatus === "running"
 			? (config.strings.syncRunning || "Sync Job Running")
 			: effectiveStatus === "paused"
