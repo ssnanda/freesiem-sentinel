@@ -479,10 +479,10 @@ function synchy_get_pages(): array
 		],
 		[
 			'slug' => 'synchy-export',
-			'title' => __('Backup & Restore', 'synchy'),
-			'menu_title' => __('Backup & Restore', 'synchy'),
-			'headline' => __('Backup & Restore', 'synchy'),
-			'description' => __('Create an on-demand site package, and restore a package onto this site.', 'synchy'),
+			'title' => __('Export & Import', 'synchy'),
+			'menu_title' => __('Export & Import', 'synchy'),
+			'headline' => __('Export & Import', 'synchy'),
+			'description' => '',
 		],
 		[
 			'slug' => 'synchy-scheduled-backups',
@@ -10724,7 +10724,9 @@ function synchy_render_import_page(array $current): void
 				<div>
 					<p class="synchy-eyebrow"><?php esc_html_e('Destination Restore Setup', 'synchy'); ?></p>
 					<h1><?php echo esc_html($current['headline']); ?></h1>
-					<p class="synchy-description"><?php echo esc_html($current['description']); ?></p>
+					<?php if ((string) $current['description'] !== '') : ?>
+						<p class="synchy-description"><?php echo esc_html($current['description']); ?></p>
+					<?php endif; ?>
 				</div>
 				<div class="synchy-status">
 					<span class="synchy-status__dot" aria-hidden="true"></span>
@@ -10886,25 +10888,6 @@ function synchy_render_import_page(array $current): void
 					</div>
 				</div>
 
-				<div class="synchy-grid synchy-grid--export">
-					<div class="synchy-panel">
-						<h2><?php esc_html_e('Requirements', 'synchy'); ?></h2>
-						<ul class="synchy-checklist">
-							<li><?php esc_html_e('Upload installer.php first. The package zip is optional until you are ready to place the full restore package.', 'synchy'); ?></li>
-							<li><?php esc_html_e('This site must have enough PHP upload/post size to receive the archive in one browser upload.', 'synchy'); ?></li>
-							<li><?php esc_html_e('If the WordPress root is not writable, Synchy will leave the files in the import staging folder and you will need to move them manually.', 'synchy'); ?></li>
-						</ul>
-					</div>
-
-					<div class="synchy-panel synchy-panel--muted">
-						<h2><?php esc_html_e('Next Step After Placement', 'synchy'); ?></h2>
-						<ul class="synchy-checklist">
-							<li><?php esc_html_e('Open installer.php in the site root.', 'synchy'); ?></li>
-							<li><?php esc_html_e('Provide the destination URL and database connection details.', 'synchy'); ?></li>
-							<li><?php esc_html_e('Run the restore to overwrite the destination database and files.', 'synchy'); ?></li>
-						</ul>
-					</div>
-				</div>
 			</form>
 		</div>
 	</div>
@@ -11207,14 +11190,9 @@ function synchy_render_export_history(array $history, string $page_slug): void
 function synchy_render_ddev_export_instructions(): void
 {
 	?>
-	<div class="synchy-panel synchy-panel--wide">
-		<div class="synchy-stack synchy-stack--compact">
-			<div>
-				<h2><?php esc_html_e('Run Export Locally with DDEV', 'synchy'); ?></h2>
-				<p class="synchy-field-note">
-					<?php esc_html_e('Download Export Bundle includes the archive, installer, manifest, macOS/Linux shell script, Windows PowerShell script, Windows batch launcher, and README-DDEV.txt. Extract the bundle anywhere and keep the files together in that folder.', 'synchy'); ?>
-				</p>
-			</div>
+	<details class="synchy-quick-link">
+		<summary><?php esc_html_e('Run Export Locally with DDEV', 'synchy'); ?></summary>
+		<div class="synchy-stack synchy-stack--compact synchy-quick-link__body">
 			<div class="synchy-export-meta synchy-export-meta--wide">
 				<div>
 					<span class="synchy-export-meta__label"><?php esc_html_e('macOS', 'synchy'); ?></span>
@@ -11233,21 +11211,16 @@ function synchy_render_ddev_export_instructions(): void
 				</div>
 			</div>
 		</div>
-	</div>
+	</details>
 	<?php
 }
 
 function synchy_render_hostinger_export_instructions(): void
 {
 	?>
-	<div class="synchy-panel synchy-panel--wide">
-		<div class="synchy-stack synchy-stack--compact">
-			<div>
-				<h2><?php esc_html_e('Import Export into Hostinger', 'synchy'); ?></h2>
-				<p class="synchy-field-note">
-					<?php esc_html_e('Download and extract the Export Bundle on your computer first. Upload only its package zip and matching installer PHP file to Hostinger; the installer restores both the WordPress files and database.', 'synchy'); ?>
-				</p>
-			</div>
+	<details class="synchy-quick-link">
+		<summary><?php esc_html_e('Import Export into Hostinger', 'synchy'); ?></summary>
+		<div class="synchy-stack synchy-stack--compact synchy-quick-link__body">
 			<div class="synchy-export-meta synchy-export-meta--wide">
 				<div>
 					<span class="synchy-export-meta__label"><?php esc_html_e('1. Back up the destination', 'synchy'); ?></span>
@@ -11285,7 +11258,7 @@ function synchy_render_hostinger_export_instructions(): void
 				<?php esc_html_e('Do not extract the package zip manually. Upload it beside its matching installer PHP file, then run the installer. The installer imports the SQL schema and data, performs serialized URL replacement, and connects WordPress to the Hostinger database.', 'synchy'); ?>
 			</p>
 		</div>
-	</div>
+	</details>
 	<?php
 }
 
@@ -11623,7 +11596,9 @@ function synchy_render_export_page(array $current): void
 				<div>
 					<p class="synchy-eyebrow"><?php esc_html_e('Export Design', 'synchy'); ?></p>
 					<h1><?php echo esc_html($current['headline']); ?></h1>
-					<p class="synchy-description"><?php echo esc_html($current['description']); ?></p>
+					<?php if ((string) $current['description'] !== '') : ?>
+						<p class="synchy-description"><?php echo esc_html($current['description']); ?></p>
+					<?php endif; ?>
 				</div>
 				<div class="synchy-hero-notify">
 					<label class="synchy-sync-scope-toggle">
@@ -11648,6 +11623,10 @@ function synchy_render_export_page(array $current): void
 				<div class="synchy-status">
 					<span class="synchy-status__dot" aria-hidden="true"></span>
 					<?php echo esc_html($running_job === [] ? __('Export ready', 'synchy') : __('Export running', 'synchy')); ?>
+				</div>
+				<div class="synchy-quick-links-menu">
+					<?php synchy_render_ddev_export_instructions(); ?>
+					<?php synchy_render_hostinger_export_instructions(); ?>
 				</div>
 			</div>
 
@@ -11791,23 +11770,10 @@ function synchy_render_export_page(array $current): void
 						</div>
 					</div>
 
-				<div class="synchy-panel synchy-panel--muted">
-					<h2><?php esc_html_e('Notes', 'synchy'); ?></h2>
-					<ul class="synchy-checklist">
-						<li><?php esc_html_e('The chosen export folder is excluded from the backup automatically if it lives inside this WordPress install.', 'synchy'); ?></li>
-						<li><?php esc_html_e('Duplicator backup folders remain excluded by default through wp-content/duplicator/.', 'synchy'); ?></li>
-						<li><?php esc_html_e('Runtime dependencies like Composer vendor folders should not be stripped by default.', 'synchy'); ?></li>
-						<li><?php esc_html_e('This package is not a Duplicator archive format. It will be restored through Synchy Import, not Duplicator Import.', 'synchy'); ?></li>
-					</ul>
-				</div>
-
 				<p class="submit">
 					<button type="submit" class="button button-primary"><?php esc_html_e('Save Export Settings', 'synchy'); ?></button>
 				</p>
 			</form>
-
-			<?php synchy_render_ddev_export_instructions(); ?>
-			<?php synchy_render_hostinger_export_instructions(); ?>
 		</div>
 	</div>
 

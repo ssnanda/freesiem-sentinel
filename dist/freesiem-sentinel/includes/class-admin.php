@@ -3646,7 +3646,7 @@ class Freesiem_Admin
 				'legacy_slug' => 'synchy-site-sync',
 			],
 			'export' => [
-				'label' => __('Backup & Restore', 'freesiem-sentinel'),
+				'label' => __('Export & Import', 'freesiem-sentinel'),
 				'legacy_slug' => 'synchy-export',
 			],
 			'schedule' => [
