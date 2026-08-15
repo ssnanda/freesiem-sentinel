@@ -1920,6 +1920,14 @@
 			if (confirmInput) {
 				confirmInput.value = "";
 			}
+			const downloadWrap = purgeModal.querySelector("[data-synchy-purge-backup-download]");
+			if (downloadWrap) {
+				downloadWrap.classList.add("is-hidden");
+			}
+			const continueButton = purgeModal.querySelector("[data-synchy-purge-backup-continue-to-scopes]");
+			if (continueButton) {
+				continueButton.classList.add("is-hidden");
+			}
 			showPurgeStep("beta");
 		};
 
@@ -1942,6 +1950,11 @@
 		const purgeAckBetaButton = purgeModal.querySelector("[data-synchy-purge-ack-beta]");
 		if (purgeAckBetaButton) {
 			purgeAckBetaButton.addEventListener("click", () => showPurgeStep("backup"));
+		}
+
+		const purgeBackupContinueButton = purgeModal.querySelector("[data-synchy-purge-backup-continue-to-scopes]");
+		if (purgeBackupContinueButton) {
+			purgeBackupContinueButton.addEventListener("click", () => showPurgeStep("scopes"));
 		}
 
 		const purgeRunBackupButton = purgeModal.querySelector("[data-synchy-purge-run-backup]");
@@ -1974,7 +1987,18 @@
 							status.textContent = "Destination backup completed. It is safe to continue.";
 						}
 						purgeRunBackupButton.disabled = false;
-						showPurgeStep("scopes");
+
+						const downloadWrap = purgeModal.querySelector("[data-synchy-purge-backup-download]");
+						const downloadLink = purgeModal.querySelector("[data-synchy-purge-backup-download-link]");
+						if (downloadWrap && downloadLink && data.downloadUrl) {
+							downloadLink.href = data.downloadUrl;
+							downloadWrap.classList.remove("is-hidden");
+						}
+
+						const continueButton = purgeModal.querySelector("[data-synchy-purge-backup-continue-to-scopes]");
+						if (continueButton) {
+							continueButton.classList.remove("is-hidden");
+						}
 						return;
 					}
 

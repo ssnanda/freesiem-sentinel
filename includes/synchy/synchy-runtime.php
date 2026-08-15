@@ -498,13 +498,6 @@ function synchy_get_pages(): array
 			'headline' => __('Schedule', 'synchy'),
 			'description' => __('Automate recurring backups with retention and destination controls.', 'synchy'),
 		],
-		[
-			'slug' => 'synchy-push-live-site',
-			'title' => __('Upload to Live', 'synchy'),
-			'menu_title' => __('Upload to Live', 'synchy'),
-			'headline' => __('Upload to Live', 'synchy'),
-			'description' => __('Upload a full Backup & Restore package to another WordPress site and launch the manual restore there.', 'synchy'),
-		],
 	];
 }
 
@@ -546,6 +539,8 @@ function synchy_get_export_defaults(): array
 		'exclude_ajcore_runtime' => 1,
 		'skip_database' => 0,
 		'custom_excludes' => '',
+		'notify_email_enabled' => 0,
+		'notify_email_address' => '',
 	];
 }
 
@@ -628,6 +623,12 @@ function synchy_sanitize_export_options($value): array
 			$lines = array_map('trim', $lines);
 			$lines = array_filter($lines, static fn(string $line): bool => $line !== '');
 			$sanitized[$key] = implode("\n", $lines);
+			continue;
+		}
+
+		if ($key === 'notify_email_address') {
+			$raw = isset($value[$key]) ? sanitize_email((string) $value[$key]) : '';
+			$sanitized[$key] = is_email($raw) ? $raw : '';
 			continue;
 		}
 
@@ -5434,7 +5435,7 @@ function synchy_render_notice(): void
 			$page = isset($_GET['page']) ? sanitize_key(wp_unslash((string) $_GET['page'])) : '';
 			$settings_updated = isset($_GET['settings-updated']) ? sanitize_text_field(wp_unslash((string) $_GET['settings-updated'])) : '';
 
-			if (in_array($page, ['synchy-push-live-site', 'synchy-site-sync'], true) && $settings_updated === 'true') {
+			if ($page === 'synchy-site-sync' && $settings_updated === 'true') {
 				$notice = [
 					'type' => 'success',
 					'message' => __('Destination connection settings saved.', 'synchy'),
@@ -5936,6 +5937,40 @@ function synchy_get_export_history(): array
 	return $normalized;
 }
 
+function synchy_maybe_send_export_complete_email(array $export): void
+{
+	$options = synchy_get_export_options();
+
+	if (empty($options['notify_email_enabled'])) {
+		return;
+	}
+
+	$to = (string) ($options['notify_email_address'] ?? '');
+	$to = $to !== '' ? $to : (string) get_option('admin_email');
+
+	if (!is_email($to)) {
+		return;
+	}
+
+	$size_mb = round((int) ($export['archive_size'] ?? 0) / 1048576, 2);
+	$subject = sprintf(
+		/* translators: %s: site name */
+		__('[%s] Backup export complete', 'synchy'),
+		get_bloginfo('name')
+	);
+	$body = sprintf(
+		/* translators: 1: package name, 2: file count, 3: table count, 4: archive size in MB, 5: site URL */
+		__("A Backup & Restore export just finished on %5\$s.\n\nPackage: %1\$s\nFiles: %2\$s\nDatabase tables: %3\$s\nArchive size: %4\$s MB\n\nDownload it from the Export tab in wp-admin.", 'synchy'),
+		(string) ($export['package_name'] ?? ''),
+		number_format_i18n((int) ($export['file_count'] ?? 0)),
+		number_format_i18n((int) ($export['table_count'] ?? 0)),
+		number_format_i18n($size_mb, 2),
+		home_url('/')
+	);
+
+	wp_mail($to, $subject, $body);
+}
+
 function synchy_record_export_history(array $record): array
 {
 	$package_id = (string) ($record['package_id'] ?? '');
@@ -6425,6 +6460,7 @@ function synchy_finalize_export_job(array $job): array
 	$last_export['artifacts']['bundle'] = $bundle;
 
 	synchy_record_export_history($last_export);
+	synchy_maybe_send_export_complete_email($last_export);
 	synchy_set_notice(
 		'success',
 		sprintf(
@@ -11733,6 +11769,32 @@ function synchy_get_download_url(string $package_id, string $artifact_type): str
 	);
 }
 
+/**
+ * A normal wp_nonce_url() download link only validates against the session that created it --
+ * and the Purge backup step's REST call is authenticated via Application Password, which has no
+ * cookie session at all (wp_get_session_token() is empty there), so a nonce generated inside
+ * that request would silently fail wp_verify_nonce() the moment the admin's real logged-in
+ * browser clicked it. This generates a short-lived, capability-checked token instead, completely
+ * independent of which session (or lack of one) created it.
+ */
+function synchy_get_purge_backup_download_token(string $package_id, string $artifact_type): string
+{
+	$token = wp_generate_password(32, false, false);
+	set_transient(
+		'synchy_purge_dl_' . $token,
+		['package_id' => $package_id, 'artifact' => $artifact_type],
+		HOUR_IN_SECONDS
+	);
+
+	return add_query_arg(
+		[
+			'action' => 'synchy_purge_download',
+			'token' => $token,
+		],
+		admin_url('admin-post.php')
+	);
+}
+
 function synchy_render_export_history(array $history, string $page_slug): void
 {
 	?>
@@ -12019,16 +12081,6 @@ function synchy_get_dashboard_activity_items(): array
 		];
 	}
 
-	$upload_job = synchy_get_running_site_sync_job();
-
-	if ($upload_job !== []) {
-		$items[] = [
-			'label' => __('Upload to Live', 'synchy'),
-			'progress' => max(0, min(100, (int) ($upload_job['progress'] ?? 0))),
-			'message' => (string) ($upload_job['message'] ?? __('Upload to Live is running.', 'synchy')),
-			'url' => synchy_get_admin_page_url('synchy-push-live-site'),
-		];
-	}
 
 	return $items;
 }
@@ -12092,7 +12144,6 @@ function synchy_render_dashboard_widget(): void
 			</div>
 			<div class="synchy-dashboard-widget__actions">
 				<a class="button" href="<?php echo esc_url(synchy_get_admin_page_url('synchy-import')); ?>"><?php esc_html_e('Import', 'synchy'); ?></a>
-				<a class="button" href="<?php echo esc_url(synchy_get_admin_page_url('synchy-push-live-site')); ?>"><?php esc_html_e('Upload to Live', 'synchy'); ?></a>
 				<a class="button" href="<?php echo esc_url(synchy_get_admin_page_url('synchy-site-sync')); ?>"><?php esc_html_e('Sync', 'synchy'); ?></a>
 				<a class="button" href="<?php echo esc_url(synchy_get_admin_page_url('synchy-settings')); ?>"><?php esc_html_e('About', 'synchy'); ?></a>
 			</div>
@@ -12408,6 +12459,32 @@ function synchy_render_export_page(array $current): void
 							</div>
 						<?php endforeach; ?>
 					</div>
+				</div>
+
+				<div class="synchy-panel">
+					<h2><?php esc_html_e('Email Notification', 'synchy'); ?></h2>
+					<p class="synchy-field-note"><?php esc_html_e('Send an email whenever an export finishes -- including exports triggered by the Purge & Sync backup step.', 'synchy'); ?></p>
+					<label class="synchy-sync-scope-toggle">
+						<input
+							type="checkbox"
+							name="<?php echo esc_attr(SYNCHY_EXPORT_OPTIONS); ?>[notify_email_enabled]"
+							value="1"
+							<?php checked(!empty($options['notify_email_enabled'])); ?>
+						/>
+						<span><?php esc_html_e('Email me when a backup export completes', 'synchy'); ?></span>
+					</label>
+					<p>
+						<label for="synchy-export-notify-email"><?php esc_html_e('Send to', 'synchy'); ?></label><br />
+						<input
+							type="email"
+							id="synchy-export-notify-email"
+							class="regular-text"
+							name="<?php echo esc_attr(SYNCHY_EXPORT_OPTIONS); ?>[notify_email_address]"
+							value="<?php echo esc_attr((string) $options['notify_email_address']); ?>"
+							placeholder="<?php echo esc_attr((string) get_option('admin_email')); ?>"
+						/>
+					</p>
+					<p class="synchy-field-note"><?php esc_html_e('Leave blank to use this site\'s admin email.', 'synchy'); ?></p>
 				</div>
 
 				<div class="synchy-grid synchy-grid--export">
@@ -13253,6 +13330,10 @@ function synchy_render_incremental_site_sync_page(array $current): void
 						<p class="synchy-field-note"><?php esc_html_e('Before anything can be deleted, the destination must be backed up. This runs a real Export of the destination site right now.', 'synchy'); ?></p>
 						<button type="button" class="button button-primary" data-synchy-purge-run-backup><?php esc_html_e('Run destination backup now', 'synchy'); ?></button>
 						<p class="synchy-field-note" data-synchy-purge-backup-status></p>
+						<p class="synchy-field-note is-hidden" data-synchy-purge-backup-download>
+							<a href="#" target="_blank" rel="noopener" data-synchy-purge-backup-download-link class="button"><?php esc_html_e('Download this backup now', 'synchy'); ?></a>
+						</p>
+						<button type="button" class="button button-primary is-hidden" data-synchy-purge-backup-continue-to-scopes><?php esc_html_e('Continue to Purge scopes', 'synchy'); ?></button>
 					</div>
 
 					<div data-synchy-purge-step="scopes" class="is-hidden">
@@ -13533,11 +13614,6 @@ function synchy_render_page(string $page_slug): void
 		return;
 	}
 
-	if ($page_slug === 'synchy-push-live-site') {
-		synchy_render_site_sync_page($current);
-		return;
-	}
-
 	if ($page_slug === 'synchy-scheduled-backups') {
 		synchy_render_schedule_page($current);
 		return;
@@ -13747,59 +13823,6 @@ add_action('wp_ajax_synchy_browse_export_directories', function (): void {
 	wp_send_json_success(synchy_get_browse_payload($path));
 });
 
-add_action('wp_ajax_synchy_test_site_sync_connection', function (): void {
-	if (!current_user_can('manage_options')) {
-		wp_send_json_error(['message' => __('You are not allowed to test Synchy Upload to Live connections.', 'synchy')], 403);
-	}
-
-	check_ajax_referer('synchy_site_sync_ajax', 'nonce');
-
-	$options = isset($_POST[SYNCHY_SITE_SYNC_OPTIONS]) ? synchy_save_site_sync_options(wp_unslash($_POST[SYNCHY_SITE_SYNC_OPTIONS])) : synchy_get_site_sync_options();
-	$result = synchy_test_site_sync_connection($options);
-
-	if (is_wp_error($result)) {
-		wp_send_json_error(['message' => $result->get_error_message()], 400);
-	}
-
-	wp_send_json_success(['remoteSite' => $result]);
-});
-
-add_action('wp_ajax_synchy_start_site_sync_push', function (): void {
-	if (!current_user_can('manage_options')) {
-		wp_send_json_error(['message' => __('You are not allowed to start Synchy Upload to Live runs.', 'synchy')], 403);
-	}
-
-	check_ajax_referer('synchy_site_sync_ajax', 'nonce');
-
-	$options = isset($_POST[SYNCHY_SITE_SYNC_OPTIONS]) ? synchy_sanitize_site_sync_options(wp_unslash($_POST[SYNCHY_SITE_SYNC_OPTIONS])) : synchy_get_site_sync_options();
-	$job = synchy_start_site_sync_job($options);
-
-	if (is_wp_error($job)) {
-		wp_send_json_error(['message' => $job->get_error_message()], 400);
-	}
-
-	wp_send_json_success(['job' => synchy_build_site_sync_job_response($job)]);
-});
-
-add_action('wp_ajax_synchy_continue_site_sync_push', function (): void {
-	if (!current_user_can('manage_options')) {
-		wp_send_json_error(['message' => __('You are not allowed to continue Synchy Upload to Live runs.', 'synchy')], 403);
-	}
-
-	check_ajax_referer('synchy_site_sync_ajax', 'nonce');
-
-	$job_id = isset($_POST['job_id']) ? sanitize_text_field(wp_unslash((string) $_POST['job_id'])) : '';
-	$job = synchy_get_site_sync_job();
-
-	if ($job === [] || $job_id === '' || $job_id !== (string) ($job['job_id'] ?? '')) {
-		wp_send_json_error(['message' => __('Synchy could not find the requested Upload to Live job.', 'synchy')], 404);
-	}
-
-	$job = synchy_process_site_sync_job($job);
-
-	wp_send_json_success(['job' => synchy_build_site_sync_job_response($job)]);
-});
-
 add_action('wp_ajax_synchy_preview_sync_changes', function (): void {
 	if (!current_user_can('manage_options')) {
 		wp_send_json_error(['message' => __('You are not allowed to preview Synchy Sync changes.', 'synchy')], 403);
@@ -13944,7 +13967,10 @@ add_action('wp_ajax_synchy_purge_backup_continue', function (): void {
 		wp_send_json_error(['message' => $result->get_error_message()], 400);
 	}
 
-	wp_send_json_success(['job' => $result['job'] ?? []]);
+	wp_send_json_success([
+		'job' => $result['job'] ?? [],
+		'downloadUrl' => (string) ($result['downloadUrl'] ?? ''),
+	]);
 });
 
 add_action('wp_ajax_synchy_purge_preview', function (): void {
@@ -14247,6 +14273,58 @@ add_action('admin_post_synchy_download_export', function (): void {
 	exit;
 });
 
+add_action('admin_post_synchy_purge_download', function (): void {
+	if (!current_user_can('manage_options')) {
+		wp_die(esc_html__('You are not allowed to download Synchy exports.', 'synchy'));
+	}
+
+	$token = isset($_GET['token']) ? sanitize_text_field(wp_unslash((string) $_GET['token'])) : '';
+	$data = $token === '' ? false : get_transient('synchy_purge_dl_' . $token);
+
+	if (!is_array($data)) {
+		wp_die(esc_html__('This download link has expired. Run the backup step again from the Purge wizard.', 'synchy'));
+	}
+
+	$package_id = (string) ($data['package_id'] ?? '');
+	$artifact = (string) ($data['artifact'] ?? '');
+	$export = synchy_find_export_history_item($package_id);
+
+	if ($export === []) {
+		wp_die(esc_html__('That export is no longer available through Synchy.', 'synchy'));
+	}
+
+	$artifact_meta = $artifact === 'bundle'
+		? synchy_ensure_export_download_bundle($export)
+		: ($export['artifacts'][$artifact] ?? null);
+
+	if (is_wp_error($artifact_meta)) {
+		wp_die(esc_html($artifact_meta->get_error_message()));
+	}
+
+	if (!is_array($artifact_meta) || empty($artifact_meta['path']) || !is_readable((string) $artifact_meta['path'])) {
+		wp_die(esc_html__('The requested Synchy export file could not be found.', 'synchy'));
+	}
+
+	$file_path = wp_normalize_path((string) $artifact_meta['path']);
+	$filename = basename($file_path);
+	$mime = match ($artifact) {
+		'bundle', 'archive' => 'application/zip',
+		'manifest' => 'application/json',
+		default => 'application/x-httpd-php',
+	};
+
+	// One-time link -- delete the token immediately so it can't be reused or shared.
+	delete_transient('synchy_purge_dl_' . $token);
+
+	nocache_headers();
+	header('Content-Type: ' . $mime);
+	header('Content-Length: ' . (string) filesize($file_path));
+	header('Content-Disposition: attachment; filename="' . $filename . '"');
+
+	readfile($file_path);
+	exit;
+});
+
 add_action('admin_post_synchy_delete_export', function (): void {
 	if (!current_user_can('manage_options')) {
 		wp_die(esc_html__('You are not allowed to delete Synchy exports.', 'synchy'));
@@ -14473,7 +14551,13 @@ add_action('rest_api_init', function (): void {
 					delete_transient($lock_key);
 				}
 
-				return rest_ensure_response(['job' => synchy_build_job_response($job)]);
+				$response = ['job' => synchy_build_job_response($job)];
+
+				if (($job['status'] ?? '') === 'complete') {
+					$response['downloadUrl'] = synchy_get_purge_backup_download_token((string) ($job['package_id'] ?? ''), 'bundle');
+				}
+
+				return rest_ensure_response($response);
 			},
 			'permission_callback' => $permission,
 		]
@@ -14592,187 +14676,6 @@ add_action('rest_api_init', function (): void {
 		]
 	);
 
-	register_rest_route(
-		'synchy/v1',
-		'/push/session',
-		[
-			'methods' => 'POST',
-			'callback' => static function (WP_REST_Request $request) {
-				$session = synchy_create_remote_push_session(
-					[
-						'packageName' => (string) $request->get_param('packageName'),
-						'packageId' => (string) $request->get_param('packageId'),
-						'sourceHomeUrl' => (string) $request->get_param('sourceHomeUrl'),
-						'sourceSiteUrl' => (string) $request->get_param('sourceSiteUrl'),
-						'archiveFilename' => (string) $request->get_param('archiveFilename'),
-						'installerFilename' => (string) $request->get_param('installerFilename'),
-						'manifestFilename' => (string) $request->get_param('manifestFilename'),
-					]
-				);
-
-				if (is_wp_error($session)) {
-					return $session;
-				}
-
-				return rest_ensure_response(
-					[
-						'session_id' => $session['session_id'],
-						'uploadChunkBytes' => $session['uploadChunkBytes'],
-						'packageName' => $session['package_name'],
-					]
-				);
-			},
-			'permission_callback' => $permission,
-		]
-	);
-
-	register_rest_route(
-		'synchy/v1',
-		'/push/upload',
-		[
-			'methods' => 'POST',
-			'callback' => static function (WP_REST_Request $request) {
-				$session_id = synchy_sanitize_remote_push_session_id((string) $request->get_param('session_id'));
-				$artifact = sanitize_key((string) $request->get_param('artifact'));
-				$offset = max(0, (int) $request->get_param('offset'));
-				$allowed_artifacts = ['archive', 'installer', 'manifest'];
-
-				if ($session_id === '' || !in_array($artifact, $allowed_artifacts, true)) {
-					return new WP_Error('synchy_push_upload_invalid', __('The Synchy upload request is missing a valid session or artifact.', 'synchy'), ['status' => 400]);
-				}
-
-				$session = synchy_read_remote_push_session($session_id);
-
-				if ($session === []) {
-					return new WP_Error('synchy_push_upload_missing_session', __('Synchy could not find the destination upload session.', 'synchy'), ['status' => 404]);
-				}
-
-				$artifact_meta = $session['artifacts'][$artifact] ?? null;
-
-				if (!is_array($artifact_meta) || empty($artifact_meta['path'])) {
-					return new WP_Error('synchy_push_upload_missing_artifact', __('Synchy could not resolve the destination artifact path.', 'synchy'), ['status' => 500]);
-				}
-
-				$path = wp_normalize_path((string) $artifact_meta['path']);
-				$current_size = file_exists($path) ? (int) filesize($path) : 0;
-
-				if ($offset !== $current_size) {
-					return new WP_Error(
-						'synchy_push_upload_offset_mismatch',
-						__('Synchy detected an upload offset mismatch while receiving the package.', 'synchy'),
-						['status' => 409, 'expectedOffset' => $current_size]
-					);
-				}
-
-				$body = $request->get_body();
-
-				if ($body === '') {
-					return new WP_Error('synchy_push_upload_empty', __('Synchy received an empty upload chunk.', 'synchy'), ['status' => 400]);
-				}
-
-				if (file_put_contents($path, $body, FILE_APPEND) === false) {
-					return new WP_Error('synchy_push_upload_write_failed', __('Synchy could not write the uploaded package chunk.', 'synchy'), ['status' => 500]);
-				}
-
-				clearstatcache(true, $path);
-
-				$session['status'] = 'receiving';
-				$session['artifacts'][$artifact]['bytes'] = (int) filesize($path);
-				$session = synchy_write_remote_push_session($session);
-
-				if (is_wp_error($session)) {
-					return $session;
-				}
-
-				return rest_ensure_response(
-					[
-						'session_id' => $session_id,
-						'artifact' => $artifact,
-						'bytes' => (int) $session['artifacts'][$artifact]['bytes'],
-					]
-				);
-			},
-			'permission_callback' => $permission,
-		]
-	);
-
-	register_rest_route(
-		'synchy/v1',
-		'/push/complete',
-		[
-			'methods' => 'POST',
-			'callback' => static function (WP_REST_Request $request) {
-				$session_id = synchy_sanitize_remote_push_session_id((string) $request->get_param('session_id'));
-				$session = synchy_read_remote_push_session($session_id);
-
-				if ($session_id === '' || $session === []) {
-					return new WP_Error('synchy_push_complete_missing_session', __('Synchy could not find the destination upload session to finalize.', 'synchy'), ['status' => 404]);
-				}
-
-				$archive_path = (string) ($session['artifacts']['archive']['path'] ?? '');
-				$installer_path = (string) ($session['artifacts']['installer']['path'] ?? '');
-				$manifest_path = (string) ($session['artifacts']['manifest']['path'] ?? '');
-
-				if ($archive_path === '' || !is_readable($archive_path)) {
-					return new WP_Error('synchy_push_complete_missing_archive', __('Synchy could not find the uploaded archive on the destination site.', 'synchy'), ['status' => 400]);
-				}
-
-				$has_installer = $installer_path !== '' && is_readable($installer_path);
-				$has_manifest = $manifest_path !== '' && is_readable($manifest_path);
-
-				if (!$has_installer && !$has_manifest) {
-					return new WP_Error('synchy_push_complete_missing_installer', __('Synchy could not find installer.php for the uploaded destination package.', 'synchy'), ['status' => 400]);
-				}
-
-				$manifest = [];
-
-				if ($has_manifest) {
-					$manifest = json_decode((string) file_get_contents($manifest_path), true);
-
-					if (!is_array($manifest)) {
-						return new WP_Error('synchy_push_complete_invalid_manifest', __('Synchy could not decode the uploaded manifest on the destination site.', 'synchy'), ['status' => 400]);
-					}
-				}
-
-				$session['status'] = 'ready';
-				$session['completed_at'] = gmdate('c');
-				$session['manifest_summary'] = [
-					'package_id' => (string) ($session['package_id'] ?? ($manifest['package_id'] ?? '')),
-					'package_name' => (string) ($session['package_name'] ?? ($manifest['package_name'] ?? '')),
-					'source_home_url' => (string) ($session['source_home_url'] ?? ($manifest['site']['home_url'] ?? '')),
-				];
-				$session['root_deploy'] = $has_installer
-					? synchy_deploy_remote_push_package_to_root($session)
-					: [
-						'status' => 'staged_only',
-						'message' => __('Synchy staged the package, but this session did not include installer.php for root deployment.', 'synchy'),
-						'rootPath' => synchy_get_site_root_path(),
-					];
-				$session = synchy_write_remote_push_session($session);
-
-				if (is_wp_error($session)) {
-					return $session;
-				}
-
-				return rest_ensure_response(
-					[
-						'session_id' => $session_id,
-						'status' => 'ready',
-						'packageName' => (string) ($session['package_name'] ?? ''),
-						'packageId' => (string) ($session['manifest_summary']['package_id'] ?? ''),
-						'destinationPath' => (string) ($session['directory'] ?? ''),
-						'deployStatus' => (string) ($session['root_deploy']['status'] ?? 'staged_only'),
-						'message' => (string) ($session['root_deploy']['message'] ?? __('Package delivered to the destination Backup & Restore receiver.', 'synchy')),
-						'installerUrl' => (string) ($session['root_deploy']['installerUrl'] ?? ''),
-						'installerPath' => (string) ($session['root_deploy']['installerPath'] ?? ''),
-						'archivePath' => (string) ($session['root_deploy']['archivePath'] ?? ''),
-						'rootPath' => (string) ($session['root_deploy']['rootPath'] ?? ''),
-					]
-				);
-			},
-			'permission_callback' => $permission,
-		]
-	);
 });
 
 add_action('admin_enqueue_scripts', function (string $hook_suffix): void {
@@ -14799,45 +14702,6 @@ add_action('admin_enqueue_scripts', function (string $hook_suffix): void {
 	}
 
 	$page = isset($_GET['page']) ? sanitize_key((string) $_GET['page']) : '';
-
-	if ($page === 'synchy-push-live-site') {
-		$site_sync_script_path = plugin_dir_path(__FILE__) . 'assets/site-sync.js';
-
-		if (!file_exists($site_sync_script_path)) {
-			return;
-		}
-
-		wp_enqueue_script(
-			'synchy-site-sync',
-			plugin_dir_url(__FILE__) . 'assets/site-sync.js',
-			[],
-			(string) filemtime($site_sync_script_path),
-			true
-		);
-
-			wp_localize_script(
-				'synchy-site-sync',
-				'synchySiteSyncConfig',
-				[
-					'ajaxUrl' => admin_url('admin-ajax.php'),
-					'nonce' => wp_create_nonce('synchy_site_sync_ajax'),
-					'currentJob' => synchy_build_site_sync_job_response(synchy_get_running_site_sync_job()),
-					'defaultStages' => synchy_get_site_sync_stage_items([]),
-					'strings' => [
-						'uploaded' => __('Uploaded', 'synchy'),
-						'timeSpent' => __('Time spent', 'synchy'),
-					'timeRemaining' => __('Time remaining', 'synchy'),
-					'completedIn' => __('Completed in', 'synchy'),
-					'connectionReady' => __('Connection ready', 'synchy'),
-					'connectionError' => __('Connection failed', 'synchy'),
-					'pushAction' => __('Upload to Live', 'synchy'),
-					'unknownError' => __('Backup & Restore hit an unexpected live push error.', 'synchy'),
-				],
-			]
-		);
-
-		return;
-	}
 
 	if ($page === 'synchy-site-sync') {
 		$sync_script_path = plugin_dir_path(__FILE__) . 'assets/sync.js';
