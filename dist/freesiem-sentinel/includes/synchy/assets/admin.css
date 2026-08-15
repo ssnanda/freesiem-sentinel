@@ -1909,3 +1909,40 @@
 	background: #f8fafc;
 	font-size: 13px;
 }
+
+.synchy-hero-notify {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	flex-wrap: wrap;
+}
+
+.synchy-hero-notify input[type="email"] {
+	width: 200px;
+}
+
+.synchy-history-collapsible > summary {
+	list-style: none;
+	cursor: pointer;
+}
+
+.synchy-history-collapsible > summary::-webkit-details-marker {
+	display: none;
+}
+
+.synchy-history-collapsible__summary {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 12px;
+}
+
+.synchy-history-collapsible__summary span:first-child {
+	color: #12323b;
+	font-size: 20px;
+	font-weight: 700;
+}
+
+.synchy-history-collapsible[open] > summary {
+	margin-bottom: 14px;
+}

@@ -10905,8 +10905,6 @@ function synchy_render_import_page(array $current): void
 						</ul>
 					</div>
 				</div>
-
-				<?php synchy_render_export_history($export_history, 'synchy-import'); ?>
 			</form>
 		</div>
 	</div>
@@ -11112,25 +11110,23 @@ function synchy_get_purge_backup_download_token(string $package_id, string $arti
 function synchy_render_export_history(array $history, string $page_slug): void
 {
 	?>
-	<div class="synchy-panel synchy-panel--wide">
+	<details class="synchy-panel synchy-panel--wide synchy-history-collapsible">
+		<summary class="synchy-history-collapsible__summary">
+			<span><?php esc_html_e('Available Export History', 'synchy'); ?></span>
+			<span class="synchy-badge">
+				<?php
+				printf(
+					/* translators: %s: number of export packages */
+					esc_html(_n('%s package', '%s packages', count($history), 'synchy')),
+					esc_html(number_format_i18n(count($history)))
+				);
+				?>
+			</span>
+		</summary>
 		<div class="synchy-stack synchy-stack--compact">
-			<div class="synchy-stack__split">
-				<div>
-					<h2><?php esc_html_e('Available Export History', 'synchy'); ?></h2>
-					<p class="synchy-field-note">
-						<?php esc_html_e('Backup & Restore lists every retained export package whose archive is still available on disk. Delete removes the package files from this site.', 'synchy'); ?>
-					</p>
-				</div>
-				<span class="synchy-badge">
-					<?php
-					printf(
-						/* translators: %s: number of export packages */
-						esc_html(_n('%s package', '%s packages', count($history), 'synchy')),
-						esc_html(number_format_i18n(count($history)))
-					);
-					?>
-				</span>
-			</div>
+			<p class="synchy-field-note">
+				<?php esc_html_e('Backup & Restore lists every retained export package whose archive is still available on disk. Delete removes the package files from this site.', 'synchy'); ?>
+			</p>
 
 			<?php if ($history === []) : ?>
 				<p class="synchy-field-note"><?php esc_html_e('No Backup & Restore exports are currently available on this site.', 'synchy'); ?></p>
@@ -11204,7 +11200,7 @@ function synchy_render_export_history(array $history, string $page_slug): void
 				</div>
 			<?php endif; ?>
 		</div>
-	</div>
+	</details>
 	<?php
 }
 
@@ -11629,28 +11625,77 @@ function synchy_render_export_page(array $current): void
 					<h1><?php echo esc_html($current['headline']); ?></h1>
 					<p class="synchy-description"><?php echo esc_html($current['description']); ?></p>
 				</div>
+				<div class="synchy-hero-notify">
+					<label class="synchy-sync-scope-toggle">
+						<input
+							type="checkbox"
+							form="synchy-export-settings-form"
+							name="<?php echo esc_attr(SYNCHY_EXPORT_OPTIONS); ?>[notify_email_enabled]"
+							value="1"
+							<?php checked(!empty($options['notify_email_enabled'])); ?>
+						/>
+						<span><?php esc_html_e('Email me when done', 'synchy'); ?></span>
+					</label>
+					<input
+						type="email"
+						form="synchy-export-settings-form"
+						class="regular-text"
+						name="<?php echo esc_attr(SYNCHY_EXPORT_OPTIONS); ?>[notify_email_address]"
+						value="<?php echo esc_attr((string) $options['notify_email_address']); ?>"
+						placeholder="<?php echo esc_attr((string) get_option('admin_email')); ?>"
+					/>
+				</div>
 				<div class="synchy-status">
 					<span class="synchy-status__dot" aria-hidden="true"></span>
 					<?php echo esc_html($running_job === [] ? __('Export ready', 'synchy') : __('Export running', 'synchy')); ?>
 				</div>
 			</div>
 
+			<?php synchy_render_export_history($export_history, 'synchy-export'); ?>
 			<?php synchy_render_export_readme_panel($options); ?>
 
-			<form method="post" action="options.php" class="synchy-form" data-synchy-export-form>
+			<form id="synchy-export-settings-form" method="post" action="options.php" class="synchy-form" data-synchy-export-form>
 				<?php settings_fields('synchy_export'); ?>
 
 				<div class="synchy-grid synchy-grid--export">
 					<div class="synchy-panel">
-						<h2><?php esc_html_e('Full Export Includes', 'synchy'); ?></h2>
-						<ul class="synchy-checklist synchy-checklist--detail">
-							<?php foreach ($included as $item) : ?>
-								<li>
-									<strong><?php echo esc_html($item['label']); ?></strong>
-									<span><?php echo esc_html($item['description']); ?></span>
-								</li>
+						<h2><?php esc_html_e('Default Exclude Filters', 'synchy'); ?></h2>
+						<p class="synchy-field-note">
+							<?php esc_html_e('These filters define what Synchy should leave out of a full export by default. Your selected export destination is also excluded automatically at runtime.', 'synchy'); ?>
+						</p>
+
+						<div class="synchy-filter-list">
+							<?php foreach ($groups as $key => $group) : ?>
+								<div class="synchy-filter-card">
+									<label class="synchy-toggle">
+										<input
+											type="checkbox"
+											name="<?php echo esc_attr(SYNCHY_EXPORT_OPTIONS); ?>[<?php echo esc_attr($key); ?>]"
+											value="1"
+											<?php checked(!empty($options[$key])); ?>
+										/>
+										<span><?php echo esc_html($group['label']); ?></span>
+									</label>
+									<p><?php echo esc_html($group['description']); ?></p>
+									<div class="synchy-patterns">
+										<?php foreach ($group['patterns'] as $pattern) : ?>
+											<code><?php echo esc_html($pattern); ?></code>
+										<?php endforeach; ?>
+									</div>
+								</div>
 							<?php endforeach; ?>
-						</ul>
+						</div>
+
+						<h3><?php esc_html_e('Custom Excludes', 'synchy'); ?></h3>
+						<p class="synchy-field-note">
+							<?php esc_html_e('Enter one path or glob per line. These will be added on top of the default filters above.', 'synchy'); ?>
+						</p>
+						<textarea
+							class="large-text code"
+							rows="8"
+							name="<?php echo esc_attr(SYNCHY_EXPORT_OPTIONS); ?>[custom_excludes]"
+							placeholder=".env\nwp-content/synchy-temp/\ncustom-cache/"
+						><?php echo esc_textarea((string) $options['custom_excludes']); ?></textarea>
 					</div>
 
 					<div class="synchy-panel synchy-panel--muted">
@@ -11746,84 +11791,14 @@ function synchy_render_export_page(array $current): void
 						</div>
 					</div>
 
-				<div class="synchy-panel synchy-panel--wide">
-					<h2><?php esc_html_e('Default Exclude Filters', 'synchy'); ?></h2>
-					<p class="synchy-field-note">
-						<?php esc_html_e('These filters define what Synchy should leave out of a full export by default. Your selected export destination is also excluded automatically at runtime.', 'synchy'); ?>
-					</p>
-
-					<div class="synchy-filter-list">
-						<?php foreach ($groups as $key => $group) : ?>
-							<div class="synchy-filter-card">
-								<label class="synchy-toggle">
-									<input
-										type="checkbox"
-										name="<?php echo esc_attr(SYNCHY_EXPORT_OPTIONS); ?>[<?php echo esc_attr($key); ?>]"
-										value="1"
-										<?php checked(!empty($options[$key])); ?>
-									/>
-									<span><?php echo esc_html($group['label']); ?></span>
-								</label>
-								<p><?php echo esc_html($group['description']); ?></p>
-								<div class="synchy-patterns">
-									<?php foreach ($group['patterns'] as $pattern) : ?>
-										<code><?php echo esc_html($pattern); ?></code>
-									<?php endforeach; ?>
-								</div>
-							</div>
-						<?php endforeach; ?>
-					</div>
-				</div>
-
-				<div class="synchy-panel">
-					<h2><?php esc_html_e('Email Notification', 'synchy'); ?></h2>
-					<p class="synchy-field-note"><?php esc_html_e('Send an email whenever an export finishes -- including exports triggered by the Purge & Sync backup step.', 'synchy'); ?></p>
-					<label class="synchy-sync-scope-toggle">
-						<input
-							type="checkbox"
-							name="<?php echo esc_attr(SYNCHY_EXPORT_OPTIONS); ?>[notify_email_enabled]"
-							value="1"
-							<?php checked(!empty($options['notify_email_enabled'])); ?>
-						/>
-						<span><?php esc_html_e('Email me when a backup export completes', 'synchy'); ?></span>
-					</label>
-					<p>
-						<label for="synchy-export-notify-email"><?php esc_html_e('Send to', 'synchy'); ?></label><br />
-						<input
-							type="email"
-							id="synchy-export-notify-email"
-							class="regular-text"
-							name="<?php echo esc_attr(SYNCHY_EXPORT_OPTIONS); ?>[notify_email_address]"
-							value="<?php echo esc_attr((string) $options['notify_email_address']); ?>"
-							placeholder="<?php echo esc_attr((string) get_option('admin_email')); ?>"
-						/>
-					</p>
-					<p class="synchy-field-note"><?php esc_html_e('Leave blank to use this site\'s admin email.', 'synchy'); ?></p>
-				</div>
-
-				<div class="synchy-grid synchy-grid--export">
-					<div class="synchy-panel">
-						<h2><?php esc_html_e('Custom Excludes', 'synchy'); ?></h2>
-						<p class="synchy-field-note">
-							<?php esc_html_e('Enter one path or glob per line. These will be added on top of the default filters.', 'synchy'); ?>
-						</p>
-						<textarea
-							class="large-text code"
-							rows="8"
-							name="<?php echo esc_attr(SYNCHY_EXPORT_OPTIONS); ?>[custom_excludes]"
-							placeholder=".env\nwp-content/synchy-temp/\ncustom-cache/"
-						><?php echo esc_textarea((string) $options['custom_excludes']); ?></textarea>
-					</div>
-
-					<div class="synchy-panel synchy-panel--muted">
-						<h2><?php esc_html_e('Notes', 'synchy'); ?></h2>
-						<ul class="synchy-checklist">
-							<li><?php esc_html_e('The chosen export folder is excluded from the backup automatically if it lives inside this WordPress install.', 'synchy'); ?></li>
-							<li><?php esc_html_e('Duplicator backup folders remain excluded by default through wp-content/duplicator/.', 'synchy'); ?></li>
-							<li><?php esc_html_e('Runtime dependencies like Composer vendor folders should not be stripped by default.', 'synchy'); ?></li>
-							<li><?php esc_html_e('This package is not a Duplicator archive format. It will be restored through Synchy Import, not Duplicator Import.', 'synchy'); ?></li>
-						</ul>
-					</div>
+				<div class="synchy-panel synchy-panel--muted">
+					<h2><?php esc_html_e('Notes', 'synchy'); ?></h2>
+					<ul class="synchy-checklist">
+						<li><?php esc_html_e('The chosen export folder is excluded from the backup automatically if it lives inside this WordPress install.', 'synchy'); ?></li>
+						<li><?php esc_html_e('Duplicator backup folders remain excluded by default through wp-content/duplicator/.', 'synchy'); ?></li>
+						<li><?php esc_html_e('Runtime dependencies like Composer vendor folders should not be stripped by default.', 'synchy'); ?></li>
+						<li><?php esc_html_e('This package is not a Duplicator archive format. It will be restored through Synchy Import, not Duplicator Import.', 'synchy'); ?></li>
+					</ul>
 				</div>
 
 				<p class="submit">
@@ -11831,7 +11806,6 @@ function synchy_render_export_page(array $current): void
 				</p>
 			</form>
 
-			<?php synchy_render_export_history($export_history, 'synchy-export'); ?>
 			<?php synchy_render_ddev_export_instructions(); ?>
 			<?php synchy_render_hostinger_export_instructions(); ?>
 		</div>
