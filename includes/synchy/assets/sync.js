@@ -45,6 +45,12 @@
 	const statusSummary = document.querySelector("[data-synchy-sync-status-summary]");
 	const targetNote = document.querySelector("[data-synchy-sync-target-note]");
 	const scopeInputs = Array.from(document.querySelectorAll("[data-synchy-sync-scope]"));
+	const pushConfirmModal = document.querySelector("[data-synchy-push-confirm-modal]");
+	const pushConfirmTitle = document.querySelector("[data-synchy-push-confirm-title]");
+	const pushConfirmSummary = document.querySelector("[data-synchy-push-confirm-summary]");
+	const pushConfirmDetails = document.querySelector("[data-synchy-push-confirm-details]");
+	const pushConfirmOkButton = document.querySelector("[data-synchy-push-confirm-ok]");
+	const pushConfirmCancelButtons = Array.from(document.querySelectorAll("[data-synchy-push-confirm-cancel]"));
 
 	if (
 		!form ||
@@ -582,9 +588,15 @@
 			.filter((input) => String(input.value || "") === "1")
 			.map((input) => String(input.dataset.scopeId || ""));
 
+	// [data-synchy-sync-scope-row] only exists for scopes the Pending Changes tree currently has
+	// something to show for -- looking labels up there silently dropped any scope with no live
+	// row (e.g. right after toggling a plugin's active state, before a fresh preview repopulates
+	// that tree), which is how a real selection ended up displaying as "Scopes: None" in the push
+	// confirmation. The Sync Scope toggle panel's own label span always exists for every scope
+	// regardless of pending-changes state, so look labels up there instead.
 	const getSelectedScopeLabels = () =>
 		getSelectedScopeIds()
-			.map((scopeId) => document.querySelector(`[data-synchy-sync-scope-row][data-scope-id="${scopeId}"] strong`)?.textContent?.trim() || "")
+			.map((scopeId) => document.querySelector(`[data-synchy-scope-toggle-label][data-scope-id="${scopeId}"] span`)?.textContent?.trim() || "")
 			.filter(Boolean);
 
 	const getHasSelection = () => getSelectedScopeIds().length > 0;
@@ -1631,6 +1643,51 @@
 		}
 	};
 
+	// Resolves true/false once the user picks Push or Cancel in the push-confirm modal. Falls
+	// back to a plain window.confirm() if the modal markup isn't on the page for some reason
+	// (e.g. a cached page fragment from before this modal existed), so Push never silently no-ops.
+	let pushConfirmResolve = null;
+
+	const closePushConfirmModal = (result) => {
+		if (pushConfirmModal) {
+			pushConfirmModal.classList.add("is-hidden");
+			pushConfirmModal.setAttribute("aria-hidden", "true");
+		}
+
+		if (pushConfirmResolve) {
+			const resolve = pushConfirmResolve;
+			pushConfirmResolve = null;
+			resolve(result);
+		}
+	};
+
+	const requestPushConfirmation = (details) => {
+		if (!pushConfirmModal || !pushConfirmSummary || !pushConfirmDetails) {
+			return Promise.resolve(window.confirm(details.introMessage));
+		}
+
+		if (pushConfirmTitle) {
+			pushConfirmTitle.textContent = details.title;
+		}
+		if (pushConfirmOkButton) {
+			pushConfirmOkButton.textContent = details.okLabel;
+		}
+
+		pushConfirmSummary.innerHTML = details.summaryItems
+			.map((item) => `<li>${item}</li>`)
+			.join("");
+		pushConfirmDetails.innerHTML = details.detailLines
+			.map((line) => `<p>${escapeHtml(line)}</p>`)
+			.join("");
+
+		pushConfirmModal.classList.remove("is-hidden");
+		pushConfirmModal.setAttribute("aria-hidden", "false");
+
+		return new Promise((resolve) => {
+			pushConfirmResolve = resolve;
+		});
+	};
+
 	const runSync = async () => {
 		if (latestPreview === null) {
 			return;
@@ -1642,25 +1699,44 @@
 		const selectedDbTables = form.querySelectorAll('input[name="synchy_sync_selected_db_tables[]"]:checked').length;
 		const isFullSync = latestPreviewMode === "full" || getIsBatchedBaselinePreview() || Boolean(latestPreview?.forceFull) || getHasPendingBaselineSelection();
 		const dbSyncEnabled = latestPreview?.dbSyncDisabled === false;
-		const confirmMessage = [
-			isFullSync
-				? (config.strings.confirmFullSync || "Run a full Sync for the selected scopes and send all tracked files and rows to the destination site now?")
-				: (config.strings.confirmSync || "Sync the previewed changes to the destination site now?"),
-			"",
-			`Destination: ${destinationUrl || "Not set"}`,
-			`Scopes: ${scopeLabels.join(", ") || "None"}`,
-			`Files included: ${Number(latestPreview?.filesCount || 0).toLocaleString()}`,
-			`Files excluded: ${Number(latestPreview?.excludedFilesCount || 0).toLocaleString()}`,
-			`DB sync: ${dbSyncEnabled ? "enabled" : "disabled"}`,
-			`Protected AJ Core options: ${Number(latestPreview?.protectedOptionsCount || 0).toLocaleString()}`,
-			`Protected AJ Core tables: ${Number(latestPreview?.protectedTablesCount || 0).toLocaleString()}`,
-			dbSyncEnabled ? "Database Sync requires this explicit confirmation. Protected AJ Core options and runtime tables will still be excluded." : "",
-			isFullSync
-				? `Planned batches: ${Number(latestPreview?.totalBatches || 0).toLocaleString()}`
-				: `Selected preview items: ${selectedFileSections} file sections, ${selectedDbTables} DB tables`,
-		].filter(Boolean).join("\n");
+		const filesCount = Number(latestPreview?.filesCount || 0);
+		const dbRows = Number(latestPreview?.dbRows || 0);
 
-		if (!window.confirm(confirmMessage)) {
+		const summaryItems = [
+			`<strong>${filesCount.toLocaleString()}</strong> file${filesCount === 1 ? "" : "s"} will be updated`,
+			`<strong>${dbRows.toLocaleString()}</strong> database row${dbRows === 1 ? "" : "s"} will be updated`,
+		];
+		if (isFullSync) {
+			summaryItems.push(`<strong>${Number(latestPreview?.totalBatches || 0).toLocaleString()}</strong> batches planned`);
+		} else {
+			summaryItems.push(`<strong>${selectedFileSections}</strong> file section${selectedFileSections === 1 ? "" : "s"} and <strong>${selectedDbTables}</strong> DB table${selectedDbTables === 1 ? "" : "s"} selected`);
+		}
+		if (filesCount === 0 && dbRows === 0) {
+			summaryItems.push("Nothing changed since the last successful Sync");
+		}
+
+		const introMessage = isFullSync
+			? (config.strings.confirmFullSync || "Run a full Sync for the selected scopes and send all tracked files and rows to the destination site now?")
+			: (config.strings.confirmSync || "Sync the previewed changes to the destination site now?");
+
+		const confirmed = await requestPushConfirmation({
+			title: isFullSync ? (config.strings.confirmFullSyncTitle || "Run Full Sync?") : (config.strings.confirmSyncTitle || "Push changes?"),
+			okLabel: isFullSync ? (config.strings.startFullSync || "Run Full Sync") : (config.strings.pushChanges || "Push"),
+			introMessage,
+			summaryItems,
+			detailLines: [
+				introMessage,
+				`Destination: ${destinationUrl || "Not set"}`,
+				`Scopes: ${scopeLabels.join(", ") || "None"}`,
+				`Files excluded: ${Number(latestPreview?.excludedFilesCount || 0).toLocaleString()}`,
+				`DB sync: ${dbSyncEnabled ? "enabled" : "disabled"}`,
+				`Protected AJ Core options: ${Number(latestPreview?.protectedOptionsCount || 0).toLocaleString()}`,
+				`Protected AJ Core tables: ${Number(latestPreview?.protectedTablesCount || 0).toLocaleString()}`,
+				dbSyncEnabled ? "Database Sync requires this explicit confirmation. Protected AJ Core options and runtime tables will still be excluded." : "",
+			].filter(Boolean),
+		});
+
+		if (!confirmed) {
 			return;
 		}
 
@@ -2170,6 +2246,20 @@
 	resumeSyncButton.addEventListener("click", resumeFullSync);
 	resetSyncButton.addEventListener("click", resetSyncState);
 	manualBaselineButton.addEventListener("click", runManualBaseline);
+
+	if (pushConfirmModal) {
+		if (pushConfirmOkButton) {
+			pushConfirmOkButton.addEventListener("click", () => closePushConfirmModal(true));
+		}
+		pushConfirmCancelButtons.forEach((button) => {
+			button.addEventListener("click", () => closePushConfirmModal(false));
+		});
+		document.addEventListener("keydown", (event) => {
+			if (event.key === "Escape" && !pushConfirmModal.classList.contains("is-hidden")) {
+				closePushConfirmModal(false);
+			}
+		});
+	}
 
 	updateTargetNote();
 	updateScopeRows();

@@ -12390,6 +12390,29 @@ function synchy_render_incremental_site_sync_page(array $current): void
 			<?php endif; ?>
 		</div>
 	</div>
+
+	<div class="synchy-modal is-hidden" data-synchy-push-confirm-modal aria-hidden="true">
+		<div class="synchy-modal__backdrop" data-synchy-push-confirm-cancel></div>
+		<div class="synchy-modal__dialog synchy-push-confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="synchy-push-confirm-title">
+			<div class="synchy-modal__header">
+				<h2 id="synchy-push-confirm-title" data-synchy-push-confirm-title><?php esc_html_e('Push changes?', 'synchy'); ?></h2>
+				<button type="button" class="button-link" data-synchy-push-confirm-cancel><?php esc_html_e('Close', 'synchy'); ?></button>
+			</div>
+
+			<p class="synchy-field-note"><?php esc_html_e('What will be pushed to the destination:', 'synchy'); ?></p>
+			<ul class="synchy-push-confirm-summary" data-synchy-push-confirm-summary></ul>
+
+			<details class="synchy-push-confirm-details">
+				<summary><?php esc_html_e('Details', 'synchy'); ?></summary>
+				<div class="synchy-push-confirm-details__body" data-synchy-push-confirm-details></div>
+			</details>
+
+			<div class="synchy-modal__actions">
+				<button type="button" class="button" data-synchy-push-confirm-cancel><?php esc_html_e('Cancel', 'synchy'); ?></button>
+				<button type="button" class="button button-primary" data-synchy-push-confirm-ok><?php esc_html_e('Push', 'synchy'); ?></button>
+			</div>
+		</div>
+	</div>
 	<?php
 }
 

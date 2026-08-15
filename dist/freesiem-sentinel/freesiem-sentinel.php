@@ -3,7 +3,7 @@
  * Plugin Name: freeSIEM Sentinel
  * Plugin URI: https://github.com/ssnanda/freesiem-sentinel
  * Description: Connects a WordPress site to freeSIEM Core for verification, local scanning, secure result uploads, command handling, and summary reporting.
- * Version: 1.0.83
+ * Version: 1.0.84
  * Update URI: https://github.com/ssnanda/freesiem-sentinel
  * Author: freesiem.com
  * Text Domain: freesiem-sentinel
@@ -13,7 +13,7 @@ if (!defined('ABSPATH')) {
 	exit;
 }
 
-define('FREESIEM_SENTINEL_VERSION', '1.0.83');
+define('FREESIEM_SENTINEL_VERSION', '1.0.84');
 define('FREESIEM_SENTINEL_SLUG', 'freesiem-sentinel');
 define('FREESIEM_SENTINEL_SYNCHY_PAGE', 'freesiem-synchy');
 define('FREESIEM_SENTINEL_OPTION', 'freesiem_sentinel_settings');

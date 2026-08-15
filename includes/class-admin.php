@@ -8,6 +8,13 @@ class Freesiem_Admin
 {
 	private Freesiem_Plugin $plugin;
 
+	/**
+	 * Populated once per request by maybe_auto_update_from_settings_page() (admin_init, runs
+	 * before any admin_menu page callback) so render_settings_page() doesn't have to make a
+	 * second forced GitHub API call for the same check later in the same request.
+	 */
+	private $settings_update_check = null;
+
 	public function __construct(Freesiem_Plugin $plugin)
 	{
 		$this->plugin = $plugin;
@@ -20,6 +27,7 @@ class Freesiem_Admin
 		add_action('admin_init', [$this->plugin, 'maybe_process_pending_task_maintenance']);
 		add_action('admin_init', [$this, 'maybe_redirect_legacy_synchy_pages']);
 		add_action('admin_init', [$this, 'maybe_redirect_legacy_about_page']);
+		add_action('admin_init', [$this, 'maybe_auto_update_from_settings_page']);
 		add_action('admin_enqueue_scripts', [$this, 'maybe_enqueue_synchy_assets']);
 		add_action('admin_notices', 'freesiem_sentinel_render_notices');
 		add_action('admin_post_freesiem_sentinel_save_cloud_connect_contact', [$this, 'handle_save_cloud_connect_contact']);
@@ -169,6 +177,41 @@ class Freesiem_Admin
 		exit;
 	}
 
+	public function maybe_auto_update_from_settings_page(): void
+	{
+		if (!is_admin() || !current_user_can('manage_options')) {
+			return;
+		}
+
+		$page = isset($_GET['page']) ? sanitize_key((string) wp_unslash($_GET['page'])) : '';
+
+		if ($page !== 'freesiem-settings') {
+			return;
+		}
+
+		$updater = $this->plugin->get_updater();
+		$result = $updater->refresh_plugin_update_state();
+		$this->settings_update_check = $result;
+
+		if (is_wp_error($result)) {
+			return;
+		}
+
+		$release = is_array($result['release'] ?? null) ? $result['release'] : [];
+		$version = safe($release['version'] ?? '');
+
+		if (empty($result['update_available']) || $version === '') {
+			return;
+		}
+
+		// A newer packaged release exists -- hand off to the real update flow immediately instead
+		// of waiting for an explicit "Update Plugin" click, per "clicking Settings should test and
+		// update my plugin". Reuses the exact same admin-post handler (and WP core upgrade screen)
+		// the manual button uses; it just fires automatically here.
+		wp_safe_redirect($updater->get_update_plugin_url(freesiem_sentinel_admin_page_url('freesiem-settings', ['tab' => 'about'])));
+		exit;
+	}
+
 	public function maybe_enqueue_synchy_assets(string $hook_suffix): void
 	{
 		$page = isset($_GET['page']) ? sanitize_key((string) wp_unslash($_GET['page'])) : '';
@@ -260,6 +303,8 @@ class Freesiem_Admin
 							'startBaseline' => __('Start Baseline', 'synchy'),
 							'startFullSync' => __('Run Full Sync', 'synchy'),
 							'pushChanges' => __('Push', 'synchy'),
+							'confirmSyncTitle' => __('Push changes?', 'synchy'),
+							'confirmFullSyncTitle' => __('Run Full Sync?', 'synchy'),
 							'fullSync' => __('Full Sync', 'synchy'),
 							'pauseSync' => __('Pause Sync', 'synchy'),
 							'resumeSync' => __('Resume Sync', 'synchy'),
@@ -2116,10 +2161,11 @@ class Freesiem_Admin
 	{
 		$this->assert_manage_permissions();
 
-		// Landing on Settings always checks GitHub for the latest packaged release, the same way
-		// the old standalone About page used to on every load.
-		$updater = $this->plugin->get_updater();
-		$update_check = $updater->refresh_plugin_update_state();
+		// maybe_auto_update_from_settings_page() (admin_init) already ran this exact check
+		// earlier in this request -- reuse its result instead of hitting GitHub again. If an
+		// update was available, that hook already redirected into the update flow and this
+		// render never runs; getting here means it already confirmed there's nothing to install.
+		$update_check = $this->settings_update_check ?? $this->plugin->get_updater()->refresh_plugin_update_state();
 
 		$tabs = $this->get_settings_tabs();
 		$current_tab = $this->get_settings_current_tab();
@@ -4026,10 +4072,10 @@ class Freesiem_Admin
 
 	private function get_settings_current_tab(): string
 	{
-		$tab = isset($_GET['tab']) ? sanitize_key((string) wp_unslash($_GET['tab'])) : 'general';
+		$tab = isset($_GET['tab']) ? sanitize_key((string) wp_unslash($_GET['tab'])) : 'about';
 		$tabs = $this->get_settings_tabs();
 
-		return isset($tabs[$tab]) ? $tab : 'general';
+		return isset($tabs[$tab]) ? $tab : 'about';
 	}
 
 	private function filter_synchy_rendered_page_html(string $html, string $current_tab): string

@@ -1269,6 +1269,62 @@
 	margin-bottom: 14px;
 }
 
+/* Push confirmation dialog -- leads with a plain-language "what's being pushed" summary;
+   the noisier technical breakdown (destination, scopes, protected counts) is tucked behind
+   a closed-by-default Details disclosure instead of competing for attention. */
+.synchy-push-confirm-summary {
+	margin: 0 0 16px;
+	padding: 0;
+	list-style: none;
+	display: grid;
+	gap: 8px;
+}
+
+.synchy-push-confirm-summary li {
+	padding: 12px 14px;
+	border: 1px solid #d7e1da;
+	border-radius: 14px;
+	background: #f4f8f4;
+	color: #12323b;
+	font-size: 15px;
+}
+
+.synchy-push-confirm-summary li strong {
+	color: #1f8f5f;
+}
+
+.synchy-push-confirm-details {
+	margin-bottom: 16px;
+	padding: 4px 12px;
+	border: 1px solid #e3e9e5;
+	border-radius: 10px;
+	background: #f9fafa;
+}
+
+.synchy-push-confirm-details > summary {
+	padding: 8px 0;
+	list-style: none;
+	cursor: pointer;
+	color: #517075;
+	font-size: 13px;
+	font-weight: 700;
+}
+
+.synchy-push-confirm-details > summary::-webkit-details-marker {
+	display: none;
+}
+
+.synchy-push-confirm-details__body {
+	padding: 4px 0 12px;
+	color: #517075;
+	font-size: 13px;
+	line-height: 1.7;
+}
+
+.synchy-push-confirm-details__body p {
+	margin: 0 0 4px;
+}
+
 .synchy-directory-list {
 	display: grid;
 	gap: 10px;
