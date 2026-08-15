@@ -84,15 +84,25 @@ class Freesiem_Admin
 		);
 
 		add_submenu_page('freesiem-portal', __('Dashboard', 'freesiem-sentinel'), __('Dashboard', 'freesiem-sentinel'), 'manage_options', 'freesiem-portal', [$this, 'render_dashboard_page']);
-		add_submenu_page('freesiem-portal', __('Cloud', 'freesiem-sentinel'), __('Cloud', 'freesiem-sentinel'), 'manage_options', 'freesiem-remote', [$this, 'render_remote_page']);
-		add_submenu_page('freesiem-portal', __('SSL / HTTPS', 'freesiem-sentinel'), __('SSL / HTTPS', 'freesiem-sentinel'), 'manage_options', 'freesiem-ssl', [$this, 'render_ssl_page']);
-		add_submenu_page('freesiem-portal', __('TFA (2FA)', 'freesiem-sentinel'), __('TFA (2FA)', 'freesiem-sentinel'), 'manage_options', 'freesiem-tfa', [$this, 'render_tfa_page']);
-		add_submenu_page('freesiem-portal', __('Login Protection', 'freesiem-sentinel'), __('Login Protection', 'freesiem-sentinel'), 'manage_options', 'freesiem-login-protection', [$this, 'render_login_protection_page']);
-		add_submenu_page('freesiem-portal', __('Stealth Mode', 'freesiem-sentinel'), __('Stealth Mode', 'freesiem-sentinel'), 'manage_options', 'freesiem-stealth-mode', [$this, 'render_stealth_mode_page']);
+		// "Activity" bundles Connection (was "Cloud"), Logs, and Pending Tasks -- registered at
+		// the lowest capability among its tabs ('read') so a non-admin allowed to approve tasks
+		// still sees the menu item; render_activity_page() gates each tab's real content itself.
+		add_submenu_page('freesiem-portal', __('Activity', 'freesiem-sentinel'), __('Activity', 'freesiem-sentinel'), 'read', 'freesiem-activity', [$this, 'render_activity_page']);
+		// "Security" bundles SSL/HTTPS, TFA, Login Protection, and Stealth Mode.
+		add_submenu_page('freesiem-portal', __('Security', 'freesiem-sentinel'), __('Security', 'freesiem-sentinel'), 'manage_options', 'freesiem-security', [$this, 'render_security_page']);
 		add_submenu_page('freesiem-portal', __('Backup & Restore', 'freesiem-sentinel'), __('Backup & Restore', 'freesiem-sentinel'), 'manage_options', FREESIEM_SENTINEL_SYNCHY_PAGE, [$this, 'render_synchy_page']);
-		add_submenu_page('freesiem-portal', __('Logs', 'freesiem-sentinel'), __('Logs', 'freesiem-sentinel'), 'manage_options', 'freesiem-logs', [$this, 'render_logs_page']);
-		add_submenu_page('freesiem-portal', __('Pending Tasks', 'freesiem-sentinel'), __('Pending Tasks', 'freesiem-sentinel'), 'read', 'freesiem-pending-tasks', [$this, 'render_pending_tasks_page']);
 		add_submenu_page('freesiem-portal', __('Settings', 'freesiem-sentinel'), __('Settings', 'freesiem-sentinel'), 'manage_options', 'freesiem-settings', [$this, 'render_settings_page']);
+
+		// Kept registered but off the visible menu (same pattern as Scan below) -- every existing
+		// redirect_to_page()/admin_page_url() call and self-referencing link to these slugs across
+		// the plugin keeps working unchanged; Activity/Security are what the sidebar shows instead.
+		add_submenu_page('', __('Cloud', 'freesiem-sentinel'), __('Cloud', 'freesiem-sentinel'), 'manage_options', 'freesiem-remote', [$this, 'render_remote_page']);
+		add_submenu_page('', __('SSL / HTTPS', 'freesiem-sentinel'), __('SSL / HTTPS', 'freesiem-sentinel'), 'manage_options', 'freesiem-ssl', [$this, 'render_ssl_page']);
+		add_submenu_page('', __('TFA (2FA)', 'freesiem-sentinel'), __('TFA (2FA)', 'freesiem-sentinel'), 'manage_options', 'freesiem-tfa', [$this, 'render_tfa_page']);
+		add_submenu_page('', __('Login Protection', 'freesiem-sentinel'), __('Login Protection', 'freesiem-sentinel'), 'manage_options', 'freesiem-login-protection', [$this, 'render_login_protection_page']);
+		add_submenu_page('', __('Stealth Mode', 'freesiem-sentinel'), __('Stealth Mode', 'freesiem-sentinel'), 'manage_options', 'freesiem-stealth-mode', [$this, 'render_stealth_mode_page']);
+		add_submenu_page('', __('Logs', 'freesiem-sentinel'), __('Logs', 'freesiem-sentinel'), 'manage_options', 'freesiem-logs', [$this, 'render_logs_page']);
+		add_submenu_page('', __('Pending Tasks', 'freesiem-sentinel'), __('Pending Tasks', 'freesiem-sentinel'), 'read', 'freesiem-pending-tasks', [$this, 'render_pending_tasks_page']);
 		add_submenu_page('', __('Scan', 'freesiem-sentinel'), __('Scan', 'freesiem-sentinel'), 'manage_options', 'freesiem-scan', [$this, 'render_scan_page']);
 	}
 
@@ -162,6 +172,21 @@ class Freesiem_Admin
 	public function maybe_enqueue_synchy_assets(string $hook_suffix): void
 	{
 		$page = isset($_GET['page']) ? sanitize_key((string) wp_unslash($_GET['page'])) : '';
+
+		// Security and Activity reuse the same header/tab-nav CSS (freesiem-synchy-* classes) as
+		// Backup & Restore for their own colorful tab nav -- they just don't need
+		// synchy-runtime.php loaded, unlike the actual Backup & Restore page.
+		if (in_array($page, ['freesiem-security', 'freesiem-activity'], true)) {
+			$style_path = $this->get_synchy_asset_path('admin.css');
+			$style_url = $style_path !== '' ? $this->get_synchy_asset_url('admin.css') : '';
+
+			if ($style_path !== '' && $style_url !== '' && file_exists($style_path)) {
+				wp_enqueue_style('synchy-admin', $style_url, [], (string) filemtime($style_path));
+			}
+
+			return;
+		}
+
 		if ($page !== FREESIEM_SENTINEL_SYNCHY_PAGE || !function_exists('synchy_get_site_sync_options')) {
 			return;
 		}
@@ -1110,7 +1135,7 @@ class Freesiem_Admin
 		$filesystem = freesiem_sentinel_safe_array($inventory['filesystem'] ?? []);
 		$connection_ok = !empty($settings['site_id']) && !empty($settings['api_key']) && !empty($settings['hmac_secret']);
 		$show_results_url = $this->build_scan_url(['show_results' => '1']) . '#freesiem-results-section';
-		$remote_url = freesiem_sentinel_admin_page_url('freesiem-remote');
+		$remote_url = freesiem_sentinel_admin_page_url('freesiem-activity', ['section' => 'connection']);
 
 		echo '<div class="wrap">';
 		echo '<h1>' . esc_html__('Dashboard', 'freesiem-sentinel') . '</h1>';
@@ -1143,7 +1168,7 @@ class Freesiem_Admin
 		echo '<div style="display:flex;gap:12px;flex-wrap:wrap;">';
 		echo '<a class="button button-primary" style="padding:10px 18px;" href="' . esc_url(freesiem_sentinel_admin_page_url('freesiem-scan')) . '">' . esc_html__('Run Scan', 'freesiem-sentinel') . '</a>';
 		echo '<a class="button button-secondary" style="padding:10px 18px;" href="' . esc_url($show_results_url) . '">' . esc_html__('View Results', 'freesiem-sentinel') . '</a>';
-		echo '<a class="button button-secondary" style="padding:10px 18px;" href="' . esc_url($remote_url) . '">' . esc_html__('Cloud', 'freesiem-sentinel') . '</a>';
+		echo '<a class="button button-secondary" style="padding:10px 18px;" href="' . esc_url($remote_url) . '">' . esc_html__('Connection', 'freesiem-sentinel') . '</a>';
 		echo '</div>';
 		echo '</div>';
 
@@ -1342,6 +1367,130 @@ class Freesiem_Admin
 		synchy_render_page($this->get_synchy_legacy_page_slug($current_tab));
 		$html = (string) ob_get_clean();
 		echo $this->filter_synchy_rendered_page_html($html, $current_tab); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped
+	}
+
+	public function render_security_page(): void
+	{
+		$this->assert_manage_permissions();
+
+		$tabs = $this->get_security_tabs();
+		$current_tab = $this->get_security_current_tab();
+
+		echo '<div class="wrap">';
+		echo '<div class="freesiem-synchy-header">';
+		echo '<div class="freesiem-synchy-title"><span class="freesiem-synchy-title__mark" aria-hidden="true"></span><h1>' . esc_html__('Security', 'freesiem-sentinel') . '</h1></div>';
+		echo '<h2 class="nav-tab-wrapper freesiem-synchy-tabs">';
+		foreach ($tabs as $section => $config) {
+			$url = add_query_arg(['page' => 'freesiem-security', 'section' => $section], admin_url('admin.php'));
+			echo '<a class="nav-tab ' . esc_attr($section === $current_tab ? 'nav-tab-active' : '') . '" href="' . esc_url($url) . '">' . esc_html((string) $config['label']) . '</a>';
+		}
+		echo '</h2>';
+		echo '</div>';
+		echo '</div>';
+
+		// Each of these still fully self-contains its own <div class="wrap"> and permission
+		// check, exactly as it does when reached directly at its own (now hidden) menu slug --
+		// this wrapper only adds the shared header and tab nav above it as a sibling block.
+		switch ($current_tab) {
+			case 'tfa':
+				$this->render_tfa_page();
+				break;
+			case 'login-protection':
+				$this->render_login_protection_page();
+				break;
+			case 'stealth-mode':
+				$this->render_stealth_mode_page();
+				break;
+			default:
+				$this->render_ssl_page();
+				break;
+		}
+	}
+
+	private function get_security_tabs(): array
+	{
+		return [
+			'ssl' => ['label' => __('SSL / HTTPS', 'freesiem-sentinel')],
+			'tfa' => ['label' => __('TFA (2FA)', 'freesiem-sentinel')],
+			'login-protection' => ['label' => __('Login Protection', 'freesiem-sentinel')],
+			'stealth-mode' => ['label' => __('Stealth Mode', 'freesiem-sentinel')],
+		];
+	}
+
+	private function get_security_current_tab(): string
+	{
+		$section = isset($_GET['section']) ? sanitize_key((string) wp_unslash($_GET['section'])) : 'ssl';
+		$tabs = $this->get_security_tabs();
+
+		return isset($tabs[$section]) ? $section : 'ssl';
+	}
+
+	public function render_activity_page(): void
+	{
+		$can_manage = current_user_can('manage_options');
+		$can_approve = $this->plugin->get_pending_tasks()->current_user_can_approve_tasks();
+
+		if (!$can_manage && !$can_approve) {
+			wp_die(esc_html__('You are not allowed to view this page.', 'freesiem-sentinel'));
+		}
+
+		$tabs = $this->get_activity_tabs($can_manage, $can_approve);
+		$current_tab = $this->get_activity_current_tab($tabs);
+
+		echo '<div class="wrap">';
+		echo '<div class="freesiem-synchy-header">';
+		echo '<div class="freesiem-synchy-title"><span class="freesiem-synchy-title__mark" aria-hidden="true"></span><h1>' . esc_html__('Activity', 'freesiem-sentinel') . '</h1></div>';
+		echo '<h2 class="nav-tab-wrapper freesiem-synchy-tabs">';
+		foreach ($tabs as $section => $config) {
+			$url = add_query_arg(['page' => 'freesiem-activity', 'section' => $section], admin_url('admin.php'));
+			echo '<a class="nav-tab ' . esc_attr($section === $current_tab ? 'nav-tab-active' : '') . '" href="' . esc_url($url) . '">' . esc_html((string) $config['label']) . '</a>';
+		}
+		echo '</h2>';
+		echo '</div>';
+		echo '</div>';
+
+		switch ($current_tab) {
+			case 'logs':
+				$this->render_logs_page();
+				break;
+			case 'pending-tasks':
+				$this->render_pending_tasks_page();
+				break;
+			default:
+				$this->render_remote_page();
+				break;
+		}
+	}
+
+	private function get_activity_tabs(bool $can_manage, bool $can_approve): array
+	{
+		$tabs = [];
+
+		// Only offered to users who can actually open them -- keeps a non-admin task approver
+		// from seeing Connection/Logs tabs that would just reject them.
+		if ($can_manage) {
+			$tabs['connection'] = ['label' => __('Connection', 'freesiem-sentinel')];
+			$tabs['logs'] = ['label' => __('Logs', 'freesiem-sentinel')];
+		}
+
+		if ($can_approve) {
+			$tabs['pending-tasks'] = ['label' => __('Pending Tasks', 'freesiem-sentinel')];
+		}
+
+		return $tabs;
+	}
+
+	private function get_activity_current_tab(array $tabs): string
+	{
+		$section = isset($_GET['section']) ? sanitize_key((string) wp_unslash($_GET['section'])) : '';
+
+		if (isset($tabs[$section])) {
+			return $section;
+		}
+
+		$keys = array_keys($tabs);
+
+		return $keys[0] ?? 'connection';
 	}
 
 	public function render_stealth_mode_page(): void
@@ -1568,6 +1717,8 @@ class Freesiem_Admin
 
 	public function render_remote_page(): void
 	{
+		$this->assert_manage_permissions();
+
 		$settings = freesiem_sentinel_get_settings();
 		$state = (string) ($settings['connection_state'] ?? 'disconnected');
 		$is_connected = Freesiem_Cloud_Connect_State::is_connected($settings);
@@ -1777,7 +1928,7 @@ class Freesiem_Admin
 		} else {
 			echo '<table class="widefat striped"><thead><tr><th>' . esc_html__('Task ID', 'freesiem-sentinel') . '</th><th>' . esc_html__('Core Task ID', 'freesiem-sentinel') . '</th><th>' . esc_html__('Action', 'freesiem-sentinel') . '</th><th>' . esc_html__('Target', 'freesiem-sentinel') . '</th><th>' . esc_html__('Requested At', 'freesiem-sentinel') . '</th><th>' . esc_html__('Auto Approve At', 'freesiem-sentinel') . '</th><th>' . esc_html__('Status', 'freesiem-sentinel') . '</th><th>' . esc_html__('Source', 'freesiem-sentinel') . '</th><th>' . esc_html__('Actions', 'freesiem-sentinel') . '</th></tr></thead><tbody>';
 			foreach ($tasks as $row) {
-				$view_url = freesiem_sentinel_admin_page_url('freesiem-pending-tasks', ['task_id' => (string) ($row['id'] ?? 0)]);
+				$view_url = add_query_arg('task_id', (string) ($row['id'] ?? 0));
 				$approve_url = freesiem_sentinel_admin_post_url('freesiem_sentinel_approve_task', ['task_id' => (string) ($row['id'] ?? 0)]);
 				echo '<tr>';
 				echo '<td><a href="' . esc_url($view_url) . '">#' . esc_html((string) ($row['id'] ?? 0)) . '</a></td>';
@@ -1839,7 +1990,7 @@ class Freesiem_Admin
 			}
 
 			$state = $service->get_user_tfa_state((int) $user->ID);
-			$view_url = freesiem_sentinel_admin_page_url('freesiem-tfa', ['user_id' => (string) $user->ID]);
+			$view_url = add_query_arg('user_id', (string) $user->ID);
 			$enroll_url = freesiem_sentinel_admin_post_url('freesiem_sentinel_tfa_enroll', ['user_id' => (string) $user->ID]);
 			$reset_url = freesiem_sentinel_admin_post_url('freesiem_sentinel_tfa_reset', ['user_id' => (string) $user->ID]);
 			echo '<tr>';
@@ -1939,7 +2090,10 @@ class Freesiem_Admin
 			'dry-run' => __('Dry Run', 'freesiem-sentinel'),
 			'logs' => __('Logs', 'freesiem-sentinel'),
 		] as $slug => $label) {
-			$url = freesiem_sentinel_admin_page_url('freesiem-ssl', ['tab' => $slug]);
+			// add_query_arg() (no base URL) rewrites just ?tab= on the current request, so this
+			// keeps working whether SSL is reached at its own URL or nested under Security -- it
+			// naturally preserves page=freesiem-security&section=ssl instead of hardcoding page=freesiem-ssl.
+			$url = add_query_arg('tab', $slug);
 			$class = $tab === $slug ? 'nav-tab nav-tab-active' : 'nav-tab';
 			echo '<a class="' . esc_attr($class) . '" href="' . esc_url($url) . '">' . esc_html($label) . '</a>';
 		}
@@ -2614,7 +2768,7 @@ class Freesiem_Admin
 	{
 		$service = $this->plugin->get_pending_tasks();
 		$events = $service->get_task_events((int) ($task['id'] ?? 0));
-		$back_url = freesiem_sentinel_admin_page_url('freesiem-pending-tasks');
+		$back_url = remove_query_arg('task_id');
 		$approve_url = freesiem_sentinel_admin_post_url('freesiem_sentinel_approve_task', ['task_id' => (string) ($task['id'] ?? 0)]);
 		$deny_url = admin_url('admin-post.php');
 		$payload = is_array($task['payload'] ?? null) ? $task['payload'] : [];
@@ -2830,7 +2984,7 @@ class Freesiem_Admin
 		echo '<div style="background:#fff;padding:18px;border:1px solid #dcdcde;border-radius:12px;">';
 		echo '<h2 style="margin-top:0;">' . esc_html__('Logs / Diagnostics', 'freesiem-sentinel') . '</h2>';
 		echo '<p style="margin:0 0 12px 0;color:#646970;">' . esc_html__('Preflight detail, dry-run output, nginx parsing detail, and raw command traces now live in the Logs tab to keep Overview clean.', 'freesiem-sentinel') . '</p>';
-		echo '<p style="margin:0;"><a class="button button-secondary" href="' . esc_url(freesiem_sentinel_admin_page_url('freesiem-ssl', ['tab' => 'logs'])) . '">' . esc_html__('Open Logs / Diagnostics', 'freesiem-sentinel') . '</a></p>';
+		echo '<p style="margin:0;"><a class="button button-secondary" href="' . esc_url(add_query_arg('tab', 'logs')) . '">' . esc_html__('Open Logs / Diagnostics', 'freesiem-sentinel') . '</a></p>';
 		echo '</div>';
 		echo '</div>';
 	}

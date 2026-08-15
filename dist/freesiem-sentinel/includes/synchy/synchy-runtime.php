@@ -10738,23 +10738,17 @@ function synchy_render_import_column(): void
 
 			<div class="synchy-panel synchy-panel--muted">
 				<h2><?php esc_html_e('Upload Package Files', 'synchy'); ?></h2>
-				<div class="synchy-field">
+				<div class="synchy-field synchy-field-label-row">
 					<label class="synchy-label" for="synchy-import-installer"><?php esc_html_e('installer.php (Required)', 'synchy'); ?></label>
 					<input id="synchy-import-installer" type="file" name="synchy_import_installer" accept=".php,application/x-httpd-php,text/x-php" required />
-					<p class="synchy-field-note">
-					<?php esc_html_e('Choose installer.php from the same export package. Export stages it as installer.php and tries to place it in the WordPress root first.', 'synchy'); ?>
-					</p>
 				</div>
 
-				<div class="synchy-field">
+				<div class="synchy-field synchy-field-label-row">
 					<label class="synchy-label" for="synchy-import-archive"><?php esc_html_e('Package Zip (Optional)', 'synchy'); ?></label>
 					<input id="synchy-import-archive" type="file" name="synchy_import_archive" accept=".zip,application/zip" />
-					<p class="synchy-field-note">
-						<?php esc_html_e('Leave this empty if you only want to test where installer.php ends up. Add the matching zip when you are ready for a full restore package placement.', 'synchy'); ?>
-					</p>
 				</div>
 
-				<div class="synchy-export-meta synchy-export-meta--wide">
+				<div class="synchy-export-meta synchy-export-meta--wide synchy-export-meta--row">
 					<div>
 						<span class="synchy-export-meta__label"><?php esc_html_e('WordPress Root', 'synchy'); ?></span>
 						<strong class="synchy-text-break"><?php echo esc_html($root_path); ?></strong>
@@ -10797,7 +10791,7 @@ function synchy_render_import_column(): void
 					<span class="synchy-badge"><?php echo esc_html($badge); ?></span>
 				</div>
 				<p class="synchy-field-note"><?php echo esc_html($message); ?></p>
-				<div class="synchy-export-meta synchy-export-meta--wide">
+				<div class="synchy-export-meta synchy-export-meta--wide synchy-export-meta--row">
 					<div>
 						<span class="synchy-export-meta__label"><?php esc_html_e('Root Deploy Status', 'synchy'); ?></span>
 						<strong><?php echo esc_html($status !== '' ? $status : __('Waiting for upload', 'synchy')); ?></strong>
@@ -11603,10 +11597,7 @@ function synchy_render_export_column(
 			<?php settings_fields('synchy_export'); ?>
 
 			<div class="synchy-panel">
-				<h2><?php esc_html_e('Default Exclude Filters', 'synchy'); ?></h2>
-				<p class="synchy-field-note">
-					<?php esc_html_e('These filters define what Synchy should leave out of a full export by default. Your selected export destination is also excluded automatically at runtime.', 'synchy'); ?>
-				</p>
+				<h2><?php esc_html_e('Exclude Filters', 'synchy'); ?></h2>
 
 				<ol class="synchy-filter-numbered-list">
 					<?php foreach ($groups as $key => $group) : ?>
@@ -11668,9 +11659,6 @@ function synchy_render_export_column(
 						<button type="button" class="button" data-synchy-browse><?php esc_html_e('Browse', 'synchy'); ?></button>
 						<button type="button" class="button" data-synchy-use-default data-default-path="<?php echo esc_attr(synchy_get_default_output_directory()); ?>"><?php esc_html_e('Default', 'synchy'); ?></button>
 					</div>
-					<p class="synchy-field-note">
-						<?php esc_html_e('Relative paths resolve from the WordPress root. The browser only lists folders inside this site.', 'synchy'); ?>
-					</p>
 				</div>
 
 				<div class="synchy-field">
@@ -11684,15 +11672,6 @@ function synchy_render_export_column(
 						placeholder="<?php echo esc_attr($default_package_name); ?>"
 						data-synchy-package-name
 					/>
-					<p class="synchy-field-note">
-						<?php
-						printf(
-							/* translators: %s: default package name */
-							esc_html__('Leave this blank to use %s. Synchy adds the same base name to the zip, installer, and manifest files.', 'synchy'),
-							esc_html($default_package_name)
-						);
-						?>
-					</p>
 				</div>
 
 				<div class="synchy-package">

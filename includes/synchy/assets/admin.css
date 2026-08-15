@@ -424,9 +424,10 @@
 
 .synchy-field-label-row {
 	display: flex;
+	flex-wrap: wrap;
 	align-items: center;
 	justify-content: space-between;
-	gap: 12px;
+	gap: 8px 12px;
 	margin-bottom: 8px;
 }
 
@@ -797,6 +798,25 @@
 
 .synchy-export-meta span {
 	color: #426067;
+}
+
+/* Row variant -- label on the left, value on the right of the same line instead of stacked. */
+.synchy-export-meta--row div {
+	display: flex;
+	align-items: baseline;
+	justify-content: space-between;
+	gap: 12px;
+}
+
+.synchy-export-meta--row .synchy-export-meta__label {
+	flex-shrink: 0;
+}
+
+.synchy-export-meta--row strong {
+	flex: 1 1 auto;
+	min-width: 0;
+	margin-bottom: 0;
+	text-align: right;
 }
 
 .synchy-text-break {
