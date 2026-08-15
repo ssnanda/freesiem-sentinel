@@ -10767,9 +10767,9 @@ function synchy_render_import_column(): void
 					</div>
 				</div>
 
-				<div class="synchy-stage-status">
+				<div class="synchy-stage-status synchy-stage-status--compact">
 					<p class="synchy-stage-status__label"><?php esc_html_e('Import Stage Status', 'synchy'); ?></p>
-					<div class="synchy-export-stages">
+					<div class="synchy-export-stages synchy-export-stages--inline">
 						<?php foreach ($stages as $stage) : ?>
 							<div class="synchy-export-stage is-<?php echo esc_attr((string) $stage['state']); ?>">
 								<span class="synchy-export-stage__indicator" aria-hidden="true"></span>
@@ -11572,6 +11572,44 @@ function synchy_render_export_column(
 			<button type="button" class="button button-primary button-large" data-synchy-run-export><?php esc_html_e('Run Full Export', 'synchy'); ?></button>
 		</div>
 
+		<div class="synchy-progress<?php echo $running_job === [] ? ' is-hidden' : ''; ?>" data-synchy-progress>
+			<div class="synchy-progress__top">
+				<strong data-synchy-progress-phase><?php echo esc_html(synchy_export_phase_label((string) ($running_job['phase'] ?? 'queued'))); ?></strong>
+				<span data-synchy-progress-percent><?php echo esc_html((string) (int) ($running_job['progress'] ?? 0)); ?>%</span>
+			</div>
+			<div class="synchy-progress__bar">
+				<span data-synchy-progress-bar style="width: <?php echo esc_attr((string) (int) ($running_job['progress'] ?? 0)); ?>%;"></span>
+			</div>
+			<p class="synchy-progress__message" data-synchy-progress-message><?php echo esc_html((string) ($running_job['message'] ?? '')); ?></p>
+			<p class="synchy-progress__detail" data-synchy-progress-detail>
+				<?php
+				if ($running_job !== []) {
+					printf(
+						/* translators: 1: current file count, 2: total file count */
+						esc_html__('Files processed: %1$s / %2$s', 'synchy'),
+						esc_html(number_format_i18n((int) ($running_job['cursor'] ?? 0))),
+						esc_html(number_format_i18n((int) ($running_job['file_count'] ?? 0)))
+					);
+				}
+				?>
+			</p>
+
+			<div class="synchy-stage-status synchy-stage-status--compact">
+				<p class="synchy-stage-status__label"><?php esc_html_e('Export Stage Status', 'synchy'); ?></p>
+				<div class="synchy-export-stages synchy-export-stages--inline" data-synchy-export-stages>
+					<?php foreach (synchy_get_export_stage_items($running_job) as $stage) : ?>
+						<div class="synchy-export-stage is-<?php echo esc_attr((string) $stage['state']); ?>">
+							<span class="synchy-export-stage__indicator" aria-hidden="true"></span>
+							<div class="synchy-export-stage__content">
+								<strong><?php echo esc_html((string) $stage['label']); ?></strong>
+								<span><?php echo esc_html((string) $stage['description']); ?></span>
+							</div>
+						</div>
+					<?php endforeach; ?>
+				</div>
+			</div>
+		</div>
+
 		<div class="synchy-hero-notify synchy-hero-notify--inline">
 			<label class="synchy-sync-scope-toggle">
 				<input
@@ -11597,8 +11635,12 @@ function synchy_render_export_column(
 			<?php settings_fields('synchy_export'); ?>
 
 			<div class="synchy-panel">
-				<h2><?php esc_html_e('Exclude Filters', 'synchy'); ?></h2>
+				<div class="synchy-panel__header-row">
+					<h2><?php esc_html_e('Export Settings', 'synchy'); ?></h2>
+					<button type="submit" class="button button-primary"><?php esc_html_e('Save Export Settings', 'synchy'); ?></button>
+				</div>
 
+				<h3><?php esc_html_e('Exclude Filters', 'synchy'); ?></h3>
 				<ol class="synchy-filter-numbered-list">
 					<?php foreach ($groups as $key => $group) : ?>
 						<li>
@@ -11641,37 +11683,37 @@ function synchy_render_export_column(
 						><?php echo esc_textarea((string) $options['custom_excludes']); ?></textarea>
 					</div>
 				</details>
-			</div>
 
-			<div class="synchy-panel synchy-panel--muted">
-				<h2><?php esc_html_e('Package Output', 'synchy'); ?></h2>
-				<div class="synchy-field">
-					<label class="synchy-label" for="synchy-output-directory"><?php esc_html_e('Save path', 'synchy'); ?></label>
-					<div class="synchy-input-row">
-						<input
-							id="synchy-output-directory"
-							type="text"
-							class="regular-text code"
-							name="<?php echo esc_attr(SYNCHY_EXPORT_OPTIONS); ?>[output_directory]"
-							value="<?php echo esc_attr((string) $options['output_directory']); ?>"
-							data-synchy-output-directory
-						/>
-						<button type="button" class="button" data-synchy-browse><?php esc_html_e('Browse', 'synchy'); ?></button>
-						<button type="button" class="button" data-synchy-use-default data-default-path="<?php echo esc_attr(synchy_get_default_output_directory()); ?>"><?php esc_html_e('Default', 'synchy'); ?></button>
+				<h3><?php esc_html_e('Package Output', 'synchy'); ?></h3>
+				<div class="synchy-field-grid">
+					<div class="synchy-field">
+						<label class="synchy-label" for="synchy-output-directory"><?php esc_html_e('Save path', 'synchy'); ?></label>
+						<div class="synchy-input-row">
+							<input
+								id="synchy-output-directory"
+								type="text"
+								class="regular-text code"
+								name="<?php echo esc_attr(SYNCHY_EXPORT_OPTIONS); ?>[output_directory]"
+								value="<?php echo esc_attr((string) $options['output_directory']); ?>"
+								data-synchy-output-directory
+							/>
+							<button type="button" class="button" data-synchy-browse><?php esc_html_e('Browse', 'synchy'); ?></button>
+							<button type="button" class="button" data-synchy-use-default data-default-path="<?php echo esc_attr(synchy_get_default_output_directory()); ?>"><?php esc_html_e('Default', 'synchy'); ?></button>
+						</div>
 					</div>
-				</div>
 
-				<div class="synchy-field">
-					<label class="synchy-label" for="synchy-package-name"><?php esc_html_e('Package name', 'synchy'); ?></label>
-					<input
-						id="synchy-package-name"
-						type="text"
-						class="regular-text"
-						name="<?php echo esc_attr(SYNCHY_EXPORT_OPTIONS); ?>[package_name]"
-						value="<?php echo esc_attr((string) $options['package_name']); ?>"
-						placeholder="<?php echo esc_attr($default_package_name); ?>"
-						data-synchy-package-name
-					/>
+					<div class="synchy-field">
+						<label class="synchy-label" for="synchy-package-name"><?php esc_html_e('Package name', 'synchy'); ?></label>
+						<input
+							id="synchy-package-name"
+							type="text"
+							class="regular-text"
+							name="<?php echo esc_attr(SYNCHY_EXPORT_OPTIONS); ?>[package_name]"
+							value="<?php echo esc_attr((string) $options['package_name']); ?>"
+							placeholder="<?php echo esc_attr($default_package_name); ?>"
+							data-synchy-package-name
+						/>
+					</div>
 				</div>
 
 				<div class="synchy-package">
@@ -11679,54 +11721,11 @@ function synchy_render_export_column(
 					<div><code data-synchy-installer-preview><?php echo esc_html($installer_preview); ?></code></div>
 					<div><code data-synchy-manifest-preview><?php echo esc_html($manifest_preview); ?></code></div>
 				</div>
-
-				<div class="synchy-progress<?php echo $running_job === [] ? ' is-hidden' : ''; ?>" data-synchy-progress>
-					<div class="synchy-progress__top">
-						<strong data-synchy-progress-phase><?php echo esc_html(synchy_export_phase_label((string) ($running_job['phase'] ?? 'queued'))); ?></strong>
-						<span data-synchy-progress-percent><?php echo esc_html((string) (int) ($running_job['progress'] ?? 0)); ?>%</span>
-					</div>
-					<div class="synchy-progress__bar">
-						<span data-synchy-progress-bar style="width: <?php echo esc_attr((string) (int) ($running_job['progress'] ?? 0)); ?>%;"></span>
-					</div>
-					<p class="synchy-progress__message" data-synchy-progress-message><?php echo esc_html((string) ($running_job['message'] ?? '')); ?></p>
-					<p class="synchy-progress__detail" data-synchy-progress-detail>
-						<?php
-						if ($running_job !== []) {
-							printf(
-								/* translators: 1: current file count, 2: total file count */
-								esc_html__('Files processed: %1$s / %2$s', 'synchy'),
-								esc_html(number_format_i18n((int) ($running_job['cursor'] ?? 0))),
-								esc_html(number_format_i18n((int) ($running_job['file_count'] ?? 0)))
-							);
-						}
-						?>
-					</p>
-				</div>
-
-				<div class="synchy-stage-status">
-					<p class="synchy-stage-status__label"><?php esc_html_e('Export Stage Status', 'synchy'); ?></p>
-					<div class="synchy-export-stages" data-synchy-export-stages>
-						<?php foreach (synchy_get_export_stage_items($running_job) as $stage) : ?>
-							<div class="synchy-export-stage is-<?php echo esc_attr((string) $stage['state']); ?>">
-								<span class="synchy-export-stage__indicator" aria-hidden="true"></span>
-								<div class="synchy-export-stage__content">
-									<strong><?php echo esc_html((string) $stage['label']); ?></strong>
-									<span><?php echo esc_html((string) $stage['description']); ?></span>
-								</div>
-							</div>
-						<?php endforeach; ?>
-					</div>
-				</div>
 			</div>
-
-			<p class="submit">
-				<button type="submit" class="button button-primary"><?php esc_html_e('Save Export Settings', 'synchy'); ?></button>
-			</p>
 		</form>
 	</div>
 	<?php
 }
-
 function synchy_render_export_import_page(array $current): void
 {
 	$options = synchy_get_export_options();
