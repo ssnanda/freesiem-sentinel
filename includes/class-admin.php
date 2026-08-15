@@ -95,7 +95,7 @@ class Freesiem_Admin
 		// "Operations" bundles Connection (was "Cloud"), Logs, and Pending Tasks -- registered at
 		// the lowest capability among its tabs ('read') so a non-admin allowed to approve tasks
 		// still sees the menu item; render_activity_page() gates each tab's real content itself.
-		add_submenu_page('freesiem-portal', __('Operations', 'freesiem-sentinel'), __('Operations', 'freesiem-sentinel'), 'read', 'freesiem-activity', [$this, 'render_activity_page']);
+		add_submenu_page('freesiem-portal', __('Core-Ops', 'freesiem-sentinel'), __('Core-Ops', 'freesiem-sentinel'), 'read', 'freesiem-activity', [$this, 'render_activity_page']);
 		// "Security" bundles SSL/HTTPS, TFA, Login Protection, and Stealth Mode.
 		add_submenu_page('freesiem-portal', __('Security', 'freesiem-sentinel'), __('Security', 'freesiem-sentinel'), 'manage_options', 'freesiem-security', [$this, 'render_security_page']);
 		add_submenu_page('freesiem-portal', __('Synchy', 'freesiem-sentinel'), __('Synchy', 'freesiem-sentinel'), 'manage_options', FREESIEM_SENTINEL_SYNCHY_PAGE, [$this, 'render_synchy_page']);
@@ -1486,7 +1486,7 @@ class Freesiem_Admin
 
 		echo '<div class="wrap">';
 		echo '<div class="freesiem-synchy-header">';
-		echo '<div class="freesiem-synchy-title"><span class="freesiem-synchy-title__mark" aria-hidden="true"></span><h1>' . esc_html__('Operations', 'freesiem-sentinel') . '</h1></div>';
+		echo '<div class="freesiem-synchy-title"><span class="freesiem-synchy-title__mark" aria-hidden="true"></span><h1>' . esc_html__('Core-Ops', 'freesiem-sentinel') . '</h1></div>';
 		echo '<h2 class="nav-tab-wrapper freesiem-synchy-tabs">';
 		foreach ($tabs as $section => $config) {
 			$url = add_query_arg(['page' => 'freesiem-activity', 'section' => $section], admin_url('admin.php'));
