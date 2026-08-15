@@ -92,13 +92,13 @@ class Freesiem_Admin
 		);
 
 		add_submenu_page('freesiem-portal', __('Dashboard', 'freesiem-sentinel'), __('Dashboard', 'freesiem-sentinel'), 'manage_options', 'freesiem-portal', [$this, 'render_dashboard_page']);
-		// "Activity" bundles Connection (was "Cloud"), Logs, and Pending Tasks -- registered at
+		// "Operations" bundles Connection (was "Cloud"), Logs, and Pending Tasks -- registered at
 		// the lowest capability among its tabs ('read') so a non-admin allowed to approve tasks
 		// still sees the menu item; render_activity_page() gates each tab's real content itself.
-		add_submenu_page('freesiem-portal', __('Activity', 'freesiem-sentinel'), __('Activity', 'freesiem-sentinel'), 'read', 'freesiem-activity', [$this, 'render_activity_page']);
+		add_submenu_page('freesiem-portal', __('Operations', 'freesiem-sentinel'), __('Operations', 'freesiem-sentinel'), 'read', 'freesiem-activity', [$this, 'render_activity_page']);
 		// "Security" bundles SSL/HTTPS, TFA, Login Protection, and Stealth Mode.
 		add_submenu_page('freesiem-portal', __('Security', 'freesiem-sentinel'), __('Security', 'freesiem-sentinel'), 'manage_options', 'freesiem-security', [$this, 'render_security_page']);
-		add_submenu_page('freesiem-portal', __('Backup & Restore', 'freesiem-sentinel'), __('Backup & Restore', 'freesiem-sentinel'), 'manage_options', FREESIEM_SENTINEL_SYNCHY_PAGE, [$this, 'render_synchy_page']);
+		add_submenu_page('freesiem-portal', __('Synchy', 'freesiem-sentinel'), __('Synchy', 'freesiem-sentinel'), 'manage_options', FREESIEM_SENTINEL_SYNCHY_PAGE, [$this, 'render_synchy_page']);
 		add_submenu_page('freesiem-portal', __('Settings', 'freesiem-sentinel'), __('Settings', 'freesiem-sentinel'), 'manage_options', 'freesiem-settings', [$this, 'render_settings_page']);
 
 		// Kept registered but off the visible menu (same pattern as Scan below) -- every existing
@@ -264,7 +264,7 @@ class Freesiem_Admin
 							'connectionReady' => __('Connection ready', 'synchy'),
 							'connectionError' => __('Connection failed', 'synchy'),
 							'pushAction' => __('Upload to Live', 'synchy'),
-							'unknownError' => __('Backup & Restore hit an unexpected live push error.', 'synchy'),
+							'unknownError' => __('Synchy hit an unexpected live push error.', 'synchy'),
 						],
 					]
 				);
@@ -353,7 +353,7 @@ class Freesiem_Admin
 							'never' => __('Never', 'synchy'),
 							'na' => __('N/A', 'synchy'),
 							'previewDefault' => __('Run Preview to review changed files and database rows before syncing.', 'synchy'),
-							'unknownError' => __('Backup & Restore hit an unexpected Sync error.', 'synchy'),
+							'unknownError' => __('Synchy hit an unexpected Sync error.', 'synchy'),
 							'confirmSync' => __('Sync the previewed changes to the destination site now?', 'synchy'),
 							'confirmFullSync' => __('Run a full Sync for the selected scopes and send all tracked files and rows to the destination site now?', 'synchy'),
 							'confirmResumeSync' => __('Resume the remaining full Sync batches now?', 'synchy'),
@@ -398,7 +398,7 @@ class Freesiem_Admin
 					'defaultStages' => synchy_get_export_stage_items([]),
 					'strings' => [
 						'filesProcessed' => __('Files processed:', 'synchy'),
-						'unknownError' => __('Backup & Restore hit an unexpected error while exporting.', 'synchy'),
+						'unknownError' => __('Synchy hit an unexpected error while exporting.', 'synchy'),
 						'preparingLabel' => __('Preparing', 'synchy'),
 						'startingExport' => __('Starting export job...', 'synchy'),
 						'errorPhaseLabel' => __('Error', 'synchy'),
@@ -1383,8 +1383,8 @@ class Freesiem_Admin
 
 		if (!function_exists('synchy_render_page')) {
 			echo '<div class="wrap">';
-			echo '<h1>' . esc_html__('Backup & Restore', 'freesiem-sentinel') . '</h1>';
-			echo '<p>' . esc_html__('The bundled Backup & Restore runtime is not available.', 'freesiem-sentinel') . '</p>';
+			echo '<h1>' . esc_html__('Synchy', 'freesiem-sentinel') . '</h1>';
+			echo '<p>' . esc_html__('The bundled Synchy runtime is not available.', 'freesiem-sentinel') . '</p>';
 			echo '</div>';
 			return;
 		}
@@ -1394,7 +1394,7 @@ class Freesiem_Admin
 
 		echo '<div class="wrap">';
 		echo '<div class="freesiem-synchy-header">';
-		echo '<div class="freesiem-synchy-title"><span class="freesiem-synchy-title__mark" aria-hidden="true"></span><h1>' . esc_html__('Backup & Restore', 'freesiem-sentinel') . '</h1></div>';
+		echo '<div class="freesiem-synchy-title"><span class="freesiem-synchy-title__mark" aria-hidden="true"></span><h1>' . esc_html__('Synchy', 'freesiem-sentinel') . '</h1></div>';
 		echo '<h2 class="nav-tab-wrapper freesiem-synchy-tabs">';
 		foreach ($tabs as $tab => $config) {
 			$url = add_query_arg(
@@ -1486,7 +1486,7 @@ class Freesiem_Admin
 
 		echo '<div class="wrap">';
 		echo '<div class="freesiem-synchy-header">';
-		echo '<div class="freesiem-synchy-title"><span class="freesiem-synchy-title__mark" aria-hidden="true"></span><h1>' . esc_html__('Activity', 'freesiem-sentinel') . '</h1></div>';
+		echo '<div class="freesiem-synchy-title"><span class="freesiem-synchy-title__mark" aria-hidden="true"></span><h1>' . esc_html__('Operations', 'freesiem-sentinel') . '</h1></div>';
 		echo '<h2 class="nav-tab-wrapper freesiem-synchy-tabs">';
 		foreach ($tabs as $section => $config) {
 			$url = add_query_arg(['page' => 'freesiem-activity', 'section' => $section], admin_url('admin.php'));
@@ -2287,7 +2287,7 @@ class Freesiem_Admin
 		echo '<div style="background:#fff;padding:20px;border:1px solid #dcdcde;border-radius:12px;margin-top:20px;">';
 		echo '<h2 style="margin-top:0;">' . esc_html__('Included Capabilities', 'freesiem-sentinel') . '</h2>';
 		echo '<p>' . esc_html__('freeSIEM Sentinel includes backup, restore, sync, and related site-management workflows under the single freeSIEM menu.', 'freesiem-sentinel') . '</p>';
-		echo '<p><a class="button button-secondary" href="' . esc_url(freesiem_sentinel_admin_page_url(FREESIEM_SENTINEL_SYNCHY_PAGE)) . '">' . esc_html__('Open Backup & Restore', 'freesiem-sentinel') . '</a></p>';
+		echo '<p><a class="button button-secondary" href="' . esc_url(freesiem_sentinel_admin_page_url(FREESIEM_SENTINEL_SYNCHY_PAGE)) . '">' . esc_html__('Open Synchy', 'freesiem-sentinel') . '</a></p>';
 		echo '</div>';
 
 		echo '<div style="background:#fff;padding:20px;border:1px solid #dcdcde;border-radius:12px;margin-top:20px;">';
