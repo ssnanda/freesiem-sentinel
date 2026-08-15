@@ -1325,6 +1325,63 @@
 	margin: 0 0 4px;
 }
 
+.synchy-push-confirm-table {
+	margin-bottom: 14px;
+}
+
+.synchy-push-confirm-table h4 {
+	margin: 0 0 8px;
+	color: #12323b;
+	font-size: 13px;
+	font-weight: 700;
+	font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.synchy-push-confirm-row {
+	margin-bottom: 10px;
+	padding: 10px 12px;
+	border: 1px solid #e3e9e5;
+	border-radius: 10px;
+	background: #ffffff;
+}
+
+.synchy-push-confirm-row__key {
+	margin: 0 0 8px !important;
+	color: #1f8f5f !important;
+	font-size: 12px !important;
+	font-weight: 700 !important;
+	font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.synchy-push-confirm-row__field {
+	margin-bottom: 6px;
+}
+
+.synchy-push-confirm-row__field:last-child {
+	margin-bottom: 0;
+}
+
+.synchy-push-confirm-row__field strong {
+	display: block;
+	margin-bottom: 2px;
+	color: #12323b;
+	font-size: 12px;
+}
+
+.synchy-push-confirm-row__field pre {
+	margin: 0;
+	max-height: 220px;
+	padding: 8px 10px;
+	overflow: auto;
+	border-radius: 8px;
+	background: #f4f8f4;
+	color: #204049;
+	font-size: 12px;
+	line-height: 1.5;
+	white-space: pre-wrap;
+	word-break: break-word;
+}
+
 .synchy-directory-list {
 	display: grid;
 	gap: 10px;

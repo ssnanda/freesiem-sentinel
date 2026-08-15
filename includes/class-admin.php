@@ -305,6 +305,8 @@ class Freesiem_Admin
 							'pushChanges' => __('Push', 'synchy'),
 							'confirmSyncTitle' => __('Push changes?', 'synchy'),
 							'confirmFullSyncTitle' => __('Run Full Sync?', 'synchy'),
+							'loadingRows' => __('Loading row content...', 'synchy'),
+							'noPendingRows' => __('Nothing to show -- no database rows are pending.', 'synchy'),
 							'fullSync' => __('Full Sync', 'synchy'),
 							'pauseSync' => __('Pause Sync', 'synchy'),
 							'resumeSync' => __('Resume Sync', 'synchy'),

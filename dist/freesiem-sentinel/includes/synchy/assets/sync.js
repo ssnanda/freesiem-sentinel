@@ -51,6 +51,8 @@
 	const pushConfirmDetails = document.querySelector("[data-synchy-push-confirm-details]");
 	const pushConfirmOkButton = document.querySelector("[data-synchy-push-confirm-ok]");
 	const pushConfirmCancelButtons = Array.from(document.querySelectorAll("[data-synchy-push-confirm-cancel]"));
+	const pushConfirmRowsToggle = document.querySelector("[data-synchy-push-confirm-rows-toggle]");
+	const pushConfirmRowsContainer = document.querySelector("[data-synchy-push-confirm-rows]");
 
 	if (
 		!form ||
@@ -1661,6 +1663,66 @@
 		}
 	};
 
+	// Rows are only fetched when the "View database row content" disclosure is actually opened
+	// (never eagerly) -- pendingRowsSyncMode carries which run mode to ask the backend for, and
+	// pendingRowsLoaded/pendingRowsLoading guard against re-fetching an already-open section or
+	// firing a second request while the first is still in flight.
+	let pendingRowsSyncMode = "delta";
+	let pendingRowsLoaded = false;
+	let pendingRowsLoading = false;
+
+	const renderPushConfirmRows = (data) => {
+		if (!pushConfirmRowsContainer) {
+			return;
+		}
+
+		const tables = Array.isArray(data?.tables) ? data.tables : [];
+
+		if (tables.length === 0) {
+			pushConfirmRowsContainer.innerHTML = `<p class="synchy-field-note">${escapeHtml(config.strings.noPendingRows || "Nothing to show -- no database rows are pending.")}</p>`;
+			return;
+		}
+
+		pushConfirmRowsContainer.innerHTML = tables
+			.map((tableEntry) => {
+				const rows = Array.isArray(tableEntry.rows) ? tableEntry.rows : [];
+				const rowsHtml = rows
+					.map((row) => {
+						const fields = Array.isArray(row.fields) ? row.fields : [];
+						const fieldsHtml = fields
+							.map((field) => `<div class="synchy-push-confirm-row__field"><strong>${escapeHtml(field.column || "")}</strong><pre>${escapeHtml(field.value || "")}</pre></div>`)
+							.join("");
+
+						return `<div class="synchy-push-confirm-row"><p class="synchy-push-confirm-row__key">${escapeHtml(row.key || "")}</p>${fieldsHtml}</div>`;
+					})
+					.join("");
+
+				return `<div class="synchy-push-confirm-table"><h4>${escapeHtml(tableEntry.table || "")}</h4>${rowsHtml}</div>`;
+			})
+			.join("");
+	};
+
+	const loadPushConfirmRows = async () => {
+		if (pendingRowsLoaded || pendingRowsLoading || !pushConfirmRowsContainer) {
+			return;
+		}
+
+		pendingRowsLoading = true;
+		pushConfirmRowsContainer.innerHTML = `<p class="synchy-field-note">${escapeHtml(config.strings.loadingRows || "Loading row content...")}</p>`;
+
+		try {
+			const data = await sendAjax("synchy_inspect_sync_pending_rows", {
+				synchy_sync_run_mode: pendingRowsSyncMode,
+			});
+			renderPushConfirmRows(data);
+			pendingRowsLoaded = true;
+		} catch (error) {
+			pushConfirmRowsContainer.innerHTML = `<p class="synchy-field-note">${escapeHtml(error.message || (config.strings.unknownError || "Backup & Restore hit an unexpected Sync error."))}</p>`;
+		} finally {
+			pendingRowsLoading = false;
+		}
+	};
+
 	const requestPushConfirmation = (details) => {
 		if (!pushConfirmModal || !pushConfirmSummary || !pushConfirmDetails) {
 			return Promise.resolve(window.confirm(details.introMessage));
@@ -1679,6 +1741,16 @@
 		pushConfirmDetails.innerHTML = details.detailLines
 			.map((line) => `<p>${escapeHtml(line)}</p>`)
 			.join("");
+
+		pendingRowsSyncMode = details.isFullSync ? "full" : "delta";
+		pendingRowsLoaded = false;
+		pendingRowsLoading = false;
+		if (pushConfirmRowsContainer) {
+			pushConfirmRowsContainer.innerHTML = "";
+		}
+		if (pushConfirmRowsToggle) {
+			pushConfirmRowsToggle.open = false;
+		}
 
 		pushConfirmModal.classList.remove("is-hidden");
 		pushConfirmModal.setAttribute("aria-hidden", "false");
@@ -1722,6 +1794,7 @@
 		const confirmed = await requestPushConfirmation({
 			title: isFullSync ? (config.strings.confirmFullSyncTitle || "Run Full Sync?") : (config.strings.confirmSyncTitle || "Push changes?"),
 			okLabel: isFullSync ? (config.strings.startFullSync || "Run Full Sync") : (config.strings.pushChanges || "Push"),
+			isFullSync,
 			introMessage,
 			summaryItems,
 			detailLines: [
@@ -2259,6 +2332,13 @@
 				closePushConfirmModal(false);
 			}
 		});
+		if (pushConfirmRowsToggle) {
+			pushConfirmRowsToggle.addEventListener("toggle", () => {
+				if (pushConfirmRowsToggle.open) {
+					loadPushConfirmRows();
+				}
+			});
+		}
 	}
 
 	updateTargetNote();

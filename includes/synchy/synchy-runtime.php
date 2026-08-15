@@ -4096,6 +4096,77 @@ function synchy_build_sync_database_delta(array $state, array $selected_scope_id
 	];
 }
 
+/**
+ * Human-readable rendering of one column's value for the "view pending DB rows" preview --
+ * unserializes arrays/objects (option_value, meta_value, etc. are frequently serialized PHP)
+ * and pretty-prints them, and caps length so one huge value (post_content, a big option) can't
+ * blow up the preview response or the modal it's rendered into.
+ */
+function synchy_format_sync_row_value_preview($value): string
+{
+	$decoded = is_string($value) ? maybe_unserialize($value) : $value;
+
+	if (is_array($decoded) || is_object($decoded)) {
+		$encoded = wp_json_encode($decoded, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
+		$formatted = is_string($encoded) ? $encoded : print_r($decoded, true);
+	} else {
+		$formatted = (string) $decoded;
+	}
+
+	if (strlen($formatted) > 2000) {
+		$formatted = substr($formatted, 0, 2000) . "\n... (truncated)";
+	}
+
+	return $formatted;
+}
+
+/**
+ * Turns the 'tables' portion of a db_delta (synchy_build_sync_database_delta()) into a plain,
+ * JSON-friendly structure the "view pending DB rows" modal can render directly -- one entry per
+ * table, one entry per row, one entry per column. Only ever called on demand (a dedicated AJAX
+ * action), never as part of the regular preview, since formatting every pending row can be slow
+ * on a large delta.
+ */
+function synchy_build_sync_pending_rows_preview(array $tables): array
+{
+	$preview = [];
+
+	foreach ($tables as $table => $data) {
+		$key_columns = (array) ($data['key_columns'] ?? []);
+		$rows = (array) ($data['rows'] ?? []);
+		$table_rows = [];
+
+		foreach ($rows as $row) {
+			if (!is_array($row)) {
+				continue;
+			}
+
+			$fields = [];
+
+			foreach ($row as $column => $value) {
+				$fields[] = [
+					'column' => (string) $column,
+					'value' => synchy_format_sync_row_value_preview($value),
+				];
+			}
+
+			$table_rows[] = [
+				'key' => synchy_get_sync_row_key($row, $key_columns),
+				'fields' => $fields,
+			];
+		}
+
+		if ($table_rows !== []) {
+			$preview[] = [
+				'table' => (string) $table,
+				'rows' => $table_rows,
+			];
+		}
+	}
+
+	return $preview;
+}
+
 function synchy_sync_sql_value($value): string
 {
 	if ($value === null) {
@@ -12407,6 +12478,16 @@ function synchy_render_incremental_site_sync_page(array $current): void
 				<div class="synchy-push-confirm-details__body" data-synchy-push-confirm-details></div>
 			</details>
 
+			<details class="synchy-push-confirm-details" data-synchy-push-confirm-rows-toggle>
+				<summary><?php esc_html_e('View database row content', 'synchy'); ?></summary>
+				<div class="synchy-push-confirm-details__body">
+					<p class="synchy-field-note synchy-field-note--warning">
+						<?php esc_html_e('A single row loads quickly. This can take a while to load if a lot of rows are pending -- it fetches and formats the real content of every one.', 'synchy'); ?>
+					</p>
+					<div data-synchy-push-confirm-rows></div>
+				</div>
+			</details>
+
 			<div class="synchy-modal__actions">
 				<button type="button" class="button" data-synchy-push-confirm-cancel><?php esc_html_e('Cancel', 'synchy'); ?></button>
 				<button type="button" class="button button-primary" data-synchy-push-confirm-ok><?php esc_html_e('Push', 'synchy'); ?></button>
@@ -12903,6 +12984,41 @@ add_action('wp_ajax_synchy_preview_sync_changes', function (): void {
 	wp_send_json_success([
 		'preview' => $result,
 		'scopeStatus' => synchy_get_sync_scope_status($options),
+	]);
+});
+
+// On-demand only (never bundled into the regular preview above): re-derives the same database
+// delta Preview already computed, but this time keeps the actual row content instead of
+// discarding it after counting -- so the push-confirmation modal can show what's really in the
+// row(s) about to be sent. Deliberately a separate, explicitly-requested call since formatting
+// every pending row's content can be slow when there are a lot of them.
+add_action('wp_ajax_synchy_inspect_sync_pending_rows', function (): void {
+	if (!current_user_can('manage_options')) {
+		wp_send_json_error(['message' => __('You are not allowed to inspect Synchy Sync data.', 'synchy')], 403);
+	}
+
+	check_ajax_referer('synchy_sync_ajax', 'nonce');
+
+	$options = isset($_POST[SYNCHY_SITE_SYNC_OPTIONS]) ? synchy_sanitize_site_sync_options(wp_unslash($_POST[SYNCHY_SITE_SYNC_OPTIONS])) : synchy_get_site_sync_options();
+	$validation = synchy_validate_site_sync_options($options);
+
+	if (is_wp_error($validation)) {
+		wp_send_json_error(['message' => $validation->get_error_message()], 400);
+	}
+
+	$force_full = synchy_should_force_full_sync($_POST);
+	$selection = synchy_get_sync_preview_selection($_POST);
+	$payload = synchy_prepare_sync_payload($options, $selection, $force_full);
+
+	if (is_wp_error($payload)) {
+		wp_send_json_error(['message' => $payload->get_error_message()], 400);
+	}
+
+	$db_delta = (array) ($payload['db_delta'] ?? []);
+
+	wp_send_json_success([
+		'totalRows' => (int) ($db_delta['total_rows'] ?? 0),
+		'tables' => synchy_build_sync_pending_rows_preview((array) ($db_delta['tables'] ?? [])),
 	]);
 });
 
