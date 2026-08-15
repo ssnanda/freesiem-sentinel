@@ -10767,20 +10767,22 @@ function synchy_render_import_column(): void
 					</div>
 				</div>
 
-				<div class="synchy-stage-status synchy-stage-status--compact">
-					<p class="synchy-stage-status__label"><?php esc_html_e('Import Stage Status', 'synchy'); ?></p>
-					<div class="synchy-export-stages synchy-export-stages--inline">
-						<?php foreach ($stages as $stage) : ?>
-							<div class="synchy-export-stage is-<?php echo esc_attr((string) $stage['state']); ?>">
-								<span class="synchy-export-stage__indicator" aria-hidden="true"></span>
-								<div class="synchy-export-stage__content">
-									<strong><?php echo esc_html((string) $stage['label']); ?></strong>
-									<span><?php echo esc_html((string) $stage['description']); ?></span>
+				<?php if ($status !== '') : ?>
+					<div class="synchy-stage-status synchy-stage-status--compact">
+						<p class="synchy-stage-status__label"><?php esc_html_e('Import Stage Status', 'synchy'); ?></p>
+						<div class="synchy-export-stages synchy-export-stages--inline">
+							<?php foreach ($stages as $stage) : ?>
+								<div class="synchy-export-stage is-<?php echo esc_attr((string) $stage['state']); ?>">
+									<span class="synchy-export-stage__indicator" aria-hidden="true"></span>
+									<div class="synchy-export-stage__content">
+										<strong><?php echo esc_html((string) $stage['label']); ?></strong>
+										<span><?php echo esc_html((string) $stage['description']); ?></span>
+									</div>
 								</div>
-							</div>
-						<?php endforeach; ?>
+							<?php endforeach; ?>
+						</div>
 					</div>
-				</div>
+				<?php endif; ?>
 			</div>
 		</form>
 
