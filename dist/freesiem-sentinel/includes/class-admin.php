@@ -19,6 +19,7 @@ class Freesiem_Admin
 		add_action('admin_menu', [$this, 'remove_synchy_top_level_menu'], 999);
 		add_action('admin_init', [$this->plugin, 'maybe_process_pending_task_maintenance']);
 		add_action('admin_init', [$this, 'maybe_redirect_legacy_synchy_pages']);
+		add_action('admin_init', [$this, 'maybe_redirect_legacy_about_page']);
 		add_action('admin_enqueue_scripts', [$this, 'maybe_enqueue_synchy_assets']);
 		add_action('admin_notices', 'freesiem_sentinel_render_notices');
 		add_action('admin_post_freesiem_sentinel_save_cloud_connect_contact', [$this, 'handle_save_cloud_connect_contact']);
@@ -57,6 +58,8 @@ class Freesiem_Admin
 		add_action('admin_post_freesiem_sentinel_unblock_expired_login_protection_records', [$this, 'handle_unblock_expired_login_protection_records']);
 		add_action('admin_post_freesiem_sentinel_save_stealth_mode', [$this, 'handle_save_stealth_mode']);
 		add_action('admin_post_freesiem_sentinel_clear_logs', [$this, 'handle_clear_logs']);
+		add_action('admin_post_freesiem_sentinel_save_rustfs_settings', [$this, 'handle_save_rustfs_settings']);
+		add_action('admin_post_freesiem_sentinel_test_rustfs_connection', [$this, 'handle_test_rustfs_connection']);
 		add_action('wp_login_failed', [$this, 'handle_login_failed_event'], 10, 2);
 		add_action('wp_login', [$this, 'handle_login_success_event'], 10, 2);
 		add_action('init', [$this, 'maybe_handle_stealth_mode'], 1);
@@ -89,7 +92,7 @@ class Freesiem_Admin
 		add_submenu_page('freesiem-portal', __('Backup & Restore', 'freesiem-sentinel'), __('Backup & Restore', 'freesiem-sentinel'), 'manage_options', FREESIEM_SENTINEL_SYNCHY_PAGE, [$this, 'render_synchy_page']);
 		add_submenu_page('freesiem-portal', __('Logs', 'freesiem-sentinel'), __('Logs', 'freesiem-sentinel'), 'manage_options', 'freesiem-logs', [$this, 'render_logs_page']);
 		add_submenu_page('freesiem-portal', __('Pending Tasks', 'freesiem-sentinel'), __('Pending Tasks', 'freesiem-sentinel'), 'read', 'freesiem-pending-tasks', [$this, 'render_pending_tasks_page']);
-		add_submenu_page('freesiem-portal', __('About', 'freesiem-sentinel'), __('About', 'freesiem-sentinel'), 'manage_options', 'freesiem-about', [$this, 'render_about_page']);
+		add_submenu_page('freesiem-portal', __('Settings', 'freesiem-sentinel'), __('Settings', 'freesiem-sentinel'), 'manage_options', 'freesiem-settings', [$this, 'render_settings_page']);
 		add_submenu_page('', __('Scan', 'freesiem-sentinel'), __('Scan', 'freesiem-sentinel'), 'manage_options', 'freesiem-scan', [$this, 'render_scan_page']);
 	}
 
@@ -137,6 +140,22 @@ class Freesiem_Admin
 				admin_url('admin.php')
 			)
 		);
+		exit;
+	}
+
+	public function maybe_redirect_legacy_about_page(): void
+	{
+		if (!is_admin() || !current_user_can('manage_options')) {
+			return;
+		}
+
+		$page = isset($_GET['page']) ? sanitize_key((string) wp_unslash($_GET['page'])) : '';
+
+		if ($page !== 'freesiem-about') {
+			return;
+		}
+
+		wp_safe_redirect(freesiem_sentinel_admin_page_url('freesiem-settings', ['tab' => 'about']));
 		exit;
 	}
 
@@ -1020,6 +1039,62 @@ class Freesiem_Admin
 		$this->redirect_to_page('freesiem-logs');
 	}
 
+	public function handle_save_rustfs_settings(): void
+	{
+		$this->assert_manage_permissions();
+		freesiem_sentinel_require_admin_post_nonce();
+
+		$existing = freesiem_sentinel_get_settings();
+		$submitted_secret = isset($_POST['rustfs_secret_key']) ? (string) wp_unslash($_POST['rustfs_secret_key']) : '';
+		$secret = $submitted_secret === freesiem_sentinel_get_rustfs_secret_placeholder()
+			? (string) $existing['rustfs_secret_key']
+			: $submitted_secret;
+
+		freesiem_sentinel_update_settings([
+			'rustfs_enabled' => empty($_POST['rustfs_enabled']) ? 0 : 1,
+			'rustfs_provider' => isset($_POST['rustfs_provider']) ? sanitize_key((string) wp_unslash($_POST['rustfs_provider'])) : 'rustfs',
+			'rustfs_endpoint' => isset($_POST['rustfs_endpoint']) ? (string) wp_unslash($_POST['rustfs_endpoint']) : '',
+			'rustfs_console_url' => isset($_POST['rustfs_console_url']) ? (string) wp_unslash($_POST['rustfs_console_url']) : '',
+			'rustfs_region' => isset($_POST['rustfs_region']) ? (string) wp_unslash($_POST['rustfs_region']) : 'us-east-1',
+			'rustfs_bucket' => isset($_POST['rustfs_bucket']) ? (string) wp_unslash($_POST['rustfs_bucket']) : '',
+			'rustfs_access_key' => isset($_POST['rustfs_access_key']) ? (string) wp_unslash($_POST['rustfs_access_key']) : '',
+			'rustfs_secret_key' => $secret,
+			'rustfs_path_style' => empty($_POST['rustfs_path_style']) ? 0 : 1,
+		]);
+
+		freesiem_sentinel_set_notice('success', __('RustFS settings saved.', 'freesiem-sentinel'));
+		$this->redirect_to_page('freesiem-settings', ['tab' => 'general']);
+	}
+
+	public function handle_test_rustfs_connection(): void
+	{
+		$this->assert_manage_permissions();
+		freesiem_sentinel_require_admin_post_nonce();
+
+		$settings = freesiem_sentinel_get_settings();
+
+		if (!freesiem_sentinel_rustfs_is_configured($settings)) {
+			freesiem_sentinel_set_notice('error', __('Fill in and save the endpoint, bucket, access key, and secret key before testing the connection.', 'freesiem-sentinel'));
+			$this->redirect_to_page('freesiem-settings', ['tab' => 'general']);
+		}
+
+		$client = freesiem_sentinel_get_rustfs_client($settings);
+		$result = $client instanceof FreeSIEM_Sentinel_S3_Client ? $client->list_buckets() : new WP_Error('freesiem_sentinel_rustfs_unavailable', __('The storage client is not available.', 'freesiem-sentinel'));
+
+		if (is_wp_error($result)) {
+			freesiem_sentinel_set_notice('error', sprintf(__('RustFS connection test failed: %s', 'freesiem-sentinel'), $result->get_error_message()));
+		} else {
+			$bucket_count = is_array($result) ? count($result) : 0;
+			freesiem_sentinel_set_notice('success', sprintf(
+				/* translators: %d: number of buckets visible with these credentials */
+				__('RustFS connection test succeeded. %d bucket(s) visible with these credentials.', 'freesiem-sentinel'),
+				$bucket_count
+			));
+		}
+
+		$this->redirect_to_page('freesiem-settings', ['tab' => 'general']);
+	}
+
 	public function render_dashboard_page(): void
 	{
 		$settings = freesiem_sentinel_get_settings();
@@ -1883,11 +1958,92 @@ class Freesiem_Admin
 		echo '</div>';
 	}
 
-	public function render_about_page(): void
+	public function render_settings_page(): void
+	{
+		$this->assert_manage_permissions();
+
+		// Landing on Settings always checks GitHub for the latest packaged release, the same way
+		// the old standalone About page used to on every load.
+		$updater = $this->plugin->get_updater();
+		$update_check = $updater->refresh_plugin_update_state();
+
+		$tabs = $this->get_settings_tabs();
+		$current_tab = $this->get_settings_current_tab();
+
+		echo '<div class="wrap">';
+		echo '<h1>' . esc_html__('Settings', 'freesiem-sentinel') . '</h1>';
+		echo '<h2 class="nav-tab-wrapper">';
+		foreach ($tabs as $tab => $config) {
+			$url = freesiem_sentinel_admin_page_url('freesiem-settings', ['tab' => $tab]);
+			echo '<a class="nav-tab ' . esc_attr($tab === $current_tab ? 'nav-tab-active' : '') . '" href="' . esc_url($url) . '">' . esc_html((string) $config['label']) . '</a>';
+		}
+		echo '</h2>';
+
+		if ($current_tab === 'about') {
+			$this->render_settings_about_tab($update_check);
+		} else {
+			$this->render_settings_general_tab();
+		}
+
+		echo '</div>';
+	}
+
+	private function render_settings_general_tab(): void
+	{
+		$settings = freesiem_sentinel_get_settings();
+		$providers = freesiem_sentinel_get_rustfs_provider_definitions();
+		$provider = (string) ($settings['rustfs_provider'] ?? 'rustfs');
+		$provider_def = $providers[$provider] ?? $providers['rustfs'];
+		$configured = freesiem_sentinel_rustfs_is_configured($settings);
+		$secret_placeholder = freesiem_sentinel_get_rustfs_secret_placeholder();
+
+		echo '<p style="margin-top:16px;">' . esc_html__('General plugin settings, including remote storage used by Export and Purge backups.', 'freesiem-sentinel') . '</p>';
+
+		echo '<div style="background:#fff;padding:20px;border:1px solid #dcdcde;border-radius:12px;margin-top:16px;max-width:760px;">';
+		echo '<h2 style="margin-top:0;">' . esc_html__('RustFS / S3-Compatible Storage', 'freesiem-sentinel') . '</h2>';
+		echo '<p class="description">' . esc_html__('Optional remote object storage for backup packages -- works with RustFS, MinIO, AWS S3, or any other S3-compatible provider.', 'freesiem-sentinel') . '</p>';
+		echo '<p><strong>' . esc_html__('Status:', 'freesiem-sentinel') . '</strong> ' . ($configured ? '<span style="color:#1f8f5f;">' . esc_html__('Configured', 'freesiem-sentinel') . '</span>' : '<span style="color:#b32d2e;">' . esc_html__('Not configured', 'freesiem-sentinel') . '</span>') . '</p>';
+
+		echo '<form method="post" action="' . esc_url(admin_url('admin-post.php')) . '">';
+		wp_nonce_field(FREESIEM_SENTINEL_NONCE_ACTION);
+		echo '<input type="hidden" name="action" value="freesiem_sentinel_save_rustfs_settings" />';
+		echo '<table class="form-table" role="presentation">';
+		$this->render_ssl_checkbox_field('rustfs_enabled', __('Enable remote storage', 'freesiem-sentinel'), !empty($settings['rustfs_enabled']), __('Turns on RustFS/S3 as an available storage destination for backup packages.', 'freesiem-sentinel'));
+
+		echo '<tr><th scope="row"><label for="freesiem-rustfs-provider">' . esc_html__('Provider', 'freesiem-sentinel') . '</label></th><td>';
+		echo '<select id="freesiem-rustfs-provider" name="rustfs_provider">';
+		foreach ($providers as $key => $def) {
+			echo '<option value="' . esc_attr($key) . '" ' . selected($provider, $key, false) . '>' . esc_html((string) $def['label']) . '</option>';
+		}
+		echo '</select>';
+		echo '<p class="description">' . esc_html((string) $provider_def['endpoint_hint']) . '</p>';
+		echo '</td></tr>';
+
+		$this->render_ssl_text_field('rustfs_endpoint', __('S3 API Endpoint', 'freesiem-sentinel'), (string) $settings['rustfs_endpoint'], sprintf(/* translators: %s: example endpoint URL */ __('The S3 API host, e.g. %s -- not the web console.', 'freesiem-sentinel'), (string) $provider_def['endpoint_placeholder']));
+		$this->render_ssl_text_field('rustfs_console_url', __('Console URL (optional)', 'freesiem-sentinel'), (string) $settings['rustfs_console_url'], (string) $provider_def['console_hint']);
+		$this->render_ssl_text_field('rustfs_region', __('Region', 'freesiem-sentinel'), (string) $settings['rustfs_region'], __('RustFS/MinIO accept any string here; AWS S3 requires the bucket\'s actual region.', 'freesiem-sentinel'));
+		$this->render_ssl_text_field('rustfs_bucket', __('Bucket', 'freesiem-sentinel'), (string) $settings['rustfs_bucket'], __('The bucket Sentinel should read and write backup packages to.', 'freesiem-sentinel'));
+		$this->render_ssl_text_field('rustfs_access_key', __('Access Key', 'freesiem-sentinel'), (string) $settings['rustfs_access_key'], __('A read-write key scoped to the bucket above is all Sentinel needs.', 'freesiem-sentinel'));
+
+		$secret_value = '' !== trim((string) $settings['rustfs_secret_key']) ? $secret_placeholder : '';
+		echo '<tr><th scope="row"><label for="freesiem-rustfs-secret_key">' . esc_html__('Secret Key', 'freesiem-sentinel') . '</label></th><td>';
+		echo '<input id="freesiem-rustfs-secret_key" type="password" class="regular-text" name="rustfs_secret_key" value="' . esc_attr($secret_value) . '" autocomplete="new-password" />';
+		echo '<p class="description">' . esc_html__('Leave the saved value in place to keep the current secret. Clear the field and enter a new one to replace it.', 'freesiem-sentinel') . '</p>';
+		echo '</td></tr>';
+
+		$this->render_ssl_checkbox_field('rustfs_path_style', __('Path-style addressing', 'freesiem-sentinel'), !empty($settings['rustfs_path_style']), __('Required for RustFS/MinIO behind a custom domain with no wildcard DNS. Turn off for virtual-hosted-style addressing (typical on AWS S3).', 'freesiem-sentinel'));
+		echo '</table>';
+		submit_button(__('Save RustFS Settings', 'freesiem-sentinel'));
+		echo '</form>';
+
+		echo '<p><a class="button button-secondary" href="' . esc_url(freesiem_sentinel_admin_post_url('freesiem_sentinel_test_rustfs_connection')) . '">' . esc_html__('Test Connection', 'freesiem-sentinel') . '</a></p>';
+		echo '</div>';
+	}
+
+	private function render_settings_about_tab($update_check): void
 	{
 		$settings = freesiem_sentinel_get_settings();
 		$updater = $this->plugin->get_updater();
-		$update_check = $updater->refresh_plugin_update_state();
 		$update_check_error = is_wp_error($update_check) ? $update_check : null;
 		$release = is_array($update_check) && is_array($update_check['release'] ?? null)
 			? $update_check['release']
@@ -1897,11 +2053,9 @@ class Freesiem_Admin
 		$release_available = !empty($release['available']);
 		$release_version = safe($release['version'] ?? '');
 		$update_available = $release_available && version_compare($release_version, FREESIEM_SENTINEL_VERSION, '>');
-		$update_button_url = $updater->get_update_plugin_url(freesiem_sentinel_admin_page_url('freesiem-about'));
+		$update_button_url = $updater->get_update_plugin_url(freesiem_sentinel_admin_page_url('freesiem-settings', ['tab' => 'about']));
 
-		echo '<div class="wrap">';
-		echo '<h1>' . esc_html__('About freeSIEM Sentinel', 'freesiem-sentinel') . '</h1>';
-		echo '<p>' . esc_html__('Release, plan, and agent identity details for this WordPress deployment.', 'freesiem-sentinel') . '</p>';
+		echo '<p style="margin-top:16px;">' . esc_html__('Release, plan, and agent identity details for this WordPress deployment.', 'freesiem-sentinel') . '</p>';
 		$this->render_card_grid_start();
 		$this->render_stat_card(__('Plugin Version', 'freesiem-sentinel'), FREESIEM_SENTINEL_VERSION, __('Latest Release', 'freesiem-sentinel'), $release_available ? $release_version : __('No releases available', 'freesiem-sentinel'));
 		$this->render_stat_card(__('Connected To', 'freesiem-sentinel'), __('freeSIEM Core', 'freesiem-sentinel'), __('Registration', 'freesiem-sentinel'), strtoupper(freesiem_sentinel_safe_string($settings['registration_status'] ?? '')));
@@ -1930,7 +2084,7 @@ class Freesiem_Admin
 
 		echo '<div style="background:#fff;padding:20px;border:1px solid #dcdcde;border-radius:12px;margin-top:20px;">';
 		echo '<h2 style="margin-top:0;">' . esc_html__('Included Capabilities', 'freesiem-sentinel') . '</h2>';
-		echo '<p>' . esc_html__('freeSIEM Sentinel includes backup, restore, import, upload-to-live, sync, and related site-management workflows under the single freeSIEM menu.', 'freesiem-sentinel') . '</p>';
+		echo '<p>' . esc_html__('freeSIEM Sentinel includes backup, restore, sync, and related site-management workflows under the single freeSIEM menu.', 'freesiem-sentinel') . '</p>';
 		echo '<p><a class="button button-secondary" href="' . esc_url(freesiem_sentinel_admin_page_url(FREESIEM_SENTINEL_SYNCHY_PAGE)) . '">' . esc_html__('Open Backup & Restore', 'freesiem-sentinel') . '</a></p>';
 		echo '</div>';
 
@@ -1943,7 +2097,6 @@ class Freesiem_Admin
 		} else {
 			echo '<pre style="white-space:pre-wrap;overflow:auto;">' . esc_html($release_body) . '</pre>';
 		}
-		echo '</div>';
 		echo '</div>';
 	}
 
@@ -3703,6 +3856,26 @@ class Freesiem_Admin
 		}
 
 		return '';
+	}
+
+	private function get_settings_tabs(): array
+	{
+		return [
+			'general' => [
+				'label' => __('General', 'freesiem-sentinel'),
+			],
+			'about' => [
+				'label' => __('About', 'freesiem-sentinel'),
+			],
+		];
+	}
+
+	private function get_settings_current_tab(): string
+	{
+		$tab = isset($_GET['tab']) ? sanitize_key((string) wp_unslash($_GET['tab'])) : 'general';
+		$tabs = $this->get_settings_tabs();
+
+		return isset($tabs[$tab]) ? $tab : 'general';
 	}
 
 	private function filter_synchy_rendered_page_html(string $html, string $current_tab): string

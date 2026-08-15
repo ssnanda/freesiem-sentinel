@@ -86,8 +86,9 @@
 
 .freesiem-synchy-tabs {
 	display: flex;
+	flex: 1 1 auto;
 	flex-wrap: wrap;
-	gap: 8px;
+	gap: 12px;
 	align-items: center;
 	justify-content: flex-end;
 	margin: 0 !important;
@@ -96,29 +97,36 @@
 }
 
 .freesiem-synchy-tabs .nav-tab {
+	flex: 1 1 150px;
+	max-width: 240px;
 	margin: 0;
-	padding: 8px 14px;
-	border: 1px solid #ccd6d0;
-	border-radius: 999px;
+	padding: 15px 24px;
+	border: 2px solid #ccd6d0;
+	border-radius: 14px;
 	background: #ffffff;
 	color: #4f5d68;
-	font-size: 13px;
+	font-size: 15px;
 	font-weight: 700;
 	line-height: 1.2;
+	text-align: center;
+	transition: border-color 120ms ease, color 120ms ease, background 120ms ease, transform 120ms ease, box-shadow 120ms ease;
 }
 
 .freesiem-synchy-tabs .nav-tab:hover,
 .freesiem-synchy-tabs .nav-tab:focus {
 	border-color: #1d70b8;
 	color: #12323b;
+	background: #f1f6f2;
 }
 
 .freesiem-synchy-tabs .nav-tab-active,
 .freesiem-synchy-tabs .nav-tab-active:hover,
 .freesiem-synchy-tabs .nav-tab-active:focus {
-	border-color: #12323b;
-	background: #12323b;
+	border-color: transparent;
+	background: linear-gradient(120deg, #19cb78, #1d70b8);
 	color: #ffffff;
+	box-shadow: 0 12px 24px rgba(29, 112, 184, 0.32);
+	transform: translateY(-1px);
 }
 
 .synchy-shell {
@@ -1594,7 +1602,12 @@
 	}
 
 	.synchy-quick-links-menu {
-		width: 100%;
+		justify-content: flex-start;
+	}
+
+	.synchy-quick-link__body {
+		right: auto;
+		left: 0;
 	}
 
 	.synchy-sync-workflow-grid,
@@ -2001,34 +2014,35 @@
 	margin-top: 4px;
 }
 
-/* Quick links menu -- a compact vertical stack of collapsible buttons in the top-right of the
-   hero. Each one stays closed until clicked so the help content never eats permanent space. */
+/* Quick links menu -- a light, low-contrast horizontal row of collapsible buttons. Each one
+   stays closed until clicked, and opens as a fixed-width dropdown so its content never gets
+   squeezed into the narrow button's own width (the old truncated-text bug). */
 .synchy-quick-links-menu {
 	display: flex;
-	flex-direction: column;
-	flex-shrink: 0;
+	flex-wrap: wrap;
+	justify-content: flex-end;
 	gap: 8px;
-	width: 280px;
+	margin-bottom: 20px;
 }
 
 .synchy-quick-link {
-	border: 1px solid #ccd6d0;
-	border-radius: 10px;
-	background: #ffffff;
-	overflow: hidden;
+	position: relative;
+	border: 1px solid #e3e9e5;
+	border-radius: 8px;
+	background: #f6f8f7;
 }
 
 .synchy-quick-link > summary {
 	display: flex;
 	align-items: center;
-	justify-content: space-between;
-	gap: 8px;
-	padding: 10px 14px;
+	gap: 6px;
+	padding: 6px 12px;
 	list-style: none;
 	cursor: pointer;
-	color: #12323b;
-	font-size: 13px;
-	font-weight: 700;
+	color: #7c8a83;
+	font-size: 12px;
+	font-weight: 600;
+	white-space: nowrap;
 }
 
 .synchy-quick-link > summary::-webkit-details-marker {
@@ -2038,27 +2052,47 @@
 .synchy-quick-link > summary::after {
 	content: "\25be";
 	flex-shrink: 0;
-	color: #1f8f5f;
-	transition: transform 120ms ease;
+	color: #a4b0aa;
+	transition: transform 120ms ease, color 120ms ease;
 }
 
-.synchy-quick-link:hover > summary {
-	background: #f1f6f2;
+.synchy-quick-link:hover {
+	border-color: #ccd6d0;
+	background: #ffffff;
+}
+
+.synchy-quick-link:hover > summary,
+.synchy-quick-link:hover > summary::after {
+	color: #12323b;
+}
+
+.synchy-quick-link[open] {
+	border-color: #ccd6d0;
+	background: #ffffff;
 }
 
 .synchy-quick-link[open] > summary {
-	background: #f1f6f2;
-	border-bottom: 1px solid #e5ece7;
+	color: #12323b;
 }
 
 .synchy-quick-link[open] > summary::after {
+	color: #12323b;
 	transform: rotate(180deg);
 }
 
 .synchy-quick-link__body {
-	padding: 12px 14px 14px;
+	position: absolute;
+	top: calc(100% + 6px);
+	right: 0;
+	z-index: 20;
+	width: min(420px, 90vw);
 	max-height: 60vh;
 	overflow-y: auto;
+	padding: 14px 16px;
+	border: 1px solid #d7e1da;
+	border-radius: 12px;
+	background: #ffffff;
+	box-shadow: 0 18px 36px rgba(18, 35, 28, 0.16);
 }
 
 .synchy-quick-link__body .synchy-export-meta {

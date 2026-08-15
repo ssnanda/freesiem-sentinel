@@ -78,6 +78,15 @@ function freesiem_sentinel_get_default_settings(): array
 			'notices' => [],
 		],
 		'updater_cache' => [],
+		'rustfs_enabled' => 0,
+		'rustfs_provider' => 'rustfs',
+		'rustfs_endpoint' => '',
+		'rustfs_console_url' => '',
+		'rustfs_region' => 'us-east-1',
+		'rustfs_bucket' => '',
+		'rustfs_access_key' => '',
+		'rustfs_secret_key' => '',
+		'rustfs_path_style' => 1,
 	];
 }
 
@@ -389,7 +398,91 @@ function freesiem_sentinel_sanitize_settings(array $settings): array
 	$settings['summary_cache'] = is_array($settings['summary_cache']) ? $settings['summary_cache'] : $defaults['summary_cache'];
 	$settings['updater_cache'] = is_array($settings['updater_cache']) ? $settings['updater_cache'] : [];
 
+	$settings['rustfs_enabled'] = empty($settings['rustfs_enabled']) ? 0 : 1;
+	$settings['rustfs_provider'] = in_array((string) ($settings['rustfs_provider'] ?? 'rustfs'), ['rustfs', 'minio', 'aws_s3', 'other'], true) ? (string) $settings['rustfs_provider'] : 'rustfs';
+	$settings['rustfs_endpoint'] = esc_url_raw(untrailingslashit(trim((string) ($settings['rustfs_endpoint'] ?? ''))));
+	$settings['rustfs_console_url'] = esc_url_raw(untrailingslashit(trim((string) ($settings['rustfs_console_url'] ?? ''))));
+	$settings['rustfs_region'] = sanitize_text_field((string) ($settings['rustfs_region'] ?? 'us-east-1')) ?: 'us-east-1';
+	$settings['rustfs_bucket'] = sanitize_text_field((string) ($settings['rustfs_bucket'] ?? ''));
+	$settings['rustfs_access_key'] = sanitize_text_field((string) ($settings['rustfs_access_key'] ?? ''));
+	$settings['rustfs_secret_key'] = (string) ($settings['rustfs_secret_key'] ?? '');
+	$settings['rustfs_path_style'] = empty($settings['rustfs_path_style']) ? 0 : 1;
+
 	return $settings;
+}
+
+function freesiem_sentinel_get_rustfs_secret_placeholder(): string
+{
+	return '••••••••••••••••';
+}
+
+/**
+ * @return array{label:string,endpoint_hint:string,endpoint_placeholder:string,default_path_style:bool,console_hint:string,console_placeholder:string}
+ */
+function freesiem_sentinel_get_rustfs_provider_definitions(): array
+{
+	return [
+		'rustfs' => [
+			'label' => __('RustFS', 'freesiem-sentinel'),
+			'endpoint_hint' => __('RustFS speaks the S3 API the same way MinIO does -- use its S3 API host here, not the console host below.', 'freesiem-sentinel'),
+			'endpoint_placeholder' => 'https://files.example.com',
+			'default_path_style' => true,
+			'console_hint' => __('The RustFS web console -- a different host from the S3 API endpoint above. Fill this in for a one-click link to Access Keys below.', 'freesiem-sentinel'),
+			'console_placeholder' => 'https://console.files.example.com',
+		],
+		'minio' => [
+			'label' => __('MinIO', 'freesiem-sentinel'),
+			'endpoint_hint' => __('The S3 API endpoint, not the web console -- these are usually different hosts/ports.', 'freesiem-sentinel'),
+			'endpoint_placeholder' => 'https://files.example.com',
+			'default_path_style' => true,
+			'console_hint' => __('The MinIO web console.', 'freesiem-sentinel'),
+			'console_placeholder' => 'https://console.files.example.com',
+		],
+		'aws_s3' => [
+			'label' => __('AWS S3', 'freesiem-sentinel'),
+			'endpoint_hint' => __('Use your bucket\'s regional endpoint, e.g. https://s3.us-east-1.amazonaws.com, and make sure Region matches.', 'freesiem-sentinel'),
+			'endpoint_placeholder' => 'https://s3.us-east-1.amazonaws.com',
+			'default_path_style' => false,
+			'console_hint' => __('AWS has one fixed console -- leave this blank.', 'freesiem-sentinel'),
+			'console_placeholder' => 'https://console.aws.amazon.com',
+		],
+		'other' => [
+			'label' => __('Other S3-compatible', 'freesiem-sentinel'),
+			'endpoint_hint' => __('Use the S3 API endpoint documented by your provider.', 'freesiem-sentinel'),
+			'endpoint_placeholder' => 'https://s3.example.com',
+			'default_path_style' => true,
+			'console_hint' => __('Your provider\'s web console, if it has one.', 'freesiem-sentinel'),
+			'console_placeholder' => 'https://console.example.com',
+		],
+	];
+}
+
+function freesiem_sentinel_rustfs_is_configured(?array $settings = null): bool
+{
+	$settings = $settings ?? freesiem_sentinel_get_settings();
+
+	return '' !== trim((string) ($settings['rustfs_endpoint'] ?? ''))
+		&& '' !== trim((string) ($settings['rustfs_access_key'] ?? ''))
+		&& '' !== trim((string) ($settings['rustfs_secret_key'] ?? ''))
+		&& '' !== trim((string) ($settings['rustfs_bucket'] ?? ''));
+}
+
+function freesiem_sentinel_get_rustfs_client(?array $settings = null): ?FreeSIEM_Sentinel_S3_Client
+{
+	$settings = $settings ?? freesiem_sentinel_get_settings();
+
+	if (!freesiem_sentinel_rustfs_is_configured($settings) || !class_exists('FreeSIEM_Sentinel_S3_Client')) {
+		return null;
+	}
+
+	return new FreeSIEM_Sentinel_S3_Client([
+		'endpoint' => (string) $settings['rustfs_endpoint'],
+		'region' => (string) $settings['rustfs_region'],
+		'access_key' => (string) $settings['rustfs_access_key'],
+		'secret_key' => (string) $settings['rustfs_secret_key'],
+		'bucket' => (string) $settings['rustfs_bucket'],
+		'path_style' => !empty($settings['rustfs_path_style']),
+	]);
 }
 
 function freesiem_sentinel_sanitize_backend_url(string $url): string

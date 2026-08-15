@@ -11765,19 +11765,10 @@ function synchy_render_export_import_page(array $current): void
 	<div class="wrap synchy-admin">
 		<?php synchy_render_notice(); ?>
 		<div class="synchy-shell">
-			<div class="synchy-hero">
-				<div>
-					<p class="synchy-eyebrow"><?php esc_html_e('Package & Restore', 'synchy'); ?></p>
-					<h1><?php echo esc_html($current['headline']); ?></h1>
-					<?php if ((string) $current['description'] !== '') : ?>
-						<p class="synchy-description"><?php echo esc_html($current['description']); ?></p>
-					<?php endif; ?>
-				</div>
-				<div class="synchy-quick-links-menu">
-					<?php synchy_render_ddev_export_instructions(); ?>
-					<?php synchy_render_hostinger_export_instructions(); ?>
-					<?php synchy_render_what_import_does_instructions(); ?>
-				</div>
+			<div class="synchy-quick-links-menu">
+				<?php synchy_render_ddev_export_instructions(); ?>
+				<?php synchy_render_hostinger_export_instructions(); ?>
+				<?php synchy_render_what_import_does_instructions(); ?>
 			</div>
 
 			<div class="synchy-split-columns">

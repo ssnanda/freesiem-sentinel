@@ -196,7 +196,7 @@ class Freesiem_Updater
 	{
 		$links = [
 			'check_updates' => '<a href="' . esc_url(safe($this->get_check_updates_url(self_admin_url('plugins.php')))) . '">' . esc_html__('Check for Updates', 'freesiem-sentinel') . '</a>',
-			'about' => '<a href="' . esc_url(safe(freesiem_sentinel_admin_page_url('freesiem-about'))) . '">' . esc_html__('About', 'freesiem-sentinel') . '</a>',
+			'about' => '<a href="' . esc_url(safe(freesiem_sentinel_admin_page_url('freesiem-settings', ['tab' => 'about']))) . '">' . esc_html__('About', 'freesiem-sentinel') . '</a>',
 		];
 
 		return array_merge($links, $actions);
@@ -211,7 +211,7 @@ class Freesiem_Updater
 		freesiem_sentinel_require_admin_post_nonce();
 
 		$redirect_to = isset($_GET['redirect_to']) ? wp_unslash((string) $_GET['redirect_to']) : '';
-		$redirect_to = wp_validate_redirect($redirect_to, freesiem_sentinel_admin_page_url('freesiem-about'));
+		$redirect_to = wp_validate_redirect($redirect_to, freesiem_sentinel_admin_page_url('freesiem-settings', ['tab' => 'about']));
 		$result = $this->refresh_plugin_update_state();
 
 		if (is_wp_error($result)) {
@@ -242,7 +242,7 @@ class Freesiem_Updater
 		freesiem_sentinel_require_admin_post_nonce();
 
 		$redirect_to = isset($_GET['redirect_to']) ? wp_unslash((string) $_GET['redirect_to']) : '';
-		$redirect_to = wp_validate_redirect($redirect_to, freesiem_sentinel_admin_page_url('freesiem-about'));
+		$redirect_to = wp_validate_redirect($redirect_to, freesiem_sentinel_admin_page_url('freesiem-settings', ['tab' => 'about']));
 		$result = $this->refresh_plugin_update_state();
 
 		if (is_wp_error($result)) {
