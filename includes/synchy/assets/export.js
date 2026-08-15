@@ -428,4 +428,31 @@
 		notifyCheckbox.addEventListener("change", autosaveNotify);
 		notifyEmailInput.addEventListener("change", autosaveNotify);
 	}
+
+	// Quick links menu (Run Export Locally with DDEV / Import Export into Hostinger / What Import
+	// Does) -- each is a plain <details> dropdown with no native Escape-to-close or click-outside
+	// behavior, so wire both up here.
+	const quickLinks = document.querySelectorAll(".synchy-quick-link");
+
+	if (quickLinks.length > 0) {
+		document.addEventListener("keydown", (event) => {
+			if (event.key !== "Escape") {
+				return;
+			}
+
+			quickLinks.forEach((link) => {
+				if (link.open) {
+					link.open = false;
+				}
+			});
+		});
+
+		document.addEventListener("click", (event) => {
+			quickLinks.forEach((link) => {
+				if (link.open && !link.contains(event.target)) {
+					link.open = false;
+				}
+			});
+		});
+	}
 })();
