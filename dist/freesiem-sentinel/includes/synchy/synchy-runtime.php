@@ -474,8 +474,8 @@ function synchy_get_pages(): array
 			'slug' => SYNCHY_SLUG,
 			'title' => __('Overview', 'synchy'),
 			'menu_title' => __('Overview', 'synchy'),
-			'headline' => __('Backup & Restore', 'synchy'),
-			'description' => __('WordPress backup, restore, upload-to-live, and sync tools bundled with freeSIEM Sentinel.', 'synchy'),
+			'headline' => __('Export & Import', 'synchy'),
+			'description' => __('WordPress backup, restore, and sync tools bundled with freeSIEM Sentinel.', 'synchy'),
 		],
 		[
 			'slug' => 'synchy-export',
@@ -10689,10 +10689,9 @@ function synchy_handle_manual_import_upload()
 	return $deploy;
 }
 
-function synchy_render_import_page(array $current): void
+function synchy_render_import_column(): void
 {
 	$result = synchy_get_import_result();
-	$export_history = synchy_get_export_history();
 	$stages = synchy_get_import_stage_items($result);
 	$root_path = synchy_get_site_root_path();
 	$root_writable = is_dir($root_path) && is_writable($root_path);
@@ -10717,178 +10716,128 @@ function synchy_render_import_page(array $current): void
 		$message = (string) ($result['message'] ?? __('Synchy could not process the uploaded import files.', 'synchy'));
 	}
 	?>
-	<div class="wrap synchy-admin">
-		<?php synchy_render_notice(); ?>
-		<div class="synchy-shell">
-			<div class="synchy-hero">
-				<div>
-					<p class="synchy-eyebrow"><?php esc_html_e('Destination Restore Setup', 'synchy'); ?></p>
-					<h1><?php echo esc_html($current['headline']); ?></h1>
-					<?php if ((string) $current['description'] !== '') : ?>
-						<p class="synchy-description"><?php echo esc_html($current['description']); ?></p>
-					<?php endif; ?>
-				</div>
-				<div class="synchy-status">
-					<span class="synchy-status__dot" aria-hidden="true"></span>
-					<?php echo esc_html($root_writable ? __('Root writable', 'synchy') : __('Staging only', 'synchy')); ?>
-				</div>
+	<div class="synchy-split-column synchy-split-column--import">
+		<div class="synchy-split-column__header">
+			<div>
+				<p class="synchy-eyebrow"><?php esc_html_e('Destination Restore Setup', 'synchy'); ?></p>
+				<h2><?php esc_html_e('Import', 'synchy'); ?></h2>
 			</div>
+			<div class="synchy-status">
+				<span class="synchy-status__dot" aria-hidden="true"></span>
+				<?php echo esc_html($root_writable ? __('Root writable', 'synchy') : __('Staging only', 'synchy')); ?>
+			</div>
+		</div>
 
-			<div class="synchy-panel synchy-panel--danger synchy-panel--wide">
-				<div class="synchy-stack synchy-stack--compact">
+		<div class="synchy-action-row">
+			<button type="submit" form="synchy-import-form" class="button button-primary button-large"><?php esc_html_e('Place Selected Files', 'synchy'); ?></button>
+		</div>
+
+		<form id="synchy-import-form" method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" enctype="multipart/form-data" class="synchy-form">
+			<?php wp_nonce_field('synchy_stage_import_package'); ?>
+			<input type="hidden" name="action" value="synchy_stage_import_package" />
+
+			<div class="synchy-panel synchy-panel--muted">
+				<h2><?php esc_html_e('Upload Package Files', 'synchy'); ?></h2>
+				<div class="synchy-field">
+					<label class="synchy-label" for="synchy-import-installer"><?php esc_html_e('installer.php (Required)', 'synchy'); ?></label>
+					<input id="synchy-import-installer" type="file" name="synchy_import_installer" accept=".php,application/x-httpd-php,text/x-php" required />
+					<p class="synchy-field-note">
+					<?php esc_html_e('Choose installer.php from the same export package. Export stages it as installer.php and tries to place it in the WordPress root first.', 'synchy'); ?>
+					</p>
+				</div>
+
+				<div class="synchy-field">
+					<label class="synchy-label" for="synchy-import-archive"><?php esc_html_e('Package Zip (Optional)', 'synchy'); ?></label>
+					<input id="synchy-import-archive" type="file" name="synchy_import_archive" accept=".zip,application/zip" />
+					<p class="synchy-field-note">
+						<?php esc_html_e('Leave this empty if you only want to test where installer.php ends up. Add the matching zip when you are ready for a full restore package placement.', 'synchy'); ?>
+					</p>
+				</div>
+
+				<div class="synchy-export-meta synchy-export-meta--wide">
 					<div>
-						<p class="synchy-panel__eyebrow synchy-panel__eyebrow--danger"><?php esc_html_e('Not Ready Yet', 'synchy'); ?></p>
-						<h2><?php esc_html_e('Import is reliable for installer placement, but large browser zip uploads are not finished.', 'synchy'); ?></h2>
-						<p>
-							<?php esc_html_e('installer.php placement works well. Large package zip uploads can still fail before WordPress sees the file when PHP, the host, or Cloudflare rejects the request.', 'synchy'); ?>
-						</p>
+						<span class="synchy-export-meta__label"><?php esc_html_e('WordPress Root', 'synchy'); ?></span>
+						<strong class="synchy-text-break"><?php echo esc_html($root_path); ?></strong>
 					</div>
-					<ul class="synchy-checklist">
-						<li><?php esc_html_e('Working now: upload installer.php, stage it safely, and place it in the destination WordPress root.', 'synchy'); ?></li>
-						<li><?php esc_html_e('Working now: show the exact root path, staging folder, and installer URL after placement.', 'synchy'); ?></li>
-						<li><?php esc_html_e('Working now: smaller package zips can be staged and copied into the root when the browser upload succeeds.', 'synchy'); ?></li>
-						<li><?php esc_html_e('Not ready yet: reliable large zip uploads for bigger sites when the package exceeds browser, proxy, or CDN limits.', 'synchy'); ?></li>
-						<li><?php esc_html_e('Best current path for larger sites: place installer.php with Import, then use manual file placement for the zip.', 'synchy'); ?></li>
-					</ul>
+					<div>
+						<span class="synchy-export-meta__label"><?php esc_html_e('Root Access', 'synchy'); ?></span>
+						<strong><?php echo esc_html($root_writable ? __('Writable', 'synchy') : __('Not writable', 'synchy')); ?></strong>
+					</div>
+					<div>
+						<span class="synchy-export-meta__label"><?php esc_html_e('Upload Limit', 'synchy'); ?></span>
+						<strong><?php echo esc_html($upload_limit); ?></strong>
+					</div>
+					<div>
+						<span class="synchy-export-meta__label"><?php esc_html_e('Import Staging Folder', 'synchy'); ?></span>
+						<strong class="synchy-text-break"><?php echo esc_html($staging_available ? $staging_root : __('Unavailable', 'synchy')); ?></strong>
+					</div>
+				</div>
+
+				<div class="synchy-stage-status">
+					<p class="synchy-stage-status__label"><?php esc_html_e('Import Stage Status', 'synchy'); ?></p>
+					<div class="synchy-export-stages">
+						<?php foreach ($stages as $stage) : ?>
+							<div class="synchy-export-stage is-<?php echo esc_attr((string) $stage['state']); ?>">
+								<span class="synchy-export-stage__indicator" aria-hidden="true"></span>
+								<div class="synchy-export-stage__content">
+									<strong><?php echo esc_html((string) $stage['label']); ?></strong>
+									<span><?php echo esc_html((string) $stage['description']); ?></span>
+								</div>
+							</div>
+						<?php endforeach; ?>
+					</div>
 				</div>
 			</div>
+		</form>
 
-			<form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" enctype="multipart/form-data" class="synchy-form">
-				<?php wp_nonce_field('synchy_stage_import_package'); ?>
-				<input type="hidden" name="action" value="synchy_stage_import_package" />
-
-				<div class="synchy-grid synchy-grid--import">
-					<div class="synchy-panel">
-						<h2><?php esc_html_e('What Import Does', 'synchy'); ?></h2>
-						<ul class="synchy-checklist synchy-checklist--detail">
-							<li>
-								<strong><?php esc_html_e('Uploads installer.php first', 'synchy'); ?></strong>
-								<span><?php esc_html_e('Start by placing installer.php so you can verify exactly where Synchy writes it on the destination site.', 'synchy'); ?></span>
-							</li>
-							<li>
-								<strong><?php esc_html_e('Stages selected files safely first', 'synchy'); ?></strong>
-								<span><?php esc_html_e('Synchy stores the uploaded installer and optional zip inside wp-content/uploads/synchy-import before any root deployment.', 'synchy'); ?></span>
-							</li>
-							<li>
-								<strong><?php esc_html_e('Places installer.php in the WordPress root before the zip', 'synchy'); ?></strong>
-								<span><?php esc_html_e('If the root is writable, Synchy writes installer.php into the site root first, then copies the package zip when you include it.', 'synchy'); ?></span>
-							</li>
-							<li>
-								<strong><?php esc_html_e('Leaves restore execution to installer.php', 'synchy'); ?></strong>
-								<span><?php esc_html_e('This screen does not run the restore. Its job is to place the package in the right location so you can launch installer.php.', 'synchy'); ?></span>
-							</li>
-						</ul>
+		<div class="synchy-panel synchy-panel--wide">
+			<div class="synchy-stack synchy-stack--compact">
+				<div class="synchy-stack__split">
+					<h2><?php esc_html_e('Latest Import Result', 'synchy'); ?></h2>
+					<span class="synchy-badge"><?php echo esc_html($badge); ?></span>
+				</div>
+				<p class="synchy-field-note"><?php echo esc_html($message); ?></p>
+				<div class="synchy-export-meta synchy-export-meta--wide">
+					<div>
+						<span class="synchy-export-meta__label"><?php esc_html_e('Root Deploy Status', 'synchy'); ?></span>
+						<strong><?php echo esc_html($status !== '' ? $status : __('Waiting for upload', 'synchy')); ?></strong>
 					</div>
-
-						<div class="synchy-panel synchy-panel--muted">
-							<h2><?php esc_html_e('Upload Package Files', 'synchy'); ?></h2>
-						<div class="synchy-field">
-							<label class="synchy-label" for="synchy-import-installer"><?php esc_html_e('installer.php (Required)', 'synchy'); ?></label>
-							<input id="synchy-import-installer" type="file" name="synchy_import_installer" accept=".php,application/x-httpd-php,text/x-php" required />
-							<p class="synchy-field-note">
-							<?php esc_html_e('Choose installer.php from the same Backup & Restore export package. Backup & Restore stages it as installer.php and tries to place it in the WordPress root first.', 'synchy'); ?>
-							</p>
-						</div>
-
-						<div class="synchy-field">
-							<label class="synchy-label" for="synchy-import-archive"><?php esc_html_e('Package Zip (Optional)', 'synchy'); ?></label>
-							<input id="synchy-import-archive" type="file" name="synchy_import_archive" accept=".zip,application/zip" />
-							<p class="synchy-field-note">
-								<?php esc_html_e('Leave this empty if you only want to test where installer.php ends up. Add the matching zip when you are ready for a full restore package placement.', 'synchy'); ?>
-							</p>
-						</div>
-
-							<div class="synchy-export-meta synchy-export-meta--wide">
-								<div>
-									<span class="synchy-export-meta__label"><?php esc_html_e('WordPress Root', 'synchy'); ?></span>
-									<strong class="synchy-text-break"><?php echo esc_html($root_path); ?></strong>
-								</div>
-							<div>
-								<span class="synchy-export-meta__label"><?php esc_html_e('Root Access', 'synchy'); ?></span>
-								<strong><?php echo esc_html($root_writable ? __('Writable', 'synchy') : __('Not writable', 'synchy')); ?></strong>
-							</div>
-							<div>
-								<span class="synchy-export-meta__label"><?php esc_html_e('Upload Limit', 'synchy'); ?></span>
-								<strong><?php echo esc_html($upload_limit); ?></strong>
-							</div>
-							<div>
-									<span class="synchy-export-meta__label"><?php esc_html_e('Import Staging Folder', 'synchy'); ?></span>
-									<strong class="synchy-text-break"><?php echo esc_html($staging_available ? $staging_root : __('Unavailable', 'synchy')); ?></strong>
-								</div>
-							</div>
-
-							<div class="synchy-run-export">
-								<button type="submit" class="button button-primary button-large"><?php esc_html_e('Place Selected Files', 'synchy'); ?></button>
-							</div>
-
-							<div class="synchy-stage-status">
-								<p class="synchy-stage-status__label"><?php esc_html_e('Import Stage Status', 'synchy'); ?></p>
-								<div class="synchy-export-stages">
-									<?php foreach ($stages as $stage) : ?>
-										<div class="synchy-export-stage is-<?php echo esc_attr((string) $stage['state']); ?>">
-											<span class="synchy-export-stage__indicator" aria-hidden="true"></span>
-											<div class="synchy-export-stage__content">
-												<strong><?php echo esc_html((string) $stage['label']); ?></strong>
-												<span><?php echo esc_html((string) $stage['description']); ?></span>
-											</div>
-										</div>
-									<?php endforeach; ?>
-								</div>
-							</div>
-						</div>
+					<div>
+						<span class="synchy-export-meta__label"><?php esc_html_e('Session', 'synchy'); ?></span>
+						<strong class="synchy-text-break"><?php echo esc_html((string) ($result['sessionId'] ?? __('Not created yet', 'synchy'))); ?></strong>
 					</div>
-
-				<div class="synchy-panel synchy-panel--wide">
-					<div class="synchy-stack synchy-stack--compact">
-						<div class="synchy-stack__split">
-							<h2><?php esc_html_e('Latest Import Result', 'synchy'); ?></h2>
-							<span class="synchy-badge"><?php echo esc_html($badge); ?></span>
-						</div>
-						<p class="synchy-field-note"><?php echo esc_html($message); ?></p>
-						<div class="synchy-export-meta synchy-export-meta--wide">
-							<div>
-								<span class="synchy-export-meta__label"><?php esc_html_e('Root Deploy Status', 'synchy'); ?></span>
-								<strong><?php echo esc_html($status !== '' ? $status : __('Waiting for upload', 'synchy')); ?></strong>
-							</div>
-							<div>
-								<span class="synchy-export-meta__label"><?php esc_html_e('Session', 'synchy'); ?></span>
-								<strong class="synchy-text-break"><?php echo esc_html((string) ($result['sessionId'] ?? __('Not created yet', 'synchy'))); ?></strong>
-							</div>
-							<div>
-								<span class="synchy-export-meta__label"><?php esc_html_e('Root Archive Path', 'synchy'); ?></span>
-								<strong class="synchy-text-break"><?php echo esc_html((string) ($result['archivePath'] ?? __('No zip placed yet', 'synchy'))); ?></strong>
-							</div>
-							<div>
-								<span class="synchy-export-meta__label"><?php esc_html_e('Root Installer Path', 'synchy'); ?></span>
-								<strong class="synchy-text-break"><?php echo esc_html((string) ($result['installerPath'] ?? __('Not placed yet', 'synchy'))); ?></strong>
-							</div>
-							<div>
-								<span class="synchy-export-meta__label"><?php esc_html_e('Staging Folder', 'synchy'); ?></span>
-								<strong class="synchy-text-break"><?php echo esc_html((string) ($result['stagingPath'] ?? __('No upload staged yet', 'synchy'))); ?></strong>
-							</div>
-							<div>
-								<span class="synchy-export-meta__label"><?php esc_html_e('Installer URL', 'synchy'); ?></span>
-								<strong class="synchy-text-break">
-									<?php if (!empty($result['installerUrl'])) : ?>
-										<a href="<?php echo esc_url((string) $result['installerUrl']); ?>" target="_blank" rel="noreferrer noopener"><?php echo esc_html((string) $result['installerUrl']); ?></a>
-									<?php else : ?>
-										<?php esc_html_e('Available after root placement succeeds', 'synchy'); ?>
-									<?php endif; ?>
-								</strong>
-							</div>
-							<div>
-								<span class="synchy-export-meta__label"><?php esc_html_e('Staged installer.php', 'synchy'); ?></span>
-								<strong class="synchy-text-break"><?php echo esc_html((string) ($result['stagedInstallerPath'] ?? __('Not staged yet', 'synchy'))); ?></strong>
-							</div>
-							<div>
-								<span class="synchy-export-meta__label"><?php esc_html_e('Staged Zip Path', 'synchy'); ?></span>
-								<strong class="synchy-text-break"><?php echo esc_html((string) ($result['stagedArchivePath'] ?? __('No zip staged yet', 'synchy'))); ?></strong>
-							</div>
-						</div>
+					<div>
+						<span class="synchy-export-meta__label"><?php esc_html_e('Root Archive Path', 'synchy'); ?></span>
+						<strong class="synchy-text-break"><?php echo esc_html((string) ($result['archivePath'] ?? __('No zip placed yet', 'synchy'))); ?></strong>
+					</div>
+					<div>
+						<span class="synchy-export-meta__label"><?php esc_html_e('Root Installer Path', 'synchy'); ?></span>
+						<strong class="synchy-text-break"><?php echo esc_html((string) ($result['installerPath'] ?? __('Not placed yet', 'synchy'))); ?></strong>
+					</div>
+					<div>
+						<span class="synchy-export-meta__label"><?php esc_html_e('Staging Folder', 'synchy'); ?></span>
+						<strong class="synchy-text-break"><?php echo esc_html((string) ($result['stagingPath'] ?? __('No upload staged yet', 'synchy'))); ?></strong>
+					</div>
+					<div>
+						<span class="synchy-export-meta__label"><?php esc_html_e('Installer URL', 'synchy'); ?></span>
+						<strong class="synchy-text-break">
+							<?php if (!empty($result['installerUrl'])) : ?>
+								<a href="<?php echo esc_url((string) $result['installerUrl']); ?>" target="_blank" rel="noreferrer noopener"><?php echo esc_html((string) $result['installerUrl']); ?></a>
+							<?php else : ?>
+								<?php esc_html_e('Available after root placement succeeds', 'synchy'); ?>
+							<?php endif; ?>
+						</strong>
+					</div>
+					<div>
+						<span class="synchy-export-meta__label"><?php esc_html_e('Staged installer.php', 'synchy'); ?></span>
+						<strong class="synchy-text-break"><?php echo esc_html((string) ($result['stagedInstallerPath'] ?? __('Not staged yet', 'synchy'))); ?></strong>
+					</div>
+					<div>
+						<span class="synchy-export-meta__label"><?php esc_html_e('Staged Zip Path', 'synchy'); ?></span>
+						<strong class="synchy-text-break"><?php echo esc_html((string) ($result['stagedArchivePath'] ?? __('No zip staged yet', 'synchy'))); ?></strong>
 					</div>
 				</div>
-
-			</form>
+			</div>
 		</div>
 	</div>
 	<?php
@@ -11262,6 +11211,35 @@ function synchy_render_hostinger_export_instructions(): void
 	<?php
 }
 
+function synchy_render_what_import_does_instructions(): void
+{
+	?>
+	<details class="synchy-quick-link">
+		<summary><?php esc_html_e('What Import Does', 'synchy'); ?></summary>
+		<div class="synchy-stack synchy-stack--compact synchy-quick-link__body">
+			<ul class="synchy-checklist synchy-checklist--detail">
+				<li>
+					<strong><?php esc_html_e('Uploads installer.php first', 'synchy'); ?></strong>
+					<span><?php esc_html_e('Start by placing installer.php so you can verify exactly where Synchy writes it on the destination site.', 'synchy'); ?></span>
+				</li>
+				<li>
+					<strong><?php esc_html_e('Stages selected files safely first', 'synchy'); ?></strong>
+					<span><?php esc_html_e('Synchy stores the uploaded installer and optional zip inside wp-content/uploads/synchy-import before any root deployment.', 'synchy'); ?></span>
+				</li>
+				<li>
+					<strong><?php esc_html_e('Places installer.php in the WordPress root before the zip', 'synchy'); ?></strong>
+					<span><?php esc_html_e('If the root is writable, Synchy writes installer.php into the site root first, then copies the package zip when you include it.', 'synchy'); ?></span>
+				</li>
+				<li>
+					<strong><?php esc_html_e('Leaves restore execution to installer.php', 'synchy'); ?></strong>
+					<span><?php esc_html_e('This screen does not run the restore. Its job is to place the package in the right location so you can launch installer.php.', 'synchy'); ?></span>
+				</li>
+			</ul>
+		</div>
+	</details>
+	<?php
+}
+
 function synchy_get_admin_page_url(string $page_slug): string
 {
 	return admin_url('admin.php?page=' . rawurlencode($page_slug));
@@ -11574,11 +11552,206 @@ function synchy_get_browse_payload(string $requested_path): array
 	];
 }
 
-function synchy_render_export_page(array $current): void
+function synchy_render_export_column(
+	array $options,
+	array $groups,
+	array $running_job,
+	string $archive_preview,
+	string $installer_preview,
+	string $manifest_preview,
+	string $default_package_name
+): void {
+	?>
+	<div class="synchy-split-column synchy-split-column--export">
+		<div class="synchy-split-column__header">
+			<div>
+				<p class="synchy-eyebrow"><?php esc_html_e('Export Design', 'synchy'); ?></p>
+				<h2><?php esc_html_e('Export', 'synchy'); ?></h2>
+			</div>
+			<div class="synchy-status">
+				<span class="synchy-status__dot" aria-hidden="true"></span>
+				<?php echo esc_html($running_job === [] ? __('Export ready', 'synchy') : __('Export running', 'synchy')); ?>
+			</div>
+		</div>
+
+		<div class="synchy-action-row">
+			<button type="button" class="button button-primary button-large" data-synchy-run-export><?php esc_html_e('Run Full Export', 'synchy'); ?></button>
+		</div>
+
+		<div class="synchy-hero-notify synchy-hero-notify--inline">
+			<label class="synchy-sync-scope-toggle">
+				<input
+					type="checkbox"
+					form="synchy-export-settings-form"
+					name="<?php echo esc_attr(SYNCHY_EXPORT_OPTIONS); ?>[notify_email_enabled]"
+					value="1"
+					<?php checked(!empty($options['notify_email_enabled'])); ?>
+				/>
+				<span><?php esc_html_e('Email me when done', 'synchy'); ?></span>
+			</label>
+			<input
+				type="email"
+				form="synchy-export-settings-form"
+				class="regular-text"
+				name="<?php echo esc_attr(SYNCHY_EXPORT_OPTIONS); ?>[notify_email_address]"
+				value="<?php echo esc_attr((string) $options['notify_email_address']); ?>"
+				placeholder="<?php echo esc_attr((string) get_option('admin_email')); ?>"
+			/>
+		</div>
+
+		<form id="synchy-export-settings-form" method="post" action="options.php" class="synchy-form" data-synchy-export-form>
+			<?php settings_fields('synchy_export'); ?>
+
+			<div class="synchy-panel">
+				<h2><?php esc_html_e('Default Exclude Filters', 'synchy'); ?></h2>
+				<p class="synchy-field-note">
+					<?php esc_html_e('These filters define what Synchy should leave out of a full export by default. Your selected export destination is also excluded automatically at runtime.', 'synchy'); ?>
+				</p>
+
+				<ol class="synchy-filter-numbered-list">
+					<?php foreach ($groups as $key => $group) : ?>
+						<li>
+							<details class="synchy-filter-collapsible">
+								<summary>
+									<label class="synchy-toggle" onclick="event.stopPropagation();">
+										<input
+											type="checkbox"
+											name="<?php echo esc_attr(SYNCHY_EXPORT_OPTIONS); ?>[<?php echo esc_attr($key); ?>]"
+											value="1"
+											<?php checked(!empty($options[$key])); ?>
+										/>
+										<span><?php echo esc_html($group['label']); ?></span>
+									</label>
+								</summary>
+								<div class="synchy-filter-collapsible__body">
+									<p><?php echo esc_html($group['description']); ?></p>
+									<div class="synchy-patterns">
+										<?php foreach ($group['patterns'] as $pattern) : ?>
+											<code><?php echo esc_html($pattern); ?></code>
+										<?php endforeach; ?>
+									</div>
+								</div>
+							</details>
+						</li>
+					<?php endforeach; ?>
+				</ol>
+
+				<details class="synchy-filter-collapsible synchy-filter-collapsible--custom">
+					<summary><?php esc_html_e('Custom Excludes', 'synchy'); ?></summary>
+					<div class="synchy-filter-collapsible__body">
+						<p class="synchy-field-note">
+							<?php esc_html_e('Enter one path or glob per line. These will be added on top of the default filters above.', 'synchy'); ?>
+						</p>
+						<textarea
+							class="large-text code"
+							rows="8"
+							name="<?php echo esc_attr(SYNCHY_EXPORT_OPTIONS); ?>[custom_excludes]"
+							placeholder=".env\nwp-content/synchy-temp/\ncustom-cache/"
+						><?php echo esc_textarea((string) $options['custom_excludes']); ?></textarea>
+					</div>
+				</details>
+			</div>
+
+			<div class="synchy-panel synchy-panel--muted">
+				<h2><?php esc_html_e('Package Output', 'synchy'); ?></h2>
+				<div class="synchy-field">
+					<label class="synchy-label" for="synchy-output-directory"><?php esc_html_e('Save path', 'synchy'); ?></label>
+					<div class="synchy-input-row">
+						<input
+							id="synchy-output-directory"
+							type="text"
+							class="regular-text code"
+							name="<?php echo esc_attr(SYNCHY_EXPORT_OPTIONS); ?>[output_directory]"
+							value="<?php echo esc_attr((string) $options['output_directory']); ?>"
+							data-synchy-output-directory
+						/>
+						<button type="button" class="button" data-synchy-browse><?php esc_html_e('Browse', 'synchy'); ?></button>
+						<button type="button" class="button" data-synchy-use-default data-default-path="<?php echo esc_attr(synchy_get_default_output_directory()); ?>"><?php esc_html_e('Default', 'synchy'); ?></button>
+					</div>
+					<p class="synchy-field-note">
+						<?php esc_html_e('Relative paths resolve from the WordPress root. The browser only lists folders inside this site.', 'synchy'); ?>
+					</p>
+				</div>
+
+				<div class="synchy-field">
+					<label class="synchy-label" for="synchy-package-name"><?php esc_html_e('Package name', 'synchy'); ?></label>
+					<input
+						id="synchy-package-name"
+						type="text"
+						class="regular-text"
+						name="<?php echo esc_attr(SYNCHY_EXPORT_OPTIONS); ?>[package_name]"
+						value="<?php echo esc_attr((string) $options['package_name']); ?>"
+						placeholder="<?php echo esc_attr($default_package_name); ?>"
+						data-synchy-package-name
+					/>
+					<p class="synchy-field-note">
+						<?php
+						printf(
+							/* translators: %s: default package name */
+							esc_html__('Leave this blank to use %s. Synchy adds the same base name to the zip, installer, and manifest files.', 'synchy'),
+							esc_html($default_package_name)
+						);
+						?>
+					</p>
+				</div>
+
+				<div class="synchy-package">
+					<div><code data-synchy-archive-preview><?php echo esc_html($archive_preview); ?></code></div>
+					<div><code data-synchy-installer-preview><?php echo esc_html($installer_preview); ?></code></div>
+					<div><code data-synchy-manifest-preview><?php echo esc_html($manifest_preview); ?></code></div>
+				</div>
+
+				<div class="synchy-progress<?php echo $running_job === [] ? ' is-hidden' : ''; ?>" data-synchy-progress>
+					<div class="synchy-progress__top">
+						<strong data-synchy-progress-phase><?php echo esc_html(synchy_export_phase_label((string) ($running_job['phase'] ?? 'queued'))); ?></strong>
+						<span data-synchy-progress-percent><?php echo esc_html((string) (int) ($running_job['progress'] ?? 0)); ?>%</span>
+					</div>
+					<div class="synchy-progress__bar">
+						<span data-synchy-progress-bar style="width: <?php echo esc_attr((string) (int) ($running_job['progress'] ?? 0)); ?>%;"></span>
+					</div>
+					<p class="synchy-progress__message" data-synchy-progress-message><?php echo esc_html((string) ($running_job['message'] ?? '')); ?></p>
+					<p class="synchy-progress__detail" data-synchy-progress-detail>
+						<?php
+						if ($running_job !== []) {
+							printf(
+								/* translators: 1: current file count, 2: total file count */
+								esc_html__('Files processed: %1$s / %2$s', 'synchy'),
+								esc_html(number_format_i18n((int) ($running_job['cursor'] ?? 0))),
+								esc_html(number_format_i18n((int) ($running_job['file_count'] ?? 0)))
+							);
+						}
+						?>
+					</p>
+				</div>
+
+				<div class="synchy-stage-status">
+					<p class="synchy-stage-status__label"><?php esc_html_e('Export Stage Status', 'synchy'); ?></p>
+					<div class="synchy-export-stages" data-synchy-export-stages>
+						<?php foreach (synchy_get_export_stage_items($running_job) as $stage) : ?>
+							<div class="synchy-export-stage is-<?php echo esc_attr((string) $stage['state']); ?>">
+								<span class="synchy-export-stage__indicator" aria-hidden="true"></span>
+								<div class="synchy-export-stage__content">
+									<strong><?php echo esc_html((string) $stage['label']); ?></strong>
+									<span><?php echo esc_html((string) $stage['description']); ?></span>
+								</div>
+							</div>
+						<?php endforeach; ?>
+					</div>
+				</div>
+			</div>
+
+			<p class="submit">
+				<button type="submit" class="button button-primary"><?php esc_html_e('Save Export Settings', 'synchy'); ?></button>
+			</p>
+		</form>
+	</div>
+	<?php
+}
+
+function synchy_render_export_import_page(array $current): void
 {
 	$options = synchy_get_export_options();
 	$groups = synchy_get_export_filter_groups();
-	$included = synchy_get_export_included_items();
 	$export_history = synchy_get_export_history();
 	$running_job = synchy_get_running_export_job();
 	$default_package_name = synchy_get_default_package_name();
@@ -11594,186 +11767,36 @@ function synchy_render_export_page(array $current): void
 		<div class="synchy-shell">
 			<div class="synchy-hero">
 				<div>
-					<p class="synchy-eyebrow"><?php esc_html_e('Export Design', 'synchy'); ?></p>
+					<p class="synchy-eyebrow"><?php esc_html_e('Package & Restore', 'synchy'); ?></p>
 					<h1><?php echo esc_html($current['headline']); ?></h1>
 					<?php if ((string) $current['description'] !== '') : ?>
 						<p class="synchy-description"><?php echo esc_html($current['description']); ?></p>
 					<?php endif; ?>
 				</div>
-				<div class="synchy-hero-notify">
-					<label class="synchy-sync-scope-toggle">
-						<input
-							type="checkbox"
-							form="synchy-export-settings-form"
-							name="<?php echo esc_attr(SYNCHY_EXPORT_OPTIONS); ?>[notify_email_enabled]"
-							value="1"
-							<?php checked(!empty($options['notify_email_enabled'])); ?>
-						/>
-						<span><?php esc_html_e('Email me when done', 'synchy'); ?></span>
-					</label>
-					<input
-						type="email"
-						form="synchy-export-settings-form"
-						class="regular-text"
-						name="<?php echo esc_attr(SYNCHY_EXPORT_OPTIONS); ?>[notify_email_address]"
-						value="<?php echo esc_attr((string) $options['notify_email_address']); ?>"
-						placeholder="<?php echo esc_attr((string) get_option('admin_email')); ?>"
-					/>
-				</div>
-				<div class="synchy-status">
-					<span class="synchy-status__dot" aria-hidden="true"></span>
-					<?php echo esc_html($running_job === [] ? __('Export ready', 'synchy') : __('Export running', 'synchy')); ?>
-				</div>
 				<div class="synchy-quick-links-menu">
 					<?php synchy_render_ddev_export_instructions(); ?>
 					<?php synchy_render_hostinger_export_instructions(); ?>
+					<?php synchy_render_what_import_does_instructions(); ?>
 				</div>
+			</div>
+
+			<div class="synchy-split-columns">
+				<?php
+				synchy_render_export_column(
+					$options,
+					$groups,
+					$running_job,
+					$archive_preview,
+					$installer_preview,
+					$manifest_preview,
+					$default_package_name
+				);
+				synchy_render_import_column();
+				?>
 			</div>
 
 			<?php synchy_render_export_history($export_history, 'synchy-export'); ?>
 			<?php synchy_render_export_readme_panel($options); ?>
-
-			<form id="synchy-export-settings-form" method="post" action="options.php" class="synchy-form" data-synchy-export-form>
-				<?php settings_fields('synchy_export'); ?>
-
-				<div class="synchy-grid synchy-grid--export">
-					<div class="synchy-panel">
-						<h2><?php esc_html_e('Default Exclude Filters', 'synchy'); ?></h2>
-						<p class="synchy-field-note">
-							<?php esc_html_e('These filters define what Synchy should leave out of a full export by default. Your selected export destination is also excluded automatically at runtime.', 'synchy'); ?>
-						</p>
-
-						<div class="synchy-filter-list">
-							<?php foreach ($groups as $key => $group) : ?>
-								<div class="synchy-filter-card">
-									<label class="synchy-toggle">
-										<input
-											type="checkbox"
-											name="<?php echo esc_attr(SYNCHY_EXPORT_OPTIONS); ?>[<?php echo esc_attr($key); ?>]"
-											value="1"
-											<?php checked(!empty($options[$key])); ?>
-										/>
-										<span><?php echo esc_html($group['label']); ?></span>
-									</label>
-									<p><?php echo esc_html($group['description']); ?></p>
-									<div class="synchy-patterns">
-										<?php foreach ($group['patterns'] as $pattern) : ?>
-											<code><?php echo esc_html($pattern); ?></code>
-										<?php endforeach; ?>
-									</div>
-								</div>
-							<?php endforeach; ?>
-						</div>
-
-						<h3><?php esc_html_e('Custom Excludes', 'synchy'); ?></h3>
-						<p class="synchy-field-note">
-							<?php esc_html_e('Enter one path or glob per line. These will be added on top of the default filters above.', 'synchy'); ?>
-						</p>
-						<textarea
-							class="large-text code"
-							rows="8"
-							name="<?php echo esc_attr(SYNCHY_EXPORT_OPTIONS); ?>[custom_excludes]"
-							placeholder=".env\nwp-content/synchy-temp/\ncustom-cache/"
-						><?php echo esc_textarea((string) $options['custom_excludes']); ?></textarea>
-					</div>
-
-					<div class="synchy-panel synchy-panel--muted">
-						<h2><?php esc_html_e('Package Output', 'synchy'); ?></h2>
-						<div class="synchy-field">
-							<label class="synchy-label" for="synchy-output-directory"><?php esc_html_e('Save path', 'synchy'); ?></label>
-							<div class="synchy-input-row">
-								<input
-									id="synchy-output-directory"
-									type="text"
-									class="regular-text code"
-									name="<?php echo esc_attr(SYNCHY_EXPORT_OPTIONS); ?>[output_directory]"
-									value="<?php echo esc_attr((string) $options['output_directory']); ?>"
-									data-synchy-output-directory
-								/>
-								<button type="button" class="button" data-synchy-browse><?php esc_html_e('Browse', 'synchy'); ?></button>
-								<button type="button" class="button" data-synchy-use-default data-default-path="<?php echo esc_attr(synchy_get_default_output_directory()); ?>"><?php esc_html_e('Default', 'synchy'); ?></button>
-							</div>
-							<p class="synchy-field-note">
-								<?php esc_html_e('Relative paths resolve from the WordPress root. The browser only lists folders inside this site.', 'synchy'); ?>
-							</p>
-						</div>
-
-							<div class="synchy-field">
-								<label class="synchy-label" for="synchy-package-name"><?php esc_html_e('Package name', 'synchy'); ?></label>
-								<input
-									id="synchy-package-name"
-									type="text"
-									class="regular-text"
-									name="<?php echo esc_attr(SYNCHY_EXPORT_OPTIONS); ?>[package_name]"
-									value="<?php echo esc_attr((string) $options['package_name']); ?>"
-									placeholder="<?php echo esc_attr($default_package_name); ?>"
-									data-synchy-package-name
-								/>
-								<p class="synchy-field-note">
-									<?php
-									printf(
-										/* translators: %s: default package name */
-										esc_html__('Leave this blank to use %s. Synchy adds the same base name to the zip, installer, and manifest files.', 'synchy'),
-										esc_html($default_package_name)
-									);
-									?>
-								</p>
-							</div>
-
-							<div class="synchy-package">
-								<div><code data-synchy-archive-preview><?php echo esc_html($archive_preview); ?></code></div>
-								<div><code data-synchy-installer-preview><?php echo esc_html($installer_preview); ?></code></div>
-								<div><code data-synchy-manifest-preview><?php echo esc_html($manifest_preview); ?></code></div>
-							</div>
-
-							<div class="synchy-progress<?php echo $running_job === [] ? ' is-hidden' : ''; ?>" data-synchy-progress>
-								<div class="synchy-progress__top">
-									<strong data-synchy-progress-phase><?php echo esc_html(synchy_export_phase_label((string) ($running_job['phase'] ?? 'queued'))); ?></strong>
-									<span data-synchy-progress-percent><?php echo esc_html((string) (int) ($running_job['progress'] ?? 0)); ?>%</span>
-								</div>
-								<div class="synchy-progress__bar">
-									<span data-synchy-progress-bar style="width: <?php echo esc_attr((string) (int) ($running_job['progress'] ?? 0)); ?>%;"></span>
-								</div>
-							<p class="synchy-progress__message" data-synchy-progress-message><?php echo esc_html((string) ($running_job['message'] ?? '')); ?></p>
-							<p class="synchy-progress__detail" data-synchy-progress-detail>
-								<?php
-								if ($running_job !== []) {
-									printf(
-										/* translators: 1: current file count, 2: total file count */
-										esc_html__('Files processed: %1$s / %2$s', 'synchy'),
-										esc_html(number_format_i18n((int) ($running_job['cursor'] ?? 0))),
-										esc_html(number_format_i18n((int) ($running_job['file_count'] ?? 0)))
-									);
-								}
-								?>
-							</p>
-							</div>
-
-							<div class="synchy-run-export">
-								<button type="button" class="button button-primary button-large" data-synchy-run-export><?php esc_html_e('Run Full Export', 'synchy'); ?></button>
-							</div>
-
-							<div class="synchy-stage-status">
-								<p class="synchy-stage-status__label"><?php esc_html_e('Export Stage Status', 'synchy'); ?></p>
-								<div class="synchy-export-stages" data-synchy-export-stages>
-									<?php foreach (synchy_get_export_stage_items($running_job) as $stage) : ?>
-										<div class="synchy-export-stage is-<?php echo esc_attr((string) $stage['state']); ?>">
-											<span class="synchy-export-stage__indicator" aria-hidden="true"></span>
-											<div class="synchy-export-stage__content">
-												<strong><?php echo esc_html((string) $stage['label']); ?></strong>
-												<span><?php echo esc_html((string) $stage['description']); ?></span>
-											</div>
-										</div>
-									<?php endforeach; ?>
-								</div>
-							</div>
-						</div>
-					</div>
-
-				<p class="submit">
-					<button type="submit" class="button button-primary"><?php esc_html_e('Save Export Settings', 'synchy'); ?></button>
-				</p>
-			</form>
 		</div>
 	</div>
 
@@ -12627,15 +12650,14 @@ function synchy_render_page(string $page_slug): void
 	}
 
 	if ($page_slug === SYNCHY_SLUG) {
-		synchy_render_export_page($export_page);
+		synchy_render_export_import_page($export_page);
 		return;
 	}
 
 	if ($page_slug === 'synchy-export' || $page_slug === 'synchy-import') {
-		// One page, two sections: Export (create a package) and Import (restore a package) --
-		// Import kept as a working URL alias so old links/bookmarks still land here correctly.
-		synchy_render_export_page($export_page);
-		synchy_render_import_page($export_page);
+		// One page, two columns: Export (create a package) on the left, Import (restore a package)
+		// on the right. Import kept as a working URL alias so old links/bookmarks still land here.
+		synchy_render_export_import_page($export_page);
 		return;
 	}
 
@@ -12799,6 +12821,27 @@ add_action('admin_post_synchy_save_site_role', function (): void {
 
 	wp_safe_redirect(add_query_arg('settings-updated', 'true', remove_query_arg('settings-updated', $redirect)));
 	exit;
+});
+
+add_action('wp_ajax_synchy_export_notify_autosave', function (): void {
+	if (!current_user_can('manage_options')) {
+		wp_send_json_error(['message' => __('You are not allowed to change Synchy export settings.', 'synchy')], 403);
+	}
+
+	check_ajax_referer('synchy_export_ajax', 'nonce');
+
+	// Only these two keys are touched here -- reusing synchy_sanitize_export_options() would
+	// require every other export setting to also be present in this request, and any missing
+	// key would get silently reset to its default. This updates the saved option directly for
+	// just the notify fields instead, leaving the rest of the export settings untouched.
+	$options = synchy_get_export_options();
+	$options['notify_email_enabled'] = empty($_POST['notify_email_enabled']) ? 0 : 1;
+	$raw_email = isset($_POST['notify_email_address']) ? sanitize_email(wp_unslash((string) $_POST['notify_email_address'])) : '';
+	$options['notify_email_address'] = is_email($raw_email) ? $raw_email : '';
+
+	update_option(SYNCHY_EXPORT_OPTIONS, $options);
+
+	wp_send_json_success(['message' => __('Saved.', 'synchy')]);
 });
 
 add_action('wp_ajax_synchy_start_export', function (): void {

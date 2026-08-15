@@ -404,4 +404,28 @@
 		renderProgress(currentJob);
 		pollJob(currentJob.id);
 	}
+
+	// "Email me when done" autosaves on change -- it's a hero-level control the user expects to
+	// stick immediately, not something that should wait for the full Export Settings form submit.
+	const notifyCheckbox = document.querySelector('input[name="synchy_export_options[notify_email_enabled]"]');
+	const notifyEmailInput = document.querySelector('input[name="synchy_export_options[notify_email_address]"]');
+
+	if (notifyCheckbox && notifyEmailInput) {
+		const autosaveNotify = async () => {
+			try {
+				await request({
+					action: "synchy_export_notify_autosave",
+					nonce: config.nonce,
+					notify_email_enabled: notifyCheckbox.checked ? "1" : "",
+					notify_email_address: notifyEmailInput.value,
+				});
+			} catch (error) {
+				// Silent failure is acceptable here -- this is a background convenience save, not
+				// a blocking action; the full Export Settings form is still there as a fallback.
+			}
+		};
+
+		notifyCheckbox.addEventListener("change", autosaveNotify);
+		notifyEmailInput.addEventListener("change", autosaveNotify);
+	}
 })();
