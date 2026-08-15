@@ -3646,20 +3646,12 @@ class Freesiem_Admin
 				'legacy_slug' => 'synchy-site-sync',
 			],
 			'export' => [
-				'label' => __('Export', 'freesiem-sentinel'),
+				'label' => __('Backup & Restore', 'freesiem-sentinel'),
 				'legacy_slug' => 'synchy-export',
-			],
-			'import' => [
-				'label' => __('Import', 'freesiem-sentinel'),
-				'legacy_slug' => 'synchy-import',
 			],
 			'schedule' => [
 				'label' => __('Schedule', 'freesiem-sentinel'),
 				'legacy_slug' => 'synchy-scheduled-backups',
-			],
-			'upload-live' => [
-				'label' => __('Update to Live', 'freesiem-sentinel'),
-				'legacy_slug' => 'synchy-push-live-site',
 			],
 		];
 	}
@@ -3667,6 +3659,15 @@ class Freesiem_Admin
 	private function get_synchy_current_tab(): string
 	{
 		$tab = isset($_GET['tab']) ? sanitize_key((string) wp_unslash($_GET['tab'])) : 'sync';
+
+		// Import and Upload to Live no longer have their own tabs -- Import merged into Export
+		// (now "Backup & Restore"), Upload to Live was removed outright -- but old bookmarks/links
+		// with ?tab=import or ?tab=upload-live should still land somewhere sensible, not silently
+		// fall back to Sync.
+		if ($tab === 'import' || $tab === 'upload-live') {
+			return 'export';
+		}
+
 		$tabs = $this->get_synchy_tabs();
 
 		return isset($tabs[$tab]) ? $tab : 'sync';
@@ -3687,6 +3688,12 @@ class Freesiem_Admin
 
 		if ($page === 'synchy-settings') {
 			return 'sync';
+		}
+
+		// Same backward-compat mapping as get_synchy_current_tab(): both old legacy page slugs
+		// now live under the Export tab (renamed "Backup & Restore").
+		if ($page === 'synchy-import' || $page === 'synchy-push-live-site') {
+			return 'export';
 		}
 
 		foreach ($this->get_synchy_tabs() as $tab => $config) {
