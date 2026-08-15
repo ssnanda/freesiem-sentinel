@@ -6883,7 +6883,7 @@ function synchy_get_site_sync_stage_definitions(): array
 		],
 		'starting_export' => [
 			'label' => __('Prepare Package', 'synchy'),
-			'description' => __('Set up the full export job that Upload to Live depends on.', 'synchy'),
+			'description' => __('Set up the full export job.', 'synchy'),
 		],
 		'exporting_package' => [
 			'label' => __('Build Package', 'synchy'),
@@ -10746,7 +10746,7 @@ function synchy_render_import_page(array $current): void
 						<li><?php esc_html_e('Working now: show the exact root path, staging folder, and installer URL after placement.', 'synchy'); ?></li>
 						<li><?php esc_html_e('Working now: smaller package zips can be staged and copied into the root when the browser upload succeeds.', 'synchy'); ?></li>
 						<li><?php esc_html_e('Not ready yet: reliable large zip uploads for bigger sites when the package exceeds browser, proxy, or CDN limits.', 'synchy'); ?></li>
-						<li><?php esc_html_e('Best current path for larger sites: place installer.php with Import, then use Upload to Live or manual file placement for the zip.', 'synchy'); ?></li>
+						<li><?php esc_html_e('Best current path for larger sites: place installer.php with Import, then use manual file placement for the zip.', 'synchy'); ?></li>
 					</ul>
 				</div>
 			</div>
@@ -11885,8 +11885,7 @@ function synchy_render_schedule_page(array $current): void
 					<ul class="synchy-checklist">
 						<li><?php esc_html_e('Working now: Export builds a full package on demand with archive history and downloads.', 'synchy'); ?></li>
 						<li><?php esc_html_e('Working now: Import places installer.php and smaller packages on the destination for manual restore.', 'synchy'); ?></li>
-						<li><?php esc_html_e('Working now: Upload to Live sends the full package to another WordPress site and stages the manual restore there.', 'synchy'); ?></li>
-						<li><?php esc_html_e('Not ready yet: recurring schedules, retention automation, unattended remote jobs, and email/reporting around scheduled runs.', 'synchy'); ?></li>
+							<li><?php esc_html_e('Not ready yet: recurring schedules, retention automation, unattended remote jobs, and email/reporting around scheduled runs.', 'synchy'); ?></li>
 					</ul>
 				</div>
 			</div>
@@ -11897,8 +11896,7 @@ function synchy_render_schedule_page(array $current): void
 					<ul class="synchy-checklist">
 						<li><?php esc_html_e('Use Export when you want a fresh manual backup package right now.', 'synchy'); ?></li>
 						<li><?php esc_html_e('Use Import on the destination site when you want to place installer.php or a smaller package manually.', 'synchy'); ?></li>
-						<li><?php esc_html_e('Use Upload to Live when you want Synchy to deliver the package and installer to another site for manual restore.', 'synchy'); ?></li>
-					</ul>
+						</ul>
 				</div>
 
 				<div class="synchy-panel synchy-panel--muted">
@@ -12635,8 +12633,7 @@ function synchy_render_settings_page(array $current): void
 					<ul class="synchy-checklist">
 						<li><?php esc_html_e('Export builds a portable archive plus installer package.', 'synchy'); ?></li>
 						<li><?php esc_html_e('Import is the destination-side overwrite path for full package restores.', 'synchy'); ?></li>
-						<li><?php esc_html_e('Upload to Live sends a full package to another WordPress install and stages the manual restore there.', 'synchy'); ?></li>
-						<li><?php esc_html_e('Sync is the separate work area for incremental post-push changes without another full backup/restore cycle.', 'synchy'); ?></li>
+							<li><?php esc_html_e('Sync is the separate work area for incremental post-push changes without another full backup/restore cycle.', 'synchy'); ?></li>
 					</ul>
 				</div>
 			</div>
@@ -13497,7 +13494,7 @@ add_action('rest_api_init', function (): void {
 
 		return new WP_Error(
 			'synchy_rest_forbidden',
-			__('You are not allowed to access Synchy Upload to Live receiver endpoints.', 'synchy'),
+			__('You are not allowed to access this Synchy receiver endpoint.', 'synchy'),
 			['status' => rest_authorization_required_code()]
 		);
 	};
