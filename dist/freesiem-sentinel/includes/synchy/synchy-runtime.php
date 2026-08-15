@@ -11038,23 +11038,23 @@ function synchy_get_purge_backup_download_token(string $package_id, string $arti
 function synchy_render_export_history(array $history, string $page_slug): void
 {
 	?>
-	<details class="synchy-panel synchy-panel--wide synchy-history-collapsible">
-		<summary class="synchy-history-collapsible__summary">
-			<span><?php esc_html_e('Available Export History', 'synchy'); ?></span>
-			<span class="synchy-badge">
-				<?php
-				printf(
-					/* translators: %s: number of export packages */
-					esc_html(_n('%s package', '%s packages', count($history), 'synchy')),
-					esc_html(number_format_i18n(count($history)))
-				);
-				?>
-			</span>
-		</summary>
-		<div class="synchy-stack synchy-stack--compact">
-			<p class="synchy-field-note">
-				<?php esc_html_e('Backup & Restore lists every retained export package whose archive is still available on disk. Delete removes the package files from this site.', 'synchy'); ?>
-			</p>
+	<details class="synchy-quick-link synchy-quick-link--history">
+		<summary><?php esc_html_e('Available Export History', 'synchy'); ?></summary>
+		<div class="synchy-stack synchy-stack--compact synchy-quick-link__body">
+			<div class="synchy-stack__split">
+				<p class="synchy-field-note" style="margin:0;">
+					<?php esc_html_e('Every retained export package whose archive is still available on disk. Delete removes the package files from this site.', 'synchy'); ?>
+				</p>
+				<span class="synchy-badge">
+					<?php
+					printf(
+						/* translators: %s: number of export packages */
+						esc_html(_n('%s package', '%s packages', count($history), 'synchy')),
+						esc_html(number_format_i18n(count($history)))
+					);
+					?>
+				</span>
+			</div>
 
 			<?php if ($history === []) : ?>
 				<p class="synchy-field-note"><?php esc_html_e('No Backup & Restore exports are currently available on this site.', 'synchy'); ?></p>
@@ -11746,6 +11746,7 @@ function synchy_render_export_import_page(array $current): void
 		<?php synchy_render_notice(); ?>
 		<div class="synchy-shell">
 			<div class="synchy-quick-links-menu">
+				<?php synchy_render_export_history($export_history, 'synchy-export'); ?>
 				<?php synchy_render_ddev_export_instructions(); ?>
 				<?php synchy_render_hostinger_export_instructions(); ?>
 				<?php synchy_render_what_import_does_instructions(); ?>
@@ -11766,7 +11767,6 @@ function synchy_render_export_import_page(array $current): void
 				?>
 			</div>
 
-			<?php synchy_render_export_history($export_history, 'synchy-export'); ?>
 			<?php synchy_render_export_readme_panel($options); ?>
 		</div>
 	</div>

@@ -2076,6 +2076,17 @@
 	background: #f6f8f7;
 }
 
+/* Pushes itself to the far left while the rest of the row (justify-content: flex-end) stays
+   grouped together on the right -- keeps Export History visually separate from the how-to links. */
+.synchy-quick-link--history {
+	margin-right: auto;
+}
+
+.synchy-quick-link--history .synchy-quick-link__body {
+	right: auto;
+	left: 0;
+}
+
 .synchy-quick-link > summary {
 	display: flex;
 	align-items: center;
