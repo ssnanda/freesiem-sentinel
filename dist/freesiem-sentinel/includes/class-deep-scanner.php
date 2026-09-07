@@ -662,10 +662,11 @@ class Freesiem_Deep_Scanner
 	}
 
 	/**
-	 * A harmless "Silence is golden" directory-listing stub — the empty index.php
-	 * that WordPress core and countless plugins (WPForms, Astra, ...) drop into
-	 * their own upload subfolders. Tiny, named index.php, and with nothing left
-	 * once PHP tags, comments and whitespace are stripped.
+	 * A harmless directory-listing guard — the tiny index.php that WordPress core
+	 * and countless plugins (WPForms, Astra, ...) drop into their own upload
+	 * subfolders to stop directory enumeration. Either the empty "Silence is
+	 * golden" stub, or one whose only code is a 404 / response-code / exit call.
+	 * Malware planted in an uploads index.php wants to run, not to 404.
 	 */
 	private function is_directory_index_stub(string $path, string $basename, int $size): bool
 	{
@@ -674,21 +675,31 @@ class Freesiem_Deep_Scanner
 		}
 
 		$contents = (string) @file_get_contents($path, false, null, 0, 512);
-		$stripped = (string) preg_replace(
-			[
-				'~<\?php~i',
-				'~<\?=?~',
-				'~\?>~',
-				'~//[^\r\n]*~',
-				'~#[^\r\n]*~',
-				'~/\*.*?\*/~s',
-				'~\s+~',
-			],
+
+		// Strip PHP tags, comments, then neutralise quoted strings and whitespace.
+		$code = (string) preg_replace(
+			['~<\?php~i', '~<\?=?~', '~\?>~', '~//[^\r\n]*~', '~#[^\r\n]*~', '~/\*.*?\*/~s'],
 			'',
 			$contents
 		);
+		$code = (string) preg_replace('~([\'"]).*?\1~s', "''", $code);
+		$code = (string) preg_replace('~\s+~', '', $code);
 
-		return $stripped === '';
+		if ($code === '') {
+			return true;
+		}
+
+		// Remove the handful of calls a listing guard is allowed to make. Each
+		// argument list must be paren-free, so a nested call like
+		// exit(shell_exec(...)) is deliberately left behind and still flagged.
+		$code = (string) preg_replace(
+			'~(?:header|http_response_code|status_header|nocache_headers)\([^()]*\);|(?:exit|die)(?:\([^()]*\))?;~',
+			'',
+			$code
+		);
+		$code = (string) str_replace(["\$_SERVER['']", '.', ';'], '', $code);
+
+		return $code === '';
 	}
 
 	// ---------------------------------------------------------------------
