@@ -26,6 +26,7 @@ class Freesiem_Cron
 		add_filter('cron_schedules', [$this, 'register_schedule']);
 		add_action(self::HEARTBEAT_HOOK, [$this, 'heartbeat']);
 		add_action(self::LOCAL_SCAN_HOOK, [$this, 'local_scan']);
+		add_action(Freesiem_Deep_Scanner::CONTINUE_HOOK, [$this, 'deep_scan_continue']);
 		add_action(self::SYNC_HOOK, [$this, 'sync_results']);
 		add_action(self::TASK_PROCESS_HOOK, [$this, 'process_pending_tasks']);
 		add_action(self::INSTALL_BASE_HEARTBEAT_HOOK, [$this, 'install_base_heartbeat']);
@@ -89,6 +90,7 @@ class Freesiem_Cron
 		wp_clear_scheduled_hook(self::TASK_HEARTBEAT_HOOK);
 		wp_clear_scheduled_hook(self::INSTALL_BASE_HEARTBEAT_HOOK);
 		wp_clear_scheduled_hook(self::SSL_AUTO_RENEW_HOOK);
+		wp_clear_scheduled_hook(Freesiem_Deep_Scanner::CONTINUE_HOOK);
 	}
 
 	public function heartbeat(): void
@@ -99,6 +101,12 @@ class Freesiem_Cron
 	public function local_scan(): void
 	{
 		$this->plugin->run_local_scan(true);
+		$this->plugin->get_deep_scanner()->maybe_start_scheduled();
+	}
+
+	public function deep_scan_continue(): void
+	{
+		$this->plugin->deep_scan_continue();
 	}
 
 	public function sync_results(): void

@@ -10,6 +10,7 @@ class Freesiem_Plugin
 
 	private Freesiem_API_Client $api_client;
 	private Freesiem_Scanner $scanner;
+	private Freesiem_Deep_Scanner $deep_scanner;
 	private Freesiem_Results $results;
 	private Freesiem_Commands $commands;
 	private Freesiem_Cron $cron;
@@ -40,6 +41,7 @@ class Freesiem_Plugin
 		$this->cloud_connect_client = new Freesiem_Cloud_Connect_Client();
 		$this->install_base_dial_home = new Freesiem_Install_Base_Dial_Home();
 		$this->scanner = new Freesiem_Scanner();
+		$this->deep_scanner = new Freesiem_Deep_Scanner($this);
 		$this->results = new Freesiem_Results();
 		$this->updater = new Freesiem_Updater();
 		$this->commands = new Freesiem_Commands($this);
@@ -217,6 +219,8 @@ class Freesiem_Plugin
 
 		$filesystem = is_array($scan['inventory']['filesystem'] ?? null) ? $scan['inventory']['filesystem'] : [];
 		$scan_profile = is_array($scan['inventory']['scan_profile'] ?? null) ? $scan['inventory']['scan_profile'] : [];
+		$scan_profile = array_merge(freesiem_sentinel_safe_array(freesiem_sentinel_get_setting('scan_preferences', [])), $scan_profile);
+		$scan['inventory']['scan_profile'] = $scan_profile;
 		$scan['summary'] = [
 			'files_discovered' => (int) ($filesystem['discovered_files'] ?? 0),
 			'files_analyzed' => (int) ($filesystem['inspected_files'] ?? 0),
@@ -681,6 +685,56 @@ class Freesiem_Plugin
 		return $this->results;
 	}
 
+	public function get_deep_scanner(): Freesiem_Deep_Scanner
+	{
+		return $this->deep_scanner;
+	}
+
+	public function deep_scan_continue(): void
+	{
+		$this->deep_scanner->continue_scan();
+	}
+
+	/**
+	 * Push the current locally-cached findings + inventory to freeSIEM Core.
+	 *
+	 * Used after a deep scan finalizes (which merges its findings into the results
+	 * cache) so the backend sees the enriched result set without re-running the
+	 * quick scan.
+	 */
+	public function push_local_findings_snapshot()
+	{
+		$settings = freesiem_sentinel_get_settings();
+
+		if (empty($settings['site_id'])) {
+			return null;
+		}
+
+		$cache = $this->results->get_cache();
+		$findings = array_values(freesiem_sentinel_safe_array($cache['local_findings'] ?? []));
+		$inventory = freesiem_sentinel_safe_array($cache['local_inventory'] ?? []);
+
+		$response = $this->api_client->upload_local_scan([
+			'site_id' => (string) $settings['site_id'],
+			'metadata' => [
+				'site_url' => site_url('/'),
+				'wp_version' => get_bloginfo('version'),
+				'plugin_version' => FREESIEM_SENTINEL_VERSION,
+			],
+			'findings' => $findings,
+			'inventory' => $inventory,
+			'scan_timestamps' => [
+				'local' => freesiem_sentinel_get_iso8601_time(),
+			],
+		]);
+
+		if (is_array($response) && $response !== []) {
+			freesiem_sentinel_update_settings(['last_sync_at' => freesiem_sentinel_get_iso8601_time()]);
+		}
+
+		return $response;
+	}
+
 	public function get_updater(): Freesiem_Updater
 	{
 		return $this->updater;
@@ -708,6 +762,12 @@ class Freesiem_Plugin
 
 	public function clear_scan_results(): array
 	{
+		$this->deep_scanner->abort();
+
+		if (function_exists('wp_clear_scheduled_hook')) {
+			wp_clear_scheduled_hook(Freesiem_Deep_Scanner::CONTINUE_HOOK);
+		}
+
 		return $this->results->clear_scan_results();
 	}
 
@@ -780,6 +840,18 @@ class Freesiem_Plugin
 		}
 		if (!empty($scan_profile['scan_fim'])) {
 			$modules[] = 'File Integrity';
+		}
+		if (!empty($scan_profile['scan_malware'])) {
+			$modules[] = 'Malware Signatures';
+		}
+		if (!empty($scan_profile['scan_core_integrity'])) {
+			$modules[] = 'Core Checksums';
+		}
+		if (!empty($scan_profile['scan_plugin_integrity'])) {
+			$modules[] = 'Plugin Checksums';
+		}
+		if (!empty($scan_profile['scan_database'])) {
+			$modules[] = 'Database';
 		}
 
 		return $modules;

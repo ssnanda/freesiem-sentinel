@@ -66,6 +66,16 @@ class Freesiem_Commands
 					$response['status'] = is_wp_error($scan) || !empty($scan['status']) ? 'failed' : 'completed';
 					$response['message'] = is_wp_error($scan) ? $scan->get_error_message() : safe($scan['message'] ?? __('Local scan completed.', 'freesiem-sentinel'));
 					$response['result'] = is_wp_error($scan) || !empty($scan['status']) ? [] : ['score' => $scan['score'] ?? null];
+
+					if (!is_wp_error($scan) && empty($scan['status'])) {
+						$deep = $this->plugin->get_deep_scanner();
+
+						if (!$deep->is_running() || $deep->is_stalled()) {
+							$deep->start();
+						}
+
+						$deep->continue_scan();
+					}
 					break;
 
 				case 'sync_results':

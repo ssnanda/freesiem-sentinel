@@ -59,6 +59,106 @@ class Freesiem_Results
 		return $cache;
 	}
 
+	/**
+	 * Merge deep-scan findings into the stored quick-scan results.
+	 *
+	 * Previous deep findings (finding_key prefixed "deep_", or in a deep-only category)
+	 * are dropped and replaced, so re-running the deep scan does not pile up stale hits.
+	 * The settings option is written directly (full replace) rather than through
+	 * array_replace_recursive so a shorter findings list cannot leave stale tail entries.
+	 */
+	public function merge_deep_scan(array $deep_findings, array $metrics): array
+	{
+		$now = freesiem_sentinel_get_iso8601_time();
+		$deep_categories = ['malware', 'core_integrity', 'plugin_integrity', 'database'];
+
+		$cache = $this->get_cache();
+		$existing = array_values(freesiem_sentinel_safe_array($cache['local_findings'] ?? []));
+
+		$deep_paths = [];
+
+		foreach ($deep_findings as $finding) {
+			$path = is_array($finding) ? (string) ($finding['evidence']['path'] ?? '') : '';
+
+			if ($path !== '') {
+				$deep_paths[$path] = true;
+			}
+		}
+
+		$base = array_filter($existing, static function ($finding) use ($deep_categories, $deep_paths): bool {
+			if (!is_array($finding)) {
+				return false;
+			}
+
+			if (str_starts_with((string) ($finding['finding_key'] ?? ''), 'deep_')) {
+				return false;
+			}
+
+			if (in_array((string) ($finding['category'] ?? ''), $deep_categories, true)) {
+				return false;
+			}
+
+			// Drop a quick-scan filesystem heuristic if the deep scan already
+			// reported the same file, so the file is not listed twice.
+			if ((string) ($finding['category'] ?? '') === 'filesystem'
+				&& isset($deep_paths[(string) ($finding['evidence']['path'] ?? '')])) {
+				return false;
+			}
+
+			return true;
+		});
+
+		$by_key = [];
+
+		foreach (array_merge(array_values($base), array_values($deep_findings)) as $finding) {
+			if (!is_array($finding)) {
+				continue;
+			}
+
+			$key = (string) ($finding['finding_key'] ?? '');
+
+			if ($key === '') {
+				$key = 'auto_' . md5((string) wp_json_encode($finding));
+			}
+
+			$by_key[$key] = $finding;
+		}
+
+		$merged = $this->sort_findings(array_values($by_key));
+
+		$cache['fetched_at'] = $now;
+		$cache['local_findings'] = $merged;
+		$cache['severity_counts'] = $this->count_severities($merged);
+		$cache['top_issues'] = array_slice($merged, 0, 5);
+		$cache['recommendations'] = array_values(array_unique(array_map(static function (array $finding): string {
+			return (string) ($finding['recommendation'] ?? '');
+		}, $merged)));
+		$cache['summary'] = array_merge(
+			is_array($cache['summary'] ?? null) ? $cache['summary'] : [],
+			[
+				'local_score' => freesiem_sentinel_score_from_findings($merged),
+				'last_local_scan_at' => $now,
+				'last_deep_scan_at' => (string) ($metrics['finished_at'] ?? $now),
+				'files_content_scanned' => (int) ($metrics['files_scanned'] ?? 0),
+				'files_seen_deep' => (int) ($metrics['files_seen'] ?? 0),
+				'bytes_scanned' => (int) ($metrics['bytes_scanned'] ?? 0),
+				'malware_hits' => (int) ($metrics['malware_hits'] ?? 0),
+				'core_files_modified' => (int) ($metrics['core_files_modified'] ?? 0),
+				'plugin_files_modified' => (int) ($metrics['plugin_files_modified'] ?? 0),
+				'database_issues' => (int) ($metrics['database_issues'] ?? 0),
+				'deep_scan_partial' => !empty($metrics['partial']),
+				'deep_scan_partial_reason' => (string) ($metrics['partial_reason'] ?? ''),
+			]
+		);
+
+		$settings = freesiem_sentinel_get_settings();
+		$settings['summary_cache'] = $cache;
+		$settings['last_local_scan_at'] = $now;
+		update_option(FREESIEM_SENTINEL_OPTION, freesiem_sentinel_sanitize_settings($settings), false);
+
+		return $cache;
+	}
+
 	public function clear_scan_results(): array
 	{
 		$defaults = freesiem_sentinel_get_default_settings();

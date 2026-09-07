@@ -63,6 +63,14 @@ function freesiem_sentinel_get_default_settings(): array
 			'scan_wordpress' => 1,
 			'scan_filesystem' => 1,
 			'scan_fim' => 1,
+			'scan_malware' => 1,
+			'scan_core_integrity' => 1,
+			'scan_plugin_integrity' => 1,
+			'scan_database' => 1,
+			'scan_uploads_deep' => 1,
+			'scan_intensity' => 'balanced',
+			'throttle_us' => -1,
+			'exclude_paths' => [],
 			'include_uploads' => 0,
 			'max_files' => 1000,
 			'max_depth' => 5,
@@ -391,9 +399,24 @@ function freesiem_sentinel_sanitize_settings(array $settings): array
 	$settings['scan_preferences']['scan_wordpress'] = empty($settings['scan_preferences']['scan_wordpress']) ? 0 : 1;
 	$settings['scan_preferences']['scan_filesystem'] = empty($settings['scan_preferences']['scan_filesystem']) ? 0 : 1;
 	$settings['scan_preferences']['scan_fim'] = empty($settings['scan_preferences']['scan_fim']) ? 0 : 1;
+	$settings['scan_preferences']['scan_malware'] = empty($settings['scan_preferences']['scan_malware']) ? 0 : 1;
+	$settings['scan_preferences']['scan_core_integrity'] = empty($settings['scan_preferences']['scan_core_integrity']) ? 0 : 1;
+	$settings['scan_preferences']['scan_plugin_integrity'] = empty($settings['scan_preferences']['scan_plugin_integrity']) ? 0 : 1;
+	$settings['scan_preferences']['scan_database'] = empty($settings['scan_preferences']['scan_database']) ? 0 : 1;
+	$settings['scan_preferences']['scan_uploads_deep'] = empty($settings['scan_preferences']['scan_uploads_deep']) ? 0 : 1;
+	$settings['scan_preferences']['scan_intensity'] = in_array((string) ($settings['scan_preferences']['scan_intensity'] ?? 'balanced'), ['gentle', 'balanced', 'thorough'], true)
+		? (string) $settings['scan_preferences']['scan_intensity']
+		: 'balanced';
+	$settings['scan_preferences']['throttle_us'] = max(-1, min(200000, (int) ($settings['scan_preferences']['throttle_us'] ?? -1)));
+	$settings['scan_preferences']['exclude_paths'] = array_values(array_filter(array_map(
+		static function ($path): string {
+			return trim(ltrim((string) $path, '/'));
+		},
+		is_array($settings['scan_preferences']['exclude_paths'] ?? null) ? $settings['scan_preferences']['exclude_paths'] : []
+	)));
 	$settings['scan_preferences']['include_uploads'] = empty($settings['scan_preferences']['include_uploads']) ? 0 : 1;
-	$settings['scan_preferences']['max_files'] = max(100, min(5000, (int) ($settings['scan_preferences']['max_files'] ?? 1000)));
-	$settings['scan_preferences']['max_depth'] = max(1, min(10, (int) ($settings['scan_preferences']['max_depth'] ?? 5)));
+	$settings['scan_preferences']['max_files'] = max(100, min(200000, (int) ($settings['scan_preferences']['max_files'] ?? 1000)));
+	$settings['scan_preferences']['max_depth'] = max(1, min(20, (int) ($settings['scan_preferences']['max_depth'] ?? 5)));
 
 	$settings['summary_cache'] = is_array($settings['summary_cache']) ? $settings['summary_cache'] : $defaults['summary_cache'];
 	$settings['updater_cache'] = is_array($settings['updater_cache']) ? $settings['updater_cache'] : [];
