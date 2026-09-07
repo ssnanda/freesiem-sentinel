@@ -183,6 +183,14 @@ class Freesiem_Threat_Signatures
 			return true;
 		}
 
+		// "word + version/date number" — Draft202012, phpmailer6, bootstrap4,
+		// log20240115. A real word carrying a year or version is human-named.
+		if (preg_match('/^([a-z]{3,})\d{1,8}([a-z]{0,4})$/', $name, $wm)
+			&& preg_match('/[aeiou]/', $wm[1] . $wm[2])
+			&& !preg_match('/[bcdfghjklmnpqrstvwxz]{5,}/', $wm[1])) {
+			return false;
+		}
+
 		// High share of digits in the token ("x8291736451a").
 		if ($digits >= 6 && $digits / $len >= 0.4) {
 			return true;
@@ -795,15 +803,17 @@ class Freesiem_Threat_Signatures
 			],
 			[
 				'id' => 'js_hidden_iframe',
-				'label' => 'Hidden / zero-size iframe',
-				'severity' => 'medium',
-				'score' => 56,
+				'label' => 'Hidden off-site iframe',
+				'severity' => 'low',
+				'score' => 78,
 				'category' => 'malware',
 				'classes' => ['js', 'html', 'php'],
-				// (?<![\w-]) so marginwidth="0" / marginheight="0" on WP core's
-				// sandboxed oEmbed iframe (embed.php) don't count as width/height 0.
-				'pattern' => '/<iframe[^>]{0,200}(?:(?<![\w-])(?:width|height)\s*=\s*[\'"]?0(?![\d.])|style\s*=\s*[\'"][^\'"]{0,120}(?:display\s*:\s*none|visibility\s*:\s*hidden|left\s*:\s*-\d{3}))/i',
-				'recommendation' => 'Invisible iframes are used for drive-by downloads and ad fraud. Remove the injected markup.',
+				// Hidden iframes are everywhere in legit code (oEmbed sandboxes,
+				// upload shims, postMessage bridges). Only flag one that ALSO loads
+				// an external URL — require a src to //host or http(s)://host, and a
+				// hiding trick (0 size, display:none/hidden, or pushed off-screen).
+				'pattern' => '/<iframe(?=[^>]{0,240}\bsrc\s*=\s*[\'"]?(?:https?:)?\/\/[^\'"\s>]+)[^>]{0,240}(?:(?<![\w-])(?:width|height)\s*=\s*[\'"]?0(?![\d.])|style\s*=\s*[\'"][^\'"]{0,160}(?:display\s*:\s*none|visibility\s*:\s*hidden|(?:left|top)\s*:\s*-\d{3,}))/i',
+				'recommendation' => 'An invisible iframe loading a remote page can be a drive-by or ad-fraud injection. Confirm the src is a service you use; if not, remove the markup and find the injection point.',
 			],
 			[
 				'id' => 'js_external_script_injection',

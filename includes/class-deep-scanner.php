@@ -459,6 +459,13 @@ class Freesiem_Deep_Scanner
 					continue;
 				}
 
+				if ($this->is_secondary_wp_root($child)) {
+					$this->flag_secondary_wp_root($child, $state);
+					$state['counters']['skipped_paths']++;
+
+					continue;
+				}
+
 				$state['dir_stack'][] = ['path' => $child, 'label' => $label, 'depth' => $depth + 1];
 
 				continue;
@@ -2125,6 +2132,78 @@ class Freesiem_Deep_Scanner
 		return str_contains($normalized, 'synchy-backups')
 			|| str_contains($normalized, '/backups/')
 			|| str_ends_with($normalized, '/backups');
+	}
+
+	/**
+	 * A subfolder that is a self-contained WordPress install of its own (staging/,
+	 * old/, backup copies). Its files belong to a different application — scanning
+	 * them as part of THIS site just produces dozens of duplicate signature hits on
+	 * their unpatched core and vendor code. Flag the folder once and don't descend.
+	 */
+	private function is_secondary_wp_root(string $path): bool
+	{
+		$path = untrailingslashit(wp_normalize_path($path));
+
+		if ($path === untrailingslashit(wp_normalize_path(ABSPATH))) {
+			return false;
+		}
+
+		foreach ([WP_CONTENT_DIR, WP_PLUGIN_DIR, function_exists('get_theme_root') ? get_theme_root() : ''] as $known) {
+			$known = untrailingslashit(wp_normalize_path((string) $known));
+
+			if ($known !== '' && ($path === $known || str_starts_with($path . '/', $known . '/'))) {
+				return false;
+			}
+		}
+
+		return is_file($path . '/wp-load.php')
+			&& is_file($path . '/wp-settings.php')
+			&& (is_file($path . '/wp-includes/version.php') || is_dir($path . '/wp-admin'));
+	}
+
+	private function flag_secondary_wp_root(string $path, array &$state): void
+	{
+		$count = (int) ($state['counters']['secondary_wp_roots'] ?? 0);
+		$state['counters']['secondary_wp_roots'] = $count + 1;
+
+		if ($count >= 15) {
+			return;
+		}
+
+		$rel = $this->relative_path($path);
+		$rel = $rel !== '' ? $rel : basename($path);
+		$version = '';
+		$vfile = untrailingslashit(wp_normalize_path($path)) . '/wp-includes/version.php';
+
+		if (is_readable($vfile)) {
+			$src = (string) @file_get_contents($vfile, false, null, 0, 4096);
+
+			if (preg_match('/\$wp_version\s*=\s*[\'"]([^\'"]+)/', $src, $m)) {
+				$version = $m[1];
+			}
+		}
+
+		$this->add_finding($state, [
+			'finding_key' => 'deep_secondary_wp_root_' . md5($rel),
+			'category' => 'filesystem',
+			'severity' => 'medium',
+			'title' => 'A separate WordPress install sits in a subfolder',
+			'description' => sprintf(
+				'%s%s is a second, self-contained WordPress installation. Old / staging / backup copies in a web-reachable folder run unpatched code and expose their own wp-config.php — a common way in. Its files were not scanned as part of this site.',
+				$rel,
+				$version !== '' ? sprintf(' (WordPress %s)', $version) : ''
+			),
+			'recommendation' => sprintf(
+				'If %s is not something you deliberately serve, delete it. If it is a staging site, move it outside the public web root or put it behind authentication and keep it updated.',
+				$rel
+			),
+			'evidence' => [
+				'path' => $rel,
+				'full_path' => wp_normalize_path($path),
+				'wp_version' => $version,
+			],
+			'score' => 60,
+		]);
 	}
 
 	private function is_excluded(string $relative, array $excludes): bool
