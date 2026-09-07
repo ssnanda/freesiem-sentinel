@@ -2064,11 +2064,8 @@ class Freesiem_Admin
 			echo '<td>' . esc_html(number_format_i18n((int) ($row['files_scanned'] ?? 0))) . '</td>';
 			echo '<td>' . (empty($row['partial']) ? esc_html__('Complete', 'freesiem-sentinel') : '<span style="color:#b45309;">' . esc_html__('Partial', 'freesiem-sentinel') . '</span>') . '</td>';
 			if (!empty($row['has_detail'])) {
-				$json_url = freesiem_sentinel_admin_post_url('freesiem_sentinel_export_results', ['format' => 'json', 'scan_run' => $id]);
-				$csv_url = freesiem_sentinel_admin_post_url('freesiem_sentinel_export_results', ['format' => 'csv', 'scan_run' => $id]);
-				echo '<td style="white-space:nowrap;"><a href="' . esc_url($view_link) . '">' . esc_html__('View', 'freesiem-sentinel') . '</a>'
-					. ' &middot; <a href="' . esc_url($json_url) . '">JSON</a>'
-					. ' &middot; <a href="' . esc_url($csv_url) . '">CSV</a></td>';
+				echo '<td style="white-space:nowrap;"><a href="' . esc_url($view_link) . '">' . esc_html__('View', 'freesiem-sentinel') . '</a> &middot; '
+					. $this->render_export_actions(['scan_run' => $id], true) . '</td>';
 			} else {
 				echo '<td><span style="color:#8c8f94;">' . esc_html__('summary only', 'freesiem-sentinel') . '</span></td>';
 			}
@@ -2077,6 +2074,8 @@ class Freesiem_Admin
 
 		echo '</tbody></table>';
 		echo '</div>';
+
+		$this->render_export_copy_script();
 	}
 
 	private function render_scan_run_detail(string $id): void
@@ -2097,12 +2096,12 @@ class Freesiem_Admin
 
 		echo '<div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;">';
 		echo '<h2 style="margin:0;">' . esc_html(sprintf(__('Scan run — %s', 'freesiem-sentinel'), freesiem_sentinel_format_datetime((string) ($meta['finished_at'] ?? '')))) . '</h2>';
-		echo '<span style="display:inline-flex;gap:8px;">';
-		echo '<a class="button button-secondary" href="' . esc_url(freesiem_sentinel_admin_post_url('freesiem_sentinel_export_results', ['format' => 'json', 'scan_run' => $id])) . '">' . esc_html__('Export JSON', 'freesiem-sentinel') . '</a>';
-		echo '<a class="button button-secondary" href="' . esc_url(freesiem_sentinel_admin_post_url('freesiem_sentinel_export_results', ['format' => 'csv', 'scan_run' => $id])) . '">' . esc_html__('Export CSV', 'freesiem-sentinel') . '</a>';
+		echo '<span style="display:inline-flex;gap:8px;flex-wrap:wrap;align-items:center;">';
+		echo $this->render_export_actions(['scan_run' => $id]);
 		echo '<a class="button button-secondary" href="' . esc_url($this->build_scan_url(['show_results' => '1']) . '#freesiem-results-section') . '">' . esc_html__('Back to current results', 'freesiem-sentinel') . '</a>';
 		echo '</span>';
 		echo '</div>';
+		$this->render_export_copy_script();
 		echo '<p style="color:#50575e;">' . esc_html(sprintf(
 			__('%1$s · score %2$d · %3$d critical, %4$d high, %5$d medium, %6$d low · %7$s files scanned%8$s', 'freesiem-sentinel'),
 			ucfirst(freesiem_sentinel_safe_string($meta['type'] ?? 'deep')) . (!empty($meta['full']) ? ' (full)' : ''),
@@ -2758,6 +2757,64 @@ class Freesiem_Admin
 		echo '</div>';
 	}
 
+	/**
+	 * Export + Copy actions (JSON / CSV) for a result set.
+	 *
+	 * @param array $args extra query args, e.g. ['scan_run' => $id]; empty = current results.
+	 * @param bool  $compact render as small inline links (used in the history table).
+	 */
+	private function render_export_actions(array $args, bool $compact = false): string
+	{
+		$json = freesiem_sentinel_admin_post_url('freesiem_sentinel_export_results', array_merge($args, ['format' => 'json']));
+		$csv = freesiem_sentinel_admin_post_url('freesiem_sentinel_export_results', array_merge($args, ['format' => 'csv']));
+
+		if ($compact) {
+			return '<span style="white-space:nowrap;">'
+				. '<a href="' . esc_url($json) . '">JSON</a>'
+				. ' <a href="#" class="fs-copy-export" data-url="' . esc_url($json) . '" data-label="JSON" title="' . esc_attr__('Copy JSON to clipboard', 'freesiem-sentinel') . '">⧉</a>'
+				. ' &middot; <a href="' . esc_url($csv) . '">CSV</a>'
+				. ' <a href="#" class="fs-copy-export" data-url="' . esc_url($csv) . '" data-label="CSV" title="' . esc_attr__('Copy CSV to clipboard', 'freesiem-sentinel') . '">⧉</a>'
+				. '</span>';
+		}
+
+		return '<span style="display:inline-flex;gap:8px;flex-wrap:wrap;">'
+			. '<a class="button button-secondary" href="' . esc_url($json) . '">' . esc_html__('Export JSON', 'freesiem-sentinel') . '</a>'
+			. '<button type="button" class="button button-secondary fs-copy-export" data-url="' . esc_url($json) . '" data-label="' . esc_attr__('JSON', 'freesiem-sentinel') . '">' . esc_html__('Copy JSON', 'freesiem-sentinel') . '</button>'
+			. '<a class="button button-secondary" href="' . esc_url($csv) . '">' . esc_html__('Export CSV', 'freesiem-sentinel') . '</a>'
+			. '<button type="button" class="button button-secondary fs-copy-export" data-url="' . esc_url($csv) . '" data-label="' . esc_attr__('CSV', 'freesiem-sentinel') . '">' . esc_html__('Copy CSV', 'freesiem-sentinel') . '</button>'
+			. '</span>';
+	}
+
+	/**
+	 * One delegated click handler for every .fs-copy-export control on the page:
+	 * fetches the (nonce-protected) export URL and writes the body to the clipboard.
+	 */
+	private function render_export_copy_script(): void
+	{
+		static $done = false;
+
+		if ($done) {
+			return;
+		}
+
+		$done = true;
+
+		echo '<script>(function(){'
+			. 'document.addEventListener("click",function(e){'
+			. 'var b=e.target.closest(".fs-copy-export");if(!b){return;}e.preventDefault();'
+			. 'if(b.dataset.busy){return;}b.dataset.busy="1";'
+			. 'var orig=b.textContent,lbl=b.dataset.label||"";'
+			. 'var reset=function(msg){b.textContent=msg;setTimeout(function(){b.textContent=orig;delete b.dataset.busy;},1500);};'
+			. 'b.textContent=(orig==="⧉")?"…":("Copying "+lbl+"…");'
+			. 'fetch(b.dataset.url,{credentials:"same-origin"}).then(function(r){return r.text();}).then(function(t){'
+			. 'var ok=function(){reset((orig==="⧉")?"✓":("Copied "+lbl+" ✓"));};'
+			. 'if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(t).then(ok,function(){fb(t);ok();});}else{fb(t);ok();}'
+			. '}).catch(function(){reset("Copy failed");});'
+			. 'function fb(t){var a=document.createElement("textarea");a.value=t;a.style.position="fixed";a.style.opacity="0";document.body.appendChild(a);a.select();try{document.execCommand("copy");}catch(x){}document.body.removeChild(a);}'
+			. '});'
+			. '})();</script>';
+	}
+
 	private function render_scan_results_section(array $view): void
 	{
 		$all_findings = $view['all_findings'];
@@ -2786,10 +2843,8 @@ class Freesiem_Admin
 		echo '<div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:20px;">';
 		echo '<h2 style="margin:0;">' . esc_html__('Scan Results', 'freesiem-sentinel') . '</h2>';
 		if ($all_findings !== []) {
-			echo '<span style="display:inline-flex;gap:8px;">';
-			echo '<a class="button button-secondary" href="' . esc_url(freesiem_sentinel_admin_post_url('freesiem_sentinel_export_results', ['format' => 'json'])) . '">' . esc_html__('Export JSON', 'freesiem-sentinel') . '</a>';
-			echo '<a class="button button-secondary" href="' . esc_url(freesiem_sentinel_admin_post_url('freesiem_sentinel_export_results', ['format' => 'csv'])) . '">' . esc_html__('Export CSV', 'freesiem-sentinel') . '</a>';
-			echo '</span>';
+			echo $this->render_export_actions([]);
+			$this->render_export_copy_script();
 		}
 		echo '</div>';
 
@@ -2914,6 +2969,8 @@ class Freesiem_Admin
 		}
 		echo '</div>';
 		echo '</div>';
+
+		$this->render_export_copy_script();
 	}
 
 	private function get_scan_results_view(): array
