@@ -1857,16 +1857,51 @@ class Freesiem_Deep_Scanner
 		$window = (string) preg_replace('/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]+/', ' ', $window);
 		$window = trim((string) preg_replace('/\s+/', ' ', $window));
 
-		if (function_exists('mb_substr') && function_exists('mb_check_encoding') && mb_check_encoding($window, 'UTF-8')) {
-			return mb_substr($window, 0, 240, 'UTF-8');
+		// A polyglot / binary match window carries bytes that are not valid UTF-8.
+		// Left raw they make the whole scan-state option fail to persist (silently,
+		// on a utf8mb4 column), losing every finding in the run. Reduce anything
+		// that is not clean UTF-8 to printable ASCII.
+		if (!(function_exists('mb_check_encoding') && mb_check_encoding($window, 'UTF-8'))) {
+			$window = (string) preg_replace('/[^\x09\x0A\x0D\x20-\x7E]/', '.', $window);
 		}
 
-		return substr($window, 0, 240);
+		return function_exists('mb_substr') && mb_check_encoding($window, 'UTF-8')
+			? (string) mb_substr($window, 0, 240, 'UTF-8')
+			: substr($window, 0, 240);
 	}
 
 	private function save_state(array $state): void
 	{
-		update_option(self::STATE_OPTION, $state, false);
+		update_option(self::STATE_OPTION, $this->scrub_utf8($state), false);
+	}
+
+	/**
+	 * Belt-and-suspenders: guarantee every string in the state is valid UTF-8
+	 * before it reaches update_option(). One non-UTF-8 byte (a weird filename, a
+	 * binary match snippet) otherwise silently fails the DB write and the scan
+	 * loses all progress and findings for the run.
+	 *
+	 * @param mixed $value
+	 * @return mixed
+	 */
+	private function scrub_utf8($value)
+	{
+		if (is_array($value)) {
+			$out = [];
+
+			foreach ($value as $key => $item) {
+				$out[$key] = $this->scrub_utf8($item);
+			}
+
+			return $out;
+		}
+
+		if (is_string($value) && $value !== ''
+			&& !(function_exists('mb_check_encoding') && mb_check_encoding($value, 'UTF-8'))) {
+			return (string) preg_replace('/[^\x09\x0A\x0D\x20-\x7E]/', '.', $value);
+		}
+
+		return $value;
 	}
 
 	private function memory_ceiling(): int

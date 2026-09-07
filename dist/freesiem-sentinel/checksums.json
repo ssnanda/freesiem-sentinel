@@ -1,5 +1,5 @@
 {
-    "freesiem-sentinel.php": "aa3b262b15d739d9d11880d2f15a7ef2",
+    "freesiem-sentinel.php": "0378efbb0151dc8add22efafe9cc416e",
     "includes/class-acme-client.php": "533ad7673c04bfb975d263ab41eaa1d0",
     "includes/class-admin.php": "f0746359fd1064bae51327b9cfc34606",
     "includes/class-api-client.php": "500d81b955cc9b26701a338316f3bbf9",
@@ -8,7 +8,7 @@
     "includes/class-cloud-connect-state.php": "6680803ed69ff35f3dbe74a6014f0d42",
     "includes/class-commands.php": "3b9166c263f2f1789b48b138acc3a850",
     "includes/class-cron.php": "ad93440305c4a0396b8fe87cebafaa9c",
-    "includes/class-deep-scanner.php": "678690589dbaddb3bc4fc176ba33789a",
+    "includes/class-deep-scanner.php": "9c1757f089a800ca11d2087dd25206c4",
     "includes/class-features.php": "acf0e1b1fba863f1c3d6eb22cf210723",
     "includes/class-freesiem-sentinel-s3-client.php": "2e329f9825bd812497174e93c3424f0a",
     "includes/class-install-base-dial-home.php": "8b3f856ca216a651dcfdd85a7c363bea",
