@@ -23,6 +23,7 @@ class Freesiem_Deep_Scanner
 {
 	public const STATE_OPTION = 'freesiem_sentinel_deep_scan_state';
 	public const CONTINUE_HOOK = 'freesiem_sentinel_deep_scan_continue';
+	private const LOCK_TRANSIENT = 'freesiem_sentinel_deep_scan_lock';
 
 	private const MAX_FINDINGS = 500;
 	private const MAX_READ_BYTES = 5242880; // 5 MB content read cap
@@ -31,6 +32,11 @@ class Freesiem_Deep_Scanner
 	private const RESCAN_AFTER_SECONDS = 43200; // 12h — scheduled deep scan cadence
 	private const CORE_CHECK_BATCH = 40;
 	private const PLUGIN_CHECK_BATCH = 30;
+
+	// The deep scan walks the whole tree; a real install nests ~10 deep
+	// (plugins/x/vendor/a/b/src/...). The legacy heuristic-pass "depth limit"
+	// preference is not allowed to shrink deep coverage below this.
+	private const MIN_TRAVERSAL_DEPTH = 15;
 
 	private Freesiem_Plugin $plugin;
 
@@ -73,6 +79,7 @@ class Freesiem_Deep_Scanner
 	public function abort(): void
 	{
 		delete_option(self::STATE_OPTION);
+		delete_transient(self::LOCK_TRANSIENT);
 	}
 
 	/**
@@ -175,6 +182,30 @@ class Freesiem_Deep_Scanner
 		$this->finalize();
 	}
 
+	/**
+	 * Browser-driven equivalent of one cron tick: run a slice and finalize if done.
+	 * Called from the Scan screen's progress poller so the scan advances even when
+	 * WP-Cron is not firing.
+	 */
+	public function run_tick(): array
+	{
+		if (!$this->is_running()) {
+			return $this->progress();
+		}
+
+		$result = $this->run_slice($this->resolve_budget('background'));
+
+		if (!empty($result['done'])) {
+			$this->finalize();
+		} else {
+			// Belt and suspenders: keep a cron continuation queued in case the
+			// user navigates away mid-scan.
+			$this->schedule_continue(20);
+		}
+
+		return $this->progress();
+	}
+
 	private function schedule_continue(int $delay): void
 	{
 		if (function_exists('wp_next_scheduled') && wp_next_scheduled(self::CONTINUE_HOOK)) {
@@ -205,6 +236,14 @@ class Freesiem_Deep_Scanner
 		if (empty($state) || ($state['phase'] ?? 'done') === 'done') {
 			return ['done' => true, 'progress' => $this->progress()];
 		}
+
+		// Prevent a cron event and a browser tick (or two tabs) from running
+		// slices concurrently and racing on the state option.
+		if (get_transient(self::LOCK_TRANSIENT)) {
+			return ['done' => false, 'progress' => $this->progress()];
+		}
+
+		set_transient(self::LOCK_TRANSIENT, 1, 120);
 
 		if (function_exists('ignore_user_abort')) {
 			ignore_user_abort(true);
@@ -254,12 +293,14 @@ class Freesiem_Deep_Scanner
 			// most a few hundred files of progress rather than the whole slice.
 			if ($since_checkpoint >= 400) {
 				$state['updated_at'] = freesiem_sentinel_get_iso8601_time();
+				$state['progress_floor'] = max((int) ($state['progress_floor'] ?? 0), $this->percent_from_state($state));
 				$this->save_state($state);
 				$since_checkpoint = 0;
 			}
 		}
 
 		$state['updated_at'] = freesiem_sentinel_get_iso8601_time();
+		$state['progress_floor'] = max((int) ($state['progress_floor'] ?? 0), $this->percent_from_state($state));
 		$done = ($state['phase'] ?? 'done') === 'done';
 
 		if ($done) {
@@ -267,6 +308,7 @@ class Freesiem_Deep_Scanner
 		}
 
 		$this->save_state($state);
+		delete_transient(self::LOCK_TRANSIENT);
 
 		return ['done' => $done, 'progress' => $this->progress()];
 	}
@@ -318,7 +360,7 @@ class Freesiem_Deep_Scanner
 		$path = (string) ($dir['path'] ?? '');
 		$label = (string) ($dir['label'] ?? '');
 		$depth = (int) ($dir['depth'] ?? 0);
-		$max_depth = (int) ($state['prefs']['max_depth'] ?? 20);
+		$max_depth = max(self::MIN_TRAVERSAL_DEPTH, (int) ($state['prefs']['max_depth'] ?? self::MIN_TRAVERSAL_DEPTH));
 		$excludes = is_array($state['prefs']['exclude_paths'] ?? null) ? $state['prefs']['exclude_paths'] : [];
 
 		if (!is_dir($path) || !is_readable($path) || is_link($path)) {
@@ -1300,14 +1342,7 @@ class Freesiem_Deep_Scanner
 
 		$phase = (string) ($state['phase'] ?? 'done');
 		$counters = is_array($state['counters'] ?? null) ? $state['counters'] : [];
-		$phase_weights = ['filesystem' => 0, 'integrity' => 70, 'database' => 90, 'done' => 100];
-		$percent = $phase_weights[$phase] ?? 0;
-
-		if ($phase === 'filesystem') {
-			$pending = count($state['dir_stack'] ?? []) + count($state['file_queue'] ?? []);
-			$seen = max(1, (int) ($counters['files_seen'] ?? 0));
-			$percent = (int) min(65, round(($seen / max($seen + $pending * 4, $seen)) * 65));
-		}
+		$percent = max($this->percent_from_state($state), (int) ($state['progress_floor'] ?? 0));
 
 		$labels = [
 			'filesystem' => __('Scanning file contents', 'freesiem-sentinel'),
@@ -1330,6 +1365,33 @@ class Freesiem_Deep_Scanner
 			'finished_at' => (string) ($state['finished_at'] ?? ''),
 			'partial' => !empty($state['partial']),
 		];
+	}
+
+	private function percent_from_state(array $state): int
+	{
+		$phase = (string) ($state['phase'] ?? 'done');
+
+		if ($phase === 'done') {
+			return 100;
+		}
+
+		if ($phase === 'filesystem') {
+			// No reliable total mid-walk, so use a monotonic curve on files seen:
+			// it only ever grows and asymptotically approaches the 60% mark.
+			$seen = (int) ($state['counters']['files_seen'] ?? 0);
+
+			return (int) round(60 * (1 - 1 / (1 + $seen / 3500)));
+		}
+
+		if ($phase === 'integrity') {
+			$stage = (string) ($state['integrity_cursor']['stage'] ?? 'core');
+
+			return ['core' => 62, 'core_extra' => 72, 'plugins' => 76, 'dropins' => 82, 'wpconfig' => 84, 'done' => 85][$stage] ?? 70;
+		}
+
+		$stage = (string) ($state['database_cursor']['stage'] ?? 'users');
+
+		return ['users' => 87, 'registration' => 89, 'options' => 91, 'refs' => 94, 'cron' => 96, 'content' => 98][$stage] ?? 90;
 	}
 
 	// ---------------------------------------------------------------------
@@ -1457,8 +1519,10 @@ class Freesiem_Deep_Scanner
 		}
 
 		if ($context === 'foreground') {
-			$base['files'] *= 3;
-			$base['seconds'] = max($base['seconds'], 30.0);
+			// Just enough to show immediate progress; the Scan screen's poller and
+			// WP-Cron carry the rest so the button returns quickly.
+			$base['files'] *= 2;
+			$base['seconds'] = min(max($base['seconds'], 12.0), 15.0);
 		}
 
 		return $base;

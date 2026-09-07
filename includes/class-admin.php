@@ -68,6 +68,7 @@ class Freesiem_Admin
 		add_action('admin_post_freesiem_sentinel_clear_logs', [$this, 'handle_clear_logs']);
 		add_action('admin_post_freesiem_sentinel_save_rustfs_settings', [$this, 'handle_save_rustfs_settings']);
 		add_action('admin_post_freesiem_sentinel_test_rustfs_connection', [$this, 'handle_test_rustfs_connection']);
+		add_action('wp_ajax_freesiem_sentinel_deep_scan_tick', [$this, 'handle_deep_scan_tick']);
 		add_action('wp_login_failed', [$this, 'handle_login_failed_event'], 10, 2);
 		add_action('wp_login', [$this, 'handle_login_success_event'], 10, 2);
 		add_action('init', [$this, 'maybe_handle_stealth_mode'], 1);
@@ -594,6 +595,30 @@ class Freesiem_Admin
 
 		freesiem_sentinel_set_notice($is_error ? 'error' : 'success', $message);
 		$this->redirect_to_page('freesiem-scan', ['show_results' => '1']);
+	}
+
+	/**
+	 * AJAX: advance the running deep scan by one throttled slice and report progress.
+	 *
+	 * The Scan screen polls this while a scan is in progress so coverage advances
+	 * from the browser instead of depending solely on WP-Cron (which is unreliable
+	 * on low-traffic or DISABLE_WP_CRON installs).
+	 */
+	public function handle_deep_scan_tick(): void
+	{
+		if (!current_user_can('manage_options')) {
+			wp_send_json_error(['message' => 'forbidden'], 403);
+		}
+
+		check_ajax_referer('freesiem_sentinel_deep_scan_tick', 'nonce');
+
+		$deep = $this->plugin->get_deep_scanner();
+
+		if ($deep->is_running()) {
+			$deep->run_tick();
+		}
+
+		wp_send_json_success($deep->progress());
 	}
 
 	public function handle_request_remote_scan(): void
@@ -2371,29 +2396,48 @@ class Freesiem_Admin
 		}
 
 		$percent = (int) max(2, min(100, (int) ($progress['percent'] ?? 0)));
-		$stalled = !empty($progress['stalled']);
+		$files = number_format_i18n((int) ($progress['files_scanned'] ?? 0));
+		$hits = number_format_i18n((int) ($progress['malware_hits'] ?? 0));
+		$label = freesiem_sentinel_safe_string($progress['label'] ?? '');
+		$status_tmpl = __('%1$s%% · %2$s files inspected · %3$s signature hit(s) so far', 'freesiem-sentinel');
+		$ajax_url = admin_url('admin-ajax.php');
+		$nonce = wp_create_nonce('freesiem_sentinel_deep_scan_tick');
 
-		echo '<div style="background:#fff;border:1px solid ' . ($stalled ? '#f0b849' : '#72aee6') . ';border-left:4px solid ' . ($stalled ? '#dba617' : '#2271b1') . ';border-radius:12px;padding:16px 20px;margin:0 0 20px;">';
+		echo '<div id="fs-deep-progress" style="background:#fff;border:1px solid #72aee6;border-left:4px solid #2271b1;border-radius:12px;padding:16px 20px;margin:0 0 20px;">';
 		echo '<p style="margin:0 0 8px;font-weight:600;">'
-			. esc_html__('Deep scan in progress', 'freesiem-sentinel') . ' — '
-			. esc_html(freesiem_sentinel_safe_string($progress['label'] ?? '')) . '</p>';
+			. esc_html__('Deep scan in progress', 'freesiem-sentinel') . ' — <span id="fs-deep-label">'
+			. esc_html($label) . '</span></p>';
 		echo '<div style="background:#f0f0f1;border-radius:999px;height:12px;overflow:hidden;max-width:520px;">';
-		echo '<div style="background:#2271b1;height:100%;width:' . esc_attr((string) $percent) . '%;transition:width .4s;"></div>';
+		echo '<div id="fs-deep-bar" style="background:#2271b1;height:100%;width:' . esc_attr((string) $percent) . '%;transition:width .5s ease;"></div>';
 		echo '</div>';
-		echo '<p style="margin:8px 0 0;color:#50575e;font-size:13px;">' . esc_html(sprintf(
-			/* translators: 1: percent, 2: files scanned, 3: signature hits */
-			__('%1$d%% · %2$s files inspected · %3$s signature hit(s) so far', 'freesiem-sentinel'),
-			$percent,
-			number_format_i18n((int) ($progress['files_scanned'] ?? 0)),
-			number_format_i18n((int) ($progress['malware_hits'] ?? 0))
-		)) . '</p>';
+		echo '<p id="fs-deep-status" style="margin:8px 0 0;color:#50575e;font-size:13px;">' . esc_html(sprintf($status_tmpl, $percent, $files, $hits)) . '</p>';
+		echo '<p style="margin:8px 0 0;color:#50575e;font-size:13px;">' . esc_html__('Keep this tab open to run the scan from your browser; it also continues in the background if you leave.', 'freesiem-sentinel') . '</p>';
 
-		if ($stalled) {
-			echo '<p style="margin:8px 0 0;color:#8a6d00;font-size:13px;">' . esc_html__('The background scan has not advanced recently. It will resume on the next WP-Cron run, or run "Run Scan" again to nudge it.', 'freesiem-sentinel') . '</p>';
-		} else {
-			echo '<p style="margin:8px 0 0;color:#50575e;font-size:13px;">' . esc_html__('You can leave this page — the scan continues in the background. It refreshes automatically.', 'freesiem-sentinel') . '</p>';
-			echo '<script>window.setTimeout(function(){ if(!document.hidden){ window.location.reload(); } }, 12000);</script>';
-		}
+		$cfg = wp_json_encode([
+			'url' => $ajax_url,
+			'nonce' => $nonce,
+			'tmpl' => $status_tmpl,
+		]);
+
+		echo '<script>(function(){'
+			. 'var c=' . $cfg . ';'
+			. 'var bar=document.getElementById("fs-deep-bar");'
+			. 'var st=document.getElementById("fs-deep-status");'
+			. 'var lb=document.getElementById("fs-deep-label");'
+			. 'var busy=false,misses=0;'
+			. 'function fmt(p,f,h){return c.tmpl.replace("%1$s",p).replace("%2$s",Number(f).toLocaleString()).replace("%3$s",Number(h).toLocaleString());}'
+			. 'function tick(){if(busy){return;}busy=true;'
+			. 'fetch(c.url,{method:"POST",credentials:"same-origin",headers:{"Content-Type":"application/x-www-form-urlencoded"},body:"action=freesiem_sentinel_deep_scan_tick&nonce="+encodeURIComponent(c.nonce)})'
+			. '.then(function(r){return r.json();}).then(function(res){busy=false;misses=0;'
+			. 'var d=(res&&res.data)?res.data:{};'
+			. 'var pct=Math.max(2,Math.min(100,parseInt(d.percent,10)||0));'
+			. 'if(bar){bar.style.width=pct+"%";}'
+			. 'if(lb&&d.label){lb.textContent=d.label;}'
+			. 'if(st){st.textContent=fmt(pct,d.files_scanned||0,d.malware_hits||0);}'
+			. 'if(d.running===false){window.location.reload();}'
+			. '}).catch(function(){busy=false;if(++misses>8){clearInterval(iv);}});}'
+			. 'var iv=setInterval(tick,2500);setTimeout(tick,400);'
+			. '})();</script>';
 
 		echo '</div>';
 	}
