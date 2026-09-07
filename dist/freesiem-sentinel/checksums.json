@@ -1,7 +1,7 @@
 {
-    "freesiem-sentinel.php": "403db0405215b4474234b580aa450f43",
+    "freesiem-sentinel.php": "223b990a8447d6cd220827713a0b825b",
     "includes/class-acme-client.php": "533ad7673c04bfb975d263ab41eaa1d0",
-    "includes/class-admin.php": "c7855d50b67b47df6f71d7b6f7131344",
+    "includes/class-admin.php": "c867a55b1e7b7dff5da3c315b18ca545",
     "includes/class-api-client.php": "500d81b955cc9b26701a338316f3bbf9",
     "includes/class-cloud-connect-client.php": "b61c940ee4658b84d754de2c0c3173da",
     "includes/class-cloud-connect-signer.php": "e345ec71f771bafad7212bf44be3e432",
@@ -21,7 +21,7 @@
     "includes/class-tfa-service.php": "926c54b443e488c907e9b98fecbe94e5",
     "includes/class-threat-signatures.php": "135ab5e6c997ac100439111f23fb9739",
     "includes/class-updater.php": "4809c53e09ea6527bdc103c2fd11e57b",
-    "includes/helpers.php": "da4a05df12b72e8bf2b787a5fd505ffb",
+    "includes/helpers.php": "08dae06709690047ffe2cccb90cfc4ed",
     "includes/synchy/assets/admin.css": "d341cee4802a1b847e15d1ba80a7db24",
     "includes/synchy/assets/export.js": "91801851722702c4b5cc6018f63cefc3",
     "includes/synchy/assets/installer-template.php": "12aac8a37a86cc4eaf5a72f26af119d7",

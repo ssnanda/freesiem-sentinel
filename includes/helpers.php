@@ -5129,3 +5129,88 @@ function freesiem_sentinel_send_scan_report_email(array $extra_recipients = [], 
 
 	return $sent ? true : new WP_Error('freesiem_mail_failed', __('WordPress could not send the report email.', 'freesiem-sentinel'));
 }
+
+/**
+ * Build a downloadable scan-results export.
+ *
+ * @param string $format 'json' | 'csv'
+ * @param array  $data   { findings, scanned_at, score, severity_counts, metrics, label }
+ * @return array{filename:string,mime:string,body:string}
+ */
+function freesiem_sentinel_build_scan_export(string $format, array $data): array
+{
+	$findings = array_values(array_filter((array) ($data['findings'] ?? []), 'is_array'));
+	$host = wp_parse_url(home_url(), PHP_URL_HOST) ?: 'site';
+	$slug = sanitize_file_name(str_replace('.', '-', (string) $host));
+	$label = sanitize_file_name((string) ($data['label'] ?? 'current'));
+	$stamp = gmdate('Ymd-His');
+	$format = $format === 'csv' ? 'csv' : 'json';
+	$filename = sprintf('freesiem-scan-%s-%s-%s.%s', $slug, $label, $stamp, $format);
+
+	$order = ['critical' => 0, 'high' => 1, 'medium' => 2, 'low' => 3, 'info' => 4];
+	usort($findings, static function ($a, $b) use ($order): int {
+		$ra = $order[freesiem_sentinel_normalize_severity((string) ($a['severity'] ?? 'info'))] ?? 4;
+		$rb = $order[freesiem_sentinel_normalize_severity((string) ($b['severity'] ?? 'info'))] ?? 4;
+
+		return $ra <=> $rb ?: strcmp((string) ($a['title'] ?? ''), (string) ($b['title'] ?? ''));
+	});
+
+	$row = static function (array $f): array {
+		$evidence = is_array($f['evidence'] ?? null) ? $f['evidence'] : [];
+
+		return [
+			'severity' => freesiem_sentinel_normalize_severity((string) ($f['severity'] ?? 'info')),
+			'category' => (string) ($f['category'] ?? ''),
+			'signature_id' => (string) ($evidence['signature_id'] ?? ''),
+			'title' => (string) ($f['title'] ?? ''),
+			'path' => (string) ($evidence['path'] ?? ''),
+			'line' => (string) ($evidence['line'] ?? ''),
+			'match_count' => (string) ($evidence['match_count'] ?? ''),
+			'score' => (string) ($f['score'] ?? ''),
+			'finding_key' => (string) ($f['finding_key'] ?? ''),
+			'detected_at' => (string) ($f['detected_at'] ?? ''),
+			'description' => (string) ($f['description'] ?? ''),
+			'recommendation' => (string) ($f['recommendation'] ?? ''),
+			'snippet' => (string) ($evidence['snippet'] ?? ''),
+		];
+	};
+
+	if ($format === 'csv') {
+		$fh = fopen('php://temp', 'r+');
+		fputcsv($fh, ['severity', 'category', 'signature_id', 'title', 'path', 'line', 'match_count', 'score', 'finding_key', 'detected_at', 'description', 'recommendation', 'snippet'], ',', '"', '\\');
+
+		foreach ($findings as $f) {
+			fputcsv($fh, array_values($row($f)), ',', '"', '\\');
+		}
+
+		rewind($fh);
+		$body = (string) stream_get_contents($fh);
+		fclose($fh);
+
+		// Excel-friendly UTF-8 BOM.
+		return [
+			'filename' => $filename,
+			'mime' => 'text/csv; charset=UTF-8',
+			'body' => "\xEF\xBB\xBF" . $body,
+		];
+	}
+
+	$payload = [
+		'generated_at' => freesiem_sentinel_get_iso8601_time(),
+		'site_url' => home_url('/'),
+		'wp_version' => get_bloginfo('version'),
+		'plugin_version' => defined('FREESIEM_SENTINEL_VERSION') ? FREESIEM_SENTINEL_VERSION : '',
+		'scanned_at' => (string) ($data['scanned_at'] ?? ''),
+		'score' => (int) ($data['score'] ?? 0),
+		'severity_counts' => (object) freesiem_sentinel_safe_array($data['severity_counts'] ?? []),
+		'metrics' => (object) freesiem_sentinel_safe_array($data['metrics'] ?? []),
+		'findings_count' => count($findings),
+		'findings' => array_map($row, $findings),
+	];
+
+	return [
+		'filename' => $filename,
+		'mime' => 'application/json; charset=UTF-8',
+		'body' => (string) wp_json_encode($payload, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE),
+	];
+}
