@@ -144,30 +144,48 @@ class Freesiem_Threat_Signatures
 	{
 		$name = strtolower((string) preg_replace('/\.(php\d?|phtml|phar|pht|inc)$/i', '', $basename));
 
-		if ($name === '' || strlen($name) < 8) {
+		if ($name === '' || strlen($name) < 10) {
 			return false;
 		}
 
-		// Pure hex / base32-ish blob (a1b2c3d4e5f6..., zx8f2k9d...).
-		if (preg_match('/^[a-f0-9]{12,}$/', $name) || preg_match('/^[a-z2-7]{16,}$/', $name)) {
+		// Separators (- _ .) and the word structure they bracket are the mark of
+		// a human-chosen name. Only a single unbroken token is a candidate for
+		// "machine generated", so anything with a separator is out.
+		if (preg_match('/[-_.]/', $name)) {
+			return false;
+		}
+
+		$len = strlen($name);
+		$digits = preg_match_all('/\d/', $name);
+		$vowels = preg_match_all('/[aeiou]/', $name);
+
+		// Hex blob: nothing but hex digits, and at least one actual digit. A real
+		// name is never a 12+ char run of only a-f (strtolower() already ran, so
+		// this must exclude ordinary lowercase words like "installedpackage").
+		if ($digits > 0 && preg_match('/^[a-f0-9]{12,}$/', $name)) {
 			return true;
 		}
 
-		// A long token with no separators (- _ .) and no vowels at all — e.g.
-		// "kjhgtrfvbn". Real names have word boundaries or vowels.
-		if (strlen($name) >= 12
-			&& !preg_match('/[-_.]/', $name)
-			&& !preg_match('/[aeiou]/', $name)) {
+		// Base32 blob: 16+ chars confined to the RFC 4648 lowercase alphabet and
+		// salted with its 2-7 digits the way encoded output is. Ordinary words
+		// also match [a-z2-7]+, so require several bare 2-7 digits AND a vowel
+		// share too low to be language.
+		if ($len >= 16
+			&& preg_match('/^[a-z2-7]+$/', $name)
+			&& preg_match_all('/[2-7]/', $name) >= 3
+			&& $vowels / $len < 0.3) {
 			return true;
 		}
 
-		// High share of digits in a separator-less token ("x8291736451a").
-		if (!preg_match('/[-_.]/', $name)) {
-			$digits = preg_match_all('/\d/', $name);
+		// Keyboard mash / consonant soup: a 10+ char token with no vowels at all
+		// ("kjhgtrfvbn"), or one long enough with a vowel share too low to be words.
+		if ($vowels === 0 || ($len >= 14 && $vowels / $len < 0.12)) {
+			return true;
+		}
 
-			if ($digits >= 6 && $digits / strlen($name) >= 0.4) {
-				return true;
-			}
+		// High share of digits in the token ("x8291736451a").
+		if ($digits >= 6 && $digits / $len >= 0.4) {
+			return true;
 		}
 
 		return false;

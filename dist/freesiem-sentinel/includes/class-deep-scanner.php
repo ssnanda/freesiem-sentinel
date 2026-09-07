@@ -133,6 +133,7 @@ class Freesiem_Deep_Scanner
 				'plugin_files_modified' => 0,
 				'malware_hits' => 0,
 				'database_issues' => 0,
+				'vendor_verified' => 0,
 			],
 			'findings' => [],
 			'partial' => false,
@@ -515,6 +516,8 @@ class Freesiem_Deep_Scanner
 		// docblocks quote `$_POST['x']` in backticks, ship long class filenames,
 		// call ini_set('display_errors', 0), embed sandboxed <iframe>s, etc.).
 		if ($this->is_vendor_verified($path, $rel)) {
+			$state['counters']['vendor_verified']++;
+
 			return;
 		}
 
@@ -605,7 +608,7 @@ class Freesiem_Deep_Scanner
 			$score = 30;
 		}
 
-		if ($in_uploads && in_array($extension, $php_like, true)) {
+		if ($in_uploads && in_array($extension, $php_like, true) && !$this->is_directory_index_stub($path, $basename, $size)) {
 			$reasons[] = 'Executable PHP file inside the uploads directory';
 			$severity = 'critical';
 			$score = min($score, 32);
@@ -656,6 +659,36 @@ class Freesiem_Deep_Scanner
 			],
 			'score' => $score,
 		]);
+	}
+
+	/**
+	 * A harmless "Silence is golden" directory-listing stub — the empty index.php
+	 * that WordPress core and countless plugins (WPForms, Astra, ...) drop into
+	 * their own upload subfolders. Tiny, named index.php, and with nothing left
+	 * once PHP tags, comments and whitespace are stripped.
+	 */
+	private function is_directory_index_stub(string $path, string $basename, int $size): bool
+	{
+		if ($basename !== 'index.php' || $size > 512) {
+			return false;
+		}
+
+		$contents = (string) @file_get_contents($path, false, null, 0, 512);
+		$stripped = (string) preg_replace(
+			[
+				'~<\?php~i',
+				'~<\?=?~',
+				'~\?>~',
+				'~//[^\r\n]*~',
+				'~#[^\r\n]*~',
+				'~/\*.*?\*/~s',
+				'~\s+~',
+			],
+			'',
+			$contents
+		);
+
+		return $stripped === '';
 	}
 
 	// ---------------------------------------------------------------------
@@ -1587,6 +1620,8 @@ class Freesiem_Deep_Scanner
 		$counters = is_array($state['counters'] ?? null) ? $state['counters'] : [];
 		$mode = (string) ($state['mode'] ?? 'deep');
 
+		$findings = $this->soften_unverifiable_heuristics($findings, $counters);
+
 		$metrics = [
 			'mode' => $mode,
 			'full' => !empty($state['full']),
@@ -1629,6 +1664,63 @@ class Freesiem_Deep_Scanner
 		$state['updated_at'] = freesiem_sentinel_get_iso8601_time();
 
 		$this->save_state($state);
+	}
+
+	/**
+	 * Filename heuristics ("Random-looking PHP filename") exist as a backstop for
+	 * files that are NOT checksum-verified. When the scan managed to verify zero
+	 * vendor / core files — WordPress.org checksums unreachable, an impossible
+	 * core version, an offline box — that backstop instead fires across whole
+	 * legitimate third-party trees (jetpack-autoloader, symfony polyfills, ...).
+	 *
+	 * In that state, drop the purely name-based "high" findings to "low" and
+	 * replace them with a single note, so the run does not report hundreds of
+	 * highs that are all verification noise. Findings with any harder reason
+	 * (executable in uploads, web-shell name, exposed backup) are left alone.
+	 */
+	private function soften_unverifiable_heuristics(array $findings, array $counters): array
+	{
+		$verified = (int) ($counters['vendor_verified'] ?? 0);
+		$seen = (int) ($counters['files_seen'] ?? 0);
+
+		if ($verified > 0 || $seen < 200) {
+			return $findings;
+		}
+
+		$softened = 0;
+		$soft_reasons = ['Random-looking PHP filename'];
+
+		foreach ($findings as &$finding) {
+			if (($finding['category'] ?? '') !== 'filesystem' || ($finding['title'] ?? '') !== 'Suspicious file on disk') {
+				continue;
+			}
+
+			$reasons = freesiem_sentinel_safe_array($finding['evidence']['reasons'] ?? []);
+
+			if ($reasons === [] || array_diff($reasons, $soft_reasons) !== []) {
+				continue;
+			}
+
+			$finding['severity'] = 'low';
+			$finding['description'] .= ' (Downgraded: vendor file verification was unavailable this scan, so a name-based match alone is not reliable.)';
+			$softened++;
+		}
+		unset($finding);
+
+		if ($softened > 0) {
+			$findings[] = [
+				'finding_key' => 'deep_verification_unavailable',
+				'category' => 'filesystem',
+				'severity' => 'info',
+				'title' => 'Vendor file verification was unavailable',
+				'description' => sprintf('The scan could not verify any core or plugin file against WordPress.org checksums (unreachable, or the reported WordPress version has no published manifest). %d filename-heuristic finding(s) were downgraded because a name-based match cannot be trusted without a known-good baseline.', $softened),
+				'recommendation' => 'Confirm the site can reach api.wordpress.org and that its WordPress version is a real release, then run the scan again.',
+				'evidence' => ['files_seen' => $seen, 'downgraded' => $softened],
+				'score' => 90,
+			];
+		}
+
+		return $findings;
 	}
 
 	// ---------------------------------------------------------------------
