@@ -347,7 +347,9 @@ class Freesiem_Threat_Signatures
 				'score' => 38,
 				'category' => 'malware',
 				'classes' => ['php'],
-				'pattern' => '/\b(?:include|include_once|require|require_once)\s*\(?\s*[\'"]https?:\/\//i',
+				// Require a real host after the scheme AND a matching close quote, so docblock
+			// prose (Does not include "http://" or "https://".) is not read as require('http://x').
+			'pattern' => '/\b(?:include|include_once|require|require_once)\s*\(?\s*([\'"])https?:\/\/[^\'"\s]{2,}\1/i',
 				'recommendation' => 'Remote file inclusion lets an external server dictate what code runs here. Remove it and set allow_url_include=0.',
 			],
 			[

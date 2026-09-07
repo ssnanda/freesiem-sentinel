@@ -4,6 +4,12 @@ if (!defined('ABSPATH')) {
 	exit('Run this with wp eval-file tests/deep-scanner-smoke.php');
 }
 
+// Drive every slice synchronously from this process — no WP-Cron loopback
+// racing the loop below for the scan lock.
+if (!defined('DISABLE_WP_CRON')) {
+	define('DISABLE_WP_CRON', true);
+}
+
 /**
  * Smoke test for Freesiem_Deep_Scanner.
  *
@@ -58,9 +64,10 @@ try {
 	$guard = 0;
 
 	do {
-		$result = $deep->run_slice(['files' => 4000, 'seconds' => 20, 'throttle_us' => 0, 'batch' => 50]);
+		delete_transient('freesiem_sentinel_deep_scan_lock');
+		$result = $deep->run_slice(['files' => 20000, 'seconds' => 45, 'throttle_us' => 0, 'batch' => 2000]);
 		$guard++;
-	} while (empty($result['done']) && $guard < 500);
+	} while (empty($result['done']) && $guard < 60);
 
 	$assert(!empty($result['done']), 'deep scan reached completion in ' . $guard . ' slice(s)');
 

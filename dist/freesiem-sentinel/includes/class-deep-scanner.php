@@ -649,15 +649,23 @@ class Freesiem_Deep_Scanner
 			return;
 		}
 
+		$abspath_root = wp_normalize_path(untrailingslashit(ABSPATH));
+		$full_path = wp_normalize_path($path);
+
 		$this->add_finding($state, [
 			'finding_key' => 'deep_fsheur_' . md5($rel . implode('|', $reasons)),
 			'category' => 'filesystem',
 			'severity' => $severity,
 			'title' => 'Suspicious file on disk',
 			'description' => sprintf('%s: %s', $rel, implode('; ', $reasons)),
-			'recommendation' => 'Confirm whether this file is expected. If not, remove it and review access logs for how it arrived.',
+			'recommendation' => sprintf(
+				'Full path: %s (WordPress root: %s). Confirm whether this file is expected. If not, remove it and review access logs for how it arrived.',
+				$full_path,
+				$abspath_root
+			),
 			'evidence' => [
 				'path' => $rel,
+				'full_path' => $full_path,
 				'extension' => $extension,
 				'size' => $size,
 				'reasons' => $reasons,
