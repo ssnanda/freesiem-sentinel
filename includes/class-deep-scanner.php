@@ -490,6 +490,25 @@ class Freesiem_Deep_Scanner
 		$extension = strtolower((string) pathinfo($path, PATHINFO_EXTENSION));
 		$size = (int) @filesize($path);
 
+		// A pristine copy of one of freeSIEM Sentinel's own shipped files
+		// legitimately contains signature strings ("coinhive", "c99shell", the
+		// detection regexes, ...). Verify it against the release checksum manifest
+		// and, if it is byte-identical, do not run content signatures against it —
+		// but DO still scan it (and flag it hard) if it has been modified.
+		$self_rel = $this->self_relative_path($path);
+
+		if ($self_rel !== null) {
+			$manifest = $this->self_manifest();
+			$expected = $manifest[$self_rel] ?? '';
+
+			if ($expected !== '' && hash_equals($expected, (string) @md5_file($path))) {
+				return; // our own file, unchanged since release — nothing to scan
+			}
+			// Fall through: modified or unrecognized file inside our own plugin.
+			// integrity_self_step() reports the tampering; here we still let the
+			// signature scan run so an injected payload is caught too.
+		}
+
 		$this->check_filename_heuristics($path, $rel, $basename, $extension, $size, $state);
 
 		$mode = Freesiem_Threat_Signatures::scan_mode($basename, $extension);
@@ -659,6 +678,9 @@ class Freesiem_Deep_Scanner
 			$cursor['stage'] = 'wpconfig';
 		} elseif ($stage === 'wpconfig') {
 			$this->integrity_wpconfig_step($state);
+			$cursor['stage'] = 'self';
+		} elseif ($stage === 'self') {
+			$this->integrity_self_step($state);
 			$cursor['stage'] = 'done';
 		} else {
 			$state['phase'] = empty($prefs['scan_database']) ? 'done' : 'database';
@@ -1027,6 +1049,70 @@ class Freesiem_Deep_Scanner
 
 			return;
 		}
+	}
+
+	/**
+	 * Verify freeSIEM Sentinel's own shipped files against checksums.json. A
+	 * modified or missing file here means the plugin itself was tampered with —
+	 * reported clearly rather than as a pile of signature matches against its own
+	 * detection code.
+	 */
+	private function integrity_self_step(array &$state): void
+	{
+		$manifest = $this->self_manifest();
+
+		if ($manifest === [] || !defined('FREESIEM_SENTINEL_PLUGIN_DIR')) {
+			return;
+		}
+
+		$base = untrailingslashit(wp_normalize_path(FREESIEM_SENTINEL_PLUGIN_DIR));
+		$modified = [];
+		$missing = [];
+
+		foreach ($manifest as $rel_file => $expected) {
+			if (!is_string($rel_file) || str_contains($rel_file, '..') || !is_string($expected) || $expected === '') {
+				continue;
+			}
+
+			$full = $base . '/' . $rel_file;
+
+			if (!is_file($full)) {
+				$missing[] = $rel_file;
+
+				continue;
+			}
+
+			if (!hash_equals($expected, (string) @md5_file($full))) {
+				$modified[] = $rel_file;
+			}
+		}
+
+		if ($modified === [] && $missing === []) {
+			return;
+		}
+
+		$state['counters']['plugin_files_modified'] += count($modified);
+
+		$this->add_finding($state, [
+			'finding_key' => 'deep_self_integrity_' . md5(FREESIEM_SENTINEL_VERSION),
+			'category' => 'plugin_integrity',
+			'severity' => 'critical',
+			'title' => 'freeSIEM Sentinel\'s own files were modified',
+			'description' => sprintf(
+				'%d file(s) modified and %d missing versus the released freeSIEM Sentinel %s. If you did not edit the plugin yourself, its code has been tampered with and its scan results can no longer be trusted.',
+				count($modified),
+				count($missing),
+				FREESIEM_SENTINEL_VERSION
+			),
+			'recommendation' => 'Reinstall freeSIEM Sentinel from a clean copy (Plugins → delete and re-add, or the built-in updater), then re-run the scan. Investigate how the files were changed.',
+			'evidence' => [
+				'path' => 'wp-content/plugins/' . FREESIEM_SENTINEL_SLUG,
+				'version' => FREESIEM_SENTINEL_VERSION,
+				'modified_files' => array_slice($modified, 0, 20),
+				'missing_files' => array_slice($missing, 0, 20),
+			],
+			'score' => 18,
+		]);
 	}
 
 	// ---------------------------------------------------------------------
@@ -1457,7 +1543,7 @@ class Freesiem_Deep_Scanner
 		if ($phase === 'integrity') {
 			$stage = (string) ($state['integrity_cursor']['stage'] ?? 'core');
 
-			return ['core' => 62, 'core_extra' => 72, 'plugins' => 76, 'dropins' => 82, 'wpconfig' => 84, 'done' => 85][$stage] ?? 70;
+			return ['core' => 62, 'core_extra' => 72, 'plugins' => 76, 'dropins' => 82, 'wpconfig' => 84, 'self' => 85, 'done' => 86][$stage] ?? 70;
 		}
 
 		$stage = (string) ($state['database_cursor']['stage'] ?? 'users');
@@ -1665,6 +1751,21 @@ class Freesiem_Deep_Scanner
 			return true;
 		}
 
+		// freeSIEM Sentinel's own directory: only skip the whole subtree when we
+		// have NO self-checksum manifest to tell a pristine copy of our own code
+		// (which legitimately contains signature strings like "coinhive" and
+		// "c99shell") from a tampered one. That is the case for a symlinked dev
+		// checkout. A real release ships checksums.json, and scan_file() then
+		// verifies each of our files individually instead of skipping them.
+		if (defined('FREESIEM_SENTINEL_PLUGIN_DIR') && $this->self_manifest() === []) {
+			$self = untrailingslashit(wp_normalize_path(FREESIEM_SENTINEL_PLUGIN_DIR));
+			$here = untrailingslashit(wp_normalize_path($path));
+
+			if ($here === $self || str_starts_with($here . '/', $self . '/')) {
+				return true;
+			}
+		}
+
 		$normalized = $this->relative_path($path);
 
 		return str_contains($normalized, 'synchy-backups')
@@ -1705,5 +1806,60 @@ class Freesiem_Deep_Scanner
 		}
 
 		return ltrim($path, '/');
+	}
+
+	/**
+	 * If $path is a file inside freeSIEM Sentinel's own plugin directory, return
+	 * its path relative to that directory (matching checksums.json keys);
+	 * otherwise null.
+	 */
+	private function self_relative_path(string $path): ?string
+	{
+		if (!defined('FREESIEM_SENTINEL_PLUGIN_DIR')) {
+			return null;
+		}
+
+		$base = untrailingslashit(wp_normalize_path(FREESIEM_SENTINEL_PLUGIN_DIR));
+		$path = wp_normalize_path($path);
+
+		if (!str_starts_with($path, $base . '/')) {
+			return null;
+		}
+
+		return ltrim(substr($path, strlen($base)), '/');
+	}
+
+	/**
+	 * The plugin's own release checksum manifest ({ "includes/foo.php": "<md5>" }),
+	 * written into checksums.json by bin/build-release.sh. Absent from a symlinked
+	 * dev checkout — callers treat [] as "cannot verify our own files".
+	 */
+	private function self_manifest(): array
+	{
+		static $cache = null;
+
+		if (is_array($cache)) {
+			return $cache;
+		}
+
+		$cache = [];
+
+		if (!defined('FREESIEM_SENTINEL_PLUGIN_DIR')) {
+			return $cache;
+		}
+
+		$file = untrailingslashit(wp_normalize_path(FREESIEM_SENTINEL_PLUGIN_DIR)) . '/checksums.json';
+
+		if (!is_readable($file)) {
+			return $cache;
+		}
+
+		$decoded = json_decode((string) @file_get_contents($file), true);
+
+		if (is_array($decoded)) {
+			$cache = array_filter($decoded, 'is_string');
+		}
+
+		return $cache;
 	}
 }
