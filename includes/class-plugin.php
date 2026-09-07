@@ -255,19 +255,33 @@ class Freesiem_Plugin
 		if (!is_array($response) || $response === []) {
 			$detail = $this->api_client->last_error();
 			$payload_size = function_exists('size_format') ? size_format(strlen((string) wp_json_encode($payload))) : '';
-			error_log('[freeSIEM] local scan upload failed: ' . ($detail !== '' ? $detail : 'unknown') . ($payload_size !== '' ? ' [payload ' . $payload_size . ']' : ''));
 
-			freesiem_sentinel_update_settings(['last_upload_error' => $detail, 'last_upload_error_at' => freesiem_sentinel_get_iso8601_time()]);
+			// A 404 / 405 means freeSIEM Core exposes no scan-ingest endpoint for
+			// this site — cloud sync is simply not available. Any other failure is
+			// a transient upload problem (network, auth, timeout). Neither is a
+			// scan failure: the scan ran and its results are stored locally, so
+			// return $scan (not a WP_Error) and let the caller surface a warning.
+			$unavailable = (bool) preg_match('~responded HTTP (?:404|405)\b~', (string) $detail);
 
-			return new WP_Error(
-				'freesiem_upload_failed',
-				$detail !== ''
-					? sprintf(__('freeSIEM Sentinel could not upload the local scan: %s', 'freesiem-sentinel'), $detail)
-					: __('freeSIEM Sentinel could not upload the local scan.', 'freesiem-sentinel')
-			);
+			error_log(sprintf(
+				'[freeSIEM] local scan upload %s: %s%s',
+				$unavailable ? 'unavailable (no endpoint on freeSIEM Core)' : 'failed',
+				$detail !== '' ? $detail : 'unknown',
+				$payload_size !== '' ? ' [payload ' . $payload_size . ']' : ''
+			));
+
+			freesiem_sentinel_update_settings([
+				'last_upload_error' => $detail,
+				'last_upload_error_at' => freesiem_sentinel_get_iso8601_time(),
+			]);
+
+			$scan['upload'] = ['ok' => false, 'unavailable' => $unavailable, 'error' => (string) $detail];
+
+			return $scan;
 		}
 
 		freesiem_sentinel_update_settings(['last_sync_at' => freesiem_sentinel_get_iso8601_time(), 'last_upload_error' => '']);
+		$scan['upload'] = ['ok' => true, 'unavailable' => false, 'error' => ''];
 
 		return $scan;
 	}

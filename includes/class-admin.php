@@ -570,8 +570,9 @@ class Freesiem_Admin
 		freesiem_sentinel_update_settings(['scan_preferences' => $options]);
 
 		$result = $this->plugin->run_local_scan_with_options(true, $options);
-		$is_error = is_wp_error($result) || !empty($result['status']);
+		$is_error = is_wp_error($result) || (is_array($result) && ($result['status'] ?? '') === 'error');
 		$message = is_wp_error($result) ? $result->get_error_message() : safe($result['message'] ?? __('Configuration scan completed.', 'freesiem-sentinel'));
+		$upload = is_array($result) ? freesiem_sentinel_safe_array($result['upload'] ?? []) : [];
 
 		$deep_enabled = !empty($options['scan_malware']) || !empty($options['scan_core_integrity']) || !empty($options['scan_plugin_integrity']) || !empty($options['scan_database']);
 
@@ -597,7 +598,20 @@ class Freesiem_Admin
 			}
 		}
 
-		freesiem_sentinel_set_notice($is_error ? 'error' : 'success', $message);
+		$notice_type = $is_error ? 'error' : 'success';
+
+		if (!$is_error && $upload !== [] && empty($upload['ok'])) {
+			$notice_type = 'warning';
+			$message .= ' ' . (!empty($upload['unavailable'])
+				? __('Cloud sync is not available for this site yet — results are saved locally.', 'freesiem-sentinel')
+				: sprintf(
+					/* translators: %s: upload error detail */
+					__('Results are saved locally, but the upload to freeSIEM Core failed: %s', 'freesiem-sentinel'),
+					(string) ($upload['error'] ?? '')
+				));
+		}
+
+		freesiem_sentinel_set_notice($notice_type, $message);
 		$this->redirect_to_page('freesiem-scan', ['show_results' => '1']);
 	}
 

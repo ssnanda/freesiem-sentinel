@@ -1,7 +1,7 @@
 {
-    "freesiem-sentinel.php": "b434fa01191922eb89ed0438cba36fae",
+    "freesiem-sentinel.php": "aeba41d794eba21dab94ccac4bdce2bc",
     "includes/class-acme-client.php": "533ad7673c04bfb975d263ab41eaa1d0",
-    "includes/class-admin.php": "f0746359fd1064bae51327b9cfc34606",
+    "includes/class-admin.php": "5f3cfd35010b322956660e4ede6b6dbf",
     "includes/class-api-client.php": "eab6e42018ac7474637d624180f5f880",
     "includes/class-cloud-connect-client.php": "b61c940ee4658b84d754de2c0c3173da",
     "includes/class-cloud-connect-signer.php": "e345ec71f771bafad7212bf44be3e432",
@@ -13,7 +13,7 @@
     "includes/class-freesiem-sentinel-s3-client.php": "2e329f9825bd812497174e93c3424f0a",
     "includes/class-install-base-dial-home.php": "8b3f856ca216a651dcfdd85a7c363bea",
     "includes/class-pending-tasks.php": "027c8b34933a5bcbcb965f5f655f96c1",
-    "includes/class-plugin.php": "e2f51c7e060d58708875f4c4ba6f7776",
+    "includes/class-plugin.php": "07759da250f035a68a2adac99e4af770",
     "includes/class-results.php": "1e43d3620c6277782a9e4e0eda0fc4e9",
     "includes/class-scanner.php": "a5e9d8f99e458cd0bbb9303133825b70",
     "includes/class-tfa-auth.php": "53e412a951db6e2e02d1d9f904b50713",
