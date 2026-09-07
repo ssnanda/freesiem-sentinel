@@ -263,12 +263,17 @@ class Freesiem_Plugin
 			// return $scan (not a WP_Error) and let the caller surface a warning.
 			$unavailable = (bool) preg_match('~responded HTTP (?:404|405)\b~', (string) $detail);
 
-			error_log(sprintf(
-				'[freeSIEM] local scan upload %s: %s%s',
-				$unavailable ? 'unavailable (no endpoint on freeSIEM Core)' : 'failed',
-				$detail !== '' ? $detail : 'unknown',
-				$payload_size !== '' ? ' [payload ' . $payload_size . ']' : ''
-			));
+			// Log once when the situation changes, not on every hourly cron run.
+			$previous = (string) freesiem_sentinel_get_setting('last_upload_error', '');
+
+			if ($detail !== $previous) {
+				error_log(sprintf(
+					'[freeSIEM] local scan upload %s: %s%s',
+					$unavailable ? 'unavailable (freeSIEM Core has no scan-ingest endpoint yet)' : 'failed',
+					$detail !== '' ? $detail : 'unknown',
+					$payload_size !== '' ? ' [payload ' . $payload_size . ']' : ''
+				));
+			}
 
 			freesiem_sentinel_update_settings([
 				'last_upload_error' => $detail,
@@ -313,7 +318,18 @@ class Freesiem_Plugin
 		$response = $this->api_client->fetch_summary($site_id);
 
 		if (!is_array($response) || $response === []) {
-			return new WP_Error('freesiem_summary_failed', __('freeSIEM Sentinel could not fetch summary results.', 'freesiem-sentinel'));
+			$detail = $this->api_client->last_error();
+
+			if (preg_match('~responded HTTP (?:404|405)\b~', (string) $detail)) {
+				return new WP_Error('freesiem_summary_unavailable', __('Cloud summary is not available for this site yet (freeSIEM Core has no summary endpoint). Local scan results are unaffected.', 'freesiem-sentinel'));
+			}
+
+			return new WP_Error(
+				'freesiem_summary_failed',
+				$detail !== ''
+					? sprintf(__('freeSIEM Sentinel could not fetch summary results: %s', 'freesiem-sentinel'), $detail)
+					: __('freeSIEM Sentinel could not fetch summary results.', 'freesiem-sentinel')
+			);
 		}
 
 		$this->results->store_remote_summary($response);
