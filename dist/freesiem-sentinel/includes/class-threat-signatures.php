@@ -198,7 +198,7 @@ class Freesiem_Threat_Signatures
 	 *
 	 * @return array{summary:string,danger:bool,flags:string[]}
 	 */
-	public static function describe_data_file(string $head, string $extension, string $basename): array
+	public static function describe_data_file(string $head, string $extension, string $basename, int $file_size = 0): array
 	{
 		$extension = strtolower($extension);
 		$basename = strtolower($basename);
@@ -210,6 +210,8 @@ class Freesiem_Threat_Signatures
 		}
 
 		$lines = substr_count($head, "\n") + 1;
+		$truncated = $file_size > 0 && $file_size > strlen($head);
+		$size_label = function_exists('size_format') ? (string) size_format(max($file_size, strlen($head))) : (max($file_size, strlen($head)) . ' bytes');
 
 		$is_shell = in_array($extension, ['sh', 'bash', 'zsh', 'ksh'], true)
 			|| (bool) preg_match('~^#!\s*/\S*/(?:ba|z|k)?sh\b~', $head);
@@ -288,45 +290,9 @@ class Freesiem_Threat_Signatures
 			return ['summary' => $summary, 'danger' => $danger, 'flags' => array_values(array_unique($flags))];
 		}
 
-		if ($extension === 'sql' || preg_match('~^\s*(?:--|/\*|SET\s|START TRANSACTION|CREATE\s+TABLE|INSERT\s+INTO|DROP\s+TABLE)~i', $head)) {
-			$does = [];
-			$creates = (int) preg_match_all('~\bCREATE\s+TABLE\b~i', $head);
-			$inserts = (int) preg_match_all('~\bINSERT\s+INTO\b~i', $head);
-			$drops = (int) preg_match_all('~\bDROP\s+(?:TABLE|DATABASE)\b~i', $head);
-
-			if ($creates > 0) {
-				$does[] = sprintf('%d CREATE TABLE', $creates);
-			}
-
-			if ($inserts > 0) {
-				$does[] = sprintf('%d INSERT', $inserts);
-			}
-
-			if ($drops > 0) {
-				$does[] = sprintf('%d DROP', $drops);
-				$flags[] = 'destructive';
-			}
-
-			if (preg_match('~`?\w*users`?[^\n;]{0,80}(?:user_pass|user_login|user_email)~i', $head)
-				|| preg_match('~(?:CREATE\s+TABLE|INSERT\s+INTO)\s+`?\w*users`?~i', $head)) {
-				$does[] = 'includes a users table (login names and password hashes)';
-				$flags[] = 'contains_credentials';
-			}
-
-			if (preg_match('~`?\w*options`?[^\n;]{0,80}siteurl~i', $head) || preg_match('~siteurl[^\n;]{0,80}`?\w*options`?~i', $head)) {
-				$does[] = 'appears to be a full site database export';
-			}
-
-			if (preg_match('~UPDATE\s+`?\w*users`?\s+SET[^\n;]*user_pass~i', $head)) {
-				$does[] = 'changes a user password';
-				$flags[] = 'contains_credentials';
-			}
-
-			$summary = $does === []
-				? sprintf('SQL script, ~%d statement line(s).', $lines)
-				: sprintf('SQL dump / script: %s.', self::join_clauses($does));
-
-			return ['summary' => $summary, 'danger' => false, 'flags' => array_values(array_unique($flags))];
+		if ($extension === 'sql'
+			|| preg_match('~^\s*(?:--\s|/\*|SET\s|START TRANSACTION|CREATE\s+(?:TABLE|DATABASE)|INSERT\s+INTO|DROP\s+TABLE|LOCK TABLES)~i', $head)) {
+			return self::describe_sql($head, $lines, $truncated, $size_label);
 		}
 
 		if (in_array($extension, ['bak', 'old', 'save', 'orig', 'swp', 'swo'], true) || str_contains($basename, 'wp-config')) {
@@ -371,6 +337,157 @@ class Freesiem_Threat_Signatures
 		$last = array_pop($items);
 
 		return implode(', ', $items) . ' and ' . $last;
+	}
+
+	/**
+	 * Detailed read-out of a .sql file: where it came from, which tables and how
+	 * much data, whether it is a WordPress database, and what sensitive content
+	 * (password hashes, secret keys, API tokens) it exposes.
+	 *
+	 * @return array{summary:string,danger:bool,flags:string[]}
+	 */
+	private static function describe_sql(string $head, int $lines, bool $truncated, string $size_label): array
+	{
+		$flags = [];
+		$parts = [];
+
+		// ---- provenance from the mysqldump / phpMyAdmin / Adminer header ----
+		if (preg_match('~^--\s*Host:\s*(\S+)\s+Database:\s*([^\s-]+)~mi', $head, $m)) {
+			$parts[] = sprintf('exported from database `%s` on host `%s`', $m[2], $m[1]);
+		} elseif (preg_match('~(?:--\s*Database:|USE\s+`?)([a-z0-9_$-]+)~i', $head, $m)) {
+			$parts[] = sprintf('database `%s`', $m[1]);
+		}
+
+		if (preg_match('~Server version[\s:]+(\S+)~i', $head, $m)) {
+			$parts[] = 'MySQL/MariaDB ' . $m[1];
+		}
+
+		if (preg_match('~--\s*Dump completed on\s+([0-9]{4}-[0-9]{2}-[0-9]{2}[ 0-9:]*)~i', $head, $m)) {
+			$parts[] = 'dumped ' . trim($m[1]);
+		} elseif (preg_match('~--\s*Generation Time:\s*([^\n]+?)\s*(?:--|\n|$)~i', $head, $m)) {
+			$parts[] = 'generated ' . trim($m[1]);
+		}
+
+		// ---- tables ----
+		preg_match_all('~(?:CREATE\s+TABLE(?:\s+IF\s+NOT\s+EXISTS)?|DROP\s+TABLE(?:\s+IF\s+EXISTS)?|--\s*Table structure for table|INSERT\s+INTO)\s+`?([a-z0-9_$]+)`?~i', $head, $tm);
+		$tables = [];
+
+		foreach ($tm[1] ?? [] as $t) {
+			$tl = strtolower($t);
+
+			if (!in_array($tl, $tables, true)) {
+				$tables[] = $tl;
+			}
+		}
+
+		if ($tables !== []) {
+			$shown = array_slice($tables, 0, 15);
+			$parts[] = sprintf(
+				'%s%d table(s): %s%s',
+				$truncated ? 'at least ' : '',
+				count($tables),
+				implode(', ', $shown),
+				count($tables) > 15 ? ', …' : ''
+			);
+		}
+
+		// ---- is it a WordPress database? derive the prefix ----
+		$wp_prefix = null;
+
+		foreach ($tables as $t) {
+			foreach (['options', 'posts', 'users', 'postmeta', 'term_taxonomy'] as $core) {
+				if (str_ends_with($t, $core)) {
+					$candidate = substr($t, 0, -strlen($core));
+
+					if (in_array($candidate . 'options', $tables, true) || in_array($candidate . 'posts', $tables, true)) {
+						$wp_prefix = $candidate;
+						break 2;
+					}
+				}
+			}
+		}
+
+		if ($wp_prefix !== null) {
+			$parts[] = $wp_prefix === ''
+				? 'a WordPress database (no table prefix)'
+				: sprintf('a WordPress database (table prefix `%s`)', $wp_prefix);
+		}
+
+		if (preg_match('~[`\'"]siteurl[`\'"]\s*,\s*[\'"]([^\'"]+)~i', $head, $m)) {
+			$parts[] = sprintf('site URL `%s`', $m[1]);
+		}
+
+		// ---- volume of data ----
+		$inserts = (int) preg_match_all('~\bINSERT\s+INTO\b~i', $head);
+		$row_tuples = (int) preg_match_all('~\)\s*,\s*\(~', $head); // rows in multi-row INSERTs
+		$drops = (int) preg_match_all('~\bDROP\s+(?:TABLE|DATABASE)\b~i', $head);
+
+		if ($inserts > 0) {
+			$parts[] = $row_tuples > $inserts
+				? sprintf('~%s+ data rows across %d INSERT statement(s)', number_format($row_tuples), $inserts)
+				: sprintf('%d INSERT statement(s) of row data', $inserts);
+		}
+
+		if ($drops > 0) {
+			$parts[] = sprintf('%d DROP statement(s)', $drops);
+			$flags[] = 'destructive';
+		}
+
+		// ---- sensitive content ----
+		$user_table = false;
+
+		foreach ($tables as $t) {
+			if (str_ends_with($t, 'users') || str_ends_with($t, 'usermeta')) {
+				$user_table = true;
+				break;
+			}
+		}
+
+		if ($user_table || preg_match('~INSERT\s+INTO\s+`?\w*users`?~i', $head)) {
+			$bits = ['login names'];
+
+			if (preg_match('~\$(?:P\$|wp\$|2[aby]\$|argon2)~', $head) || preg_match('~user_pass~i', $head)) {
+				$bits[] = 'password hashes';
+			}
+
+			if (preg_match('~[\w.+-]+@[\w-]+\.[a-z]{2,}~i', $head)) {
+				$bits[] = 'email addresses';
+			}
+
+			$parts[] = 'includes the users table (' . self::join_clauses($bits) . ')';
+			$flags[] = 'contains_credentials';
+		}
+
+		if (preg_match('~(?:auth|secure_auth|logged_in|nonce)_(?:key|salt)~i', $head)) {
+			$parts[] = 'contains WordPress secret keys / salts';
+			$flags[] = 'contains_credentials';
+		}
+
+		if (preg_match('~(?:api[_-]?key|secret[_-]?key|access[_-]?token|client[_-]?secret|private[_-]?key|smtp_pass(?:word)?|aws_secret|stripe_(?:sk|secret)|-----BEGIN [A-Z ]*PRIVATE KEY-----)~i', $head)) {
+			$parts[] = 'contains option rows that look like API keys or access tokens';
+			$flags[] = 'contains_secrets';
+		}
+
+		if (preg_match('~UPDATE\s+`?\w*users`?\s+SET[^\n;]*user_pass~i', $head)) {
+			$parts[] = 'changes a user password';
+			$flags[] = 'contains_credentials';
+		}
+
+		if ($parts === []) {
+			return [
+				'summary' => sprintf('SQL script, ~%d statement line(s), no schema or dump markers recognised.', $lines),
+				'danger' => false,
+				'flags' => [],
+			];
+		}
+
+		$summary = sprintf('%s file — %s.', $size_label, self::join_clauses($parts));
+
+		if ($truncated) {
+			$summary .= ' (Read from the start of the file; a large dump may contain more.)';
+		}
+
+		return ['summary' => $summary, 'danger' => false, 'flags' => array_values(array_unique($flags))];
 	}
 
 	/**

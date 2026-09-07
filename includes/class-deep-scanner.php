@@ -662,19 +662,23 @@ class Freesiem_Deep_Scanner
 		$describe_exts = ['sql', 'sh', 'bash', 'zsh', 'ksh', 'py', 'pl', 'cgi', 'bak', 'old', 'orig', 'save', 'swp', 'zip', 'gz', 'tgz', 'tar', 'bz2', 'xz', '7z', 'rar'];
 
 		if (in_array($extension, $describe_exts, true)) {
-			$head = (string) @file_get_contents($path, false, null, 0, 131072);
-			$desc = Freesiem_Threat_Signatures::describe_data_file($head, $extension, $basename);
+			// A .sql dump front-loads its schema + the users table, so read further
+			// into it than a script needs.
+			$read = $extension === 'sql' ? 786432 : 131072;
+			$head = (string) @file_get_contents($path, false, null, 0, $read);
+			$desc = Freesiem_Threat_Signatures::describe_data_file($head, $extension, $basename, $size);
 			$content_summary = (string) ($desc['summary'] ?? '');
+			$desc_flags = (array) ($desc['flags'] ?? []);
 
 			if (!empty($desc['danger'])) {
 				$reasons[] = 'Its contents perform high-risk operations';
 				$severity = 'critical';
 				$score = min($score, 24);
-			} elseif (in_array('empty', (array) ($desc['flags'] ?? []), true)) {
+			} elseif (in_array('empty', $desc_flags, true)) {
 				// An empty "dump" / "backup" is inert. Note it, but do not cry wolf.
 				$severity = $severity === 'critical' ? $severity : 'low';
 				$score = max($score, 88);
-			} elseif (in_array('contains_credentials', (array) ($desc['flags'] ?? []), true)) {
+			} elseif (array_intersect(['contains_credentials', 'contains_secrets'], $desc_flags) !== []) {
 				$severity = $severity === 'critical' ? 'critical' : 'high';
 				$score = min($score, 40);
 			}

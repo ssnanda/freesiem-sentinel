@@ -253,10 +253,21 @@ class Freesiem_Plugin
 		$response = $this->api_client->upload_local_scan($payload);
 
 		if (!is_array($response) || $response === []) {
-			return new WP_Error('freesiem_upload_failed', __('freeSIEM Sentinel could not upload the local scan.', 'freesiem-sentinel'));
+			$detail = $this->api_client->last_error();
+			$payload_size = function_exists('size_format') ? size_format(strlen((string) wp_json_encode($payload))) : '';
+			error_log('[freeSIEM] local scan upload failed: ' . ($detail !== '' ? $detail : 'unknown') . ($payload_size !== '' ? ' [payload ' . $payload_size . ']' : ''));
+
+			freesiem_sentinel_update_settings(['last_upload_error' => $detail, 'last_upload_error_at' => freesiem_sentinel_get_iso8601_time()]);
+
+			return new WP_Error(
+				'freesiem_upload_failed',
+				$detail !== ''
+					? sprintf(__('freeSIEM Sentinel could not upload the local scan: %s', 'freesiem-sentinel'), $detail)
+					: __('freeSIEM Sentinel could not upload the local scan.', 'freesiem-sentinel')
+			);
 		}
 
-		freesiem_sentinel_update_settings(['last_sync_at' => freesiem_sentinel_get_iso8601_time()]);
+		freesiem_sentinel_update_settings(['last_sync_at' => freesiem_sentinel_get_iso8601_time(), 'last_upload_error' => '']);
 
 		return $scan;
 	}

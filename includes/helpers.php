@@ -32,6 +32,8 @@ function freesiem_sentinel_get_default_settings(): array
 		'last_local_scan_at' => '',
 		'last_remote_scan_at' => '',
 		'last_sync_at' => '',
+		'last_upload_error' => '',
+		'last_upload_error_at' => '',
 		'last_heartbeat_at' => '',
 		'last_heartbeat_result' => '',
 		'enable_pending_task_queue' => 1,
@@ -382,6 +384,8 @@ function freesiem_sentinel_sanitize_settings(array $settings): array
 	$settings['last_local_scan_at'] = freesiem_sentinel_sanitize_datetime((string) $settings['last_local_scan_at']);
 	$settings['last_remote_scan_at'] = freesiem_sentinel_sanitize_datetime((string) $settings['last_remote_scan_at']);
 	$settings['last_sync_at'] = freesiem_sentinel_sanitize_datetime((string) $settings['last_sync_at']);
+	$settings['last_upload_error'] = sanitize_text_field((string) ($settings['last_upload_error'] ?? ''));
+	$settings['last_upload_error_at'] = freesiem_sentinel_sanitize_datetime((string) ($settings['last_upload_error_at'] ?? ''));
 	$settings['last_heartbeat_at'] = freesiem_sentinel_sanitize_datetime((string) $settings['last_heartbeat_at']);
 	$settings['last_heartbeat_result'] = sanitize_text_field((string) ($settings['last_heartbeat_result'] ?? ''));
 	$settings['enable_pending_task_queue'] = empty($settings['enable_pending_task_queue']) ? 0 : 1;

@@ -8,11 +8,21 @@ class Freesiem_API_Client
 {
 	private array $settings;
 	private string $base_url;
+	private string $last_error = '';
 
 	public function __construct(?array $settings = null)
 	{
 		$this->settings = $settings ?: freesiem_sentinel_get_settings();
 		$this->base_url = untrailingslashit((string) ($this->settings['backend_url'] ?? FREESIEM_SENTINEL_BACKEND_URL));
+	}
+
+	/**
+	 * Human-readable reason the last request failed (empty on success). Callers
+	 * turn the generic "could not upload" into something an admin can act on.
+	 */
+	public function last_error(): string
+	{
+		return $this->last_error;
 	}
 
 	public function register_site(array $payload)
@@ -65,43 +75,55 @@ class Freesiem_API_Client
 
 	private function post_json(string $path, array $payload, bool $authenticated, bool $signed)
 	{
+		$this->last_error = '';
 		$request = $this->build_request($path, $payload, $authenticated, $signed);
 
 		if (is_wp_error($request)) {
+			$this->last_error = $request->get_error_message();
+
+			return [];
+		}
+
+		if ($request === []) {
+			$this->last_error = 'Could not build the request (payload could not be JSON-encoded).';
+
 			return [];
 		}
 
 		$response = wp_remote_post(
 			$request['url'],
 			[
-				'timeout' => 20,
+				'timeout' => 30,
 				'headers' => $request['headers'],
 				'body' => $request['body'],
 				'data_format' => 'body',
 			]
 		);
 
-		return $this->parse_response($response, $signed);
+		return $this->parse_response($response, $signed, $path, strlen((string) $request['body']));
 	}
 
 	private function get_json(string $path, array $query, bool $authenticated, bool $signed)
 	{
+		$this->last_error = '';
 		$url = add_query_arg(freesiem_sentinel_safe_query_args($query), $this->base_url . $path);
 		$headers = $this->build_headers($authenticated, $signed, '');
 
 		if (is_wp_error($headers)) {
+			$this->last_error = $headers->get_error_message();
+
 			return [];
 		}
 
 		$response = wp_remote_get(
 			$url,
 			[
-				'timeout' => 20,
+				'timeout' => 30,
 				'headers' => $headers,
 			]
 		);
 
-		return $this->parse_response($response, $signed);
+		return $this->parse_response($response, $signed, $path, 0);
 	}
 
 	private function build_request(string $path, array $payload, bool $authenticated, bool $signed)
@@ -116,7 +138,7 @@ class Freesiem_API_Client
 		$headers = $this->build_headers($authenticated, $signed, $body);
 
 		if (is_wp_error($headers)) {
-			return [];
+			return $headers;
 		}
 
 		return [
@@ -169,9 +191,17 @@ class Freesiem_API_Client
 		return $headers;
 	}
 
-	private function parse_response($response, bool $signed)
+	private function parse_response($response, bool $signed, string $path = '', int $request_bytes = 0)
 	{
+		$where = $path !== '' ? $this->base_url . $path : $this->base_url;
+
 		if (is_wp_error($response)) {
+			$this->last_error = sprintf(
+				'Could not reach %s: %s. The host may block outbound HTTPS, or DNS/TLS failed.',
+				$where,
+				$response->get_error_message()
+			);
+
 			return [];
 		}
 
@@ -183,17 +213,47 @@ class Freesiem_API_Client
 			$validation = $this->validate_response_signature($response, $body);
 
 			if ($validation !== true) {
+				$this->last_error = is_wp_error($validation)
+					? $validation->get_error_message()
+					: 'The response signature did not validate (possible clock skew between this server and freeSIEM Core).';
+
 				return [];
 			}
 		}
 
 		if ($code !== 200) {
+			$detail = is_array($data) ? (string) ($data['message'] ?? $data['error'] ?? '') : trim(wp_strip_all_tags($body));
+			$hint = '';
+
+			if ($code === 401 || $code === 403) {
+				$hint = ' Re-register the site (Remote tab) to refresh credentials.';
+			} elseif ($code === 413) {
+				$hint = ' The scan payload is too large for the server to accept.';
+			} elseif ($code === 0) {
+				$hint = ' No HTTP status — the connection was dropped or timed out (30s).';
+			} elseif ($code >= 500) {
+				$hint = ' freeSIEM Core returned a server error; retry later.';
+			}
+
+			$this->last_error = sprintf(
+				'%s responded HTTP %d%s%s%s',
+				$where,
+				$code,
+				$detail !== '' ? ': ' . mb_substr($detail, 0, 300) : '',
+				$request_bytes > 0 ? sprintf(' (sent %s)', size_format($request_bytes)) : '',
+				$hint
+			);
+
 			return [];
 		}
 
 		if (!is_array($data)) {
+			$this->last_error = sprintf('%s returned HTTP 200 but the body was not valid JSON.', $where);
+
 			return [];
 		}
+
+		$this->last_error = '';
 
 		return $data;
 	}
