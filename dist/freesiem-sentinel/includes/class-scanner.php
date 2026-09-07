@@ -496,6 +496,13 @@ class Freesiem_Scanner
 
 		$diff = $this->compare_integrity_snapshots($baseline, $current_snapshot);
 		$merged_baseline = $this->merge_forward_baseline($baseline, $current_snapshot);
+
+		// A WordPress update, migration or restore rewrites hundreds of files at
+		// once. That is not a targeted compromise (an attacker touches one or two
+		// files), and emitting a finding per file buries anything that matters.
+		// Detect the mass event, collapse it to one finding, and re-baseline.
+		$diff = $this->collapse_mass_integrity_event($diff, $baseline, $now);
+
 		$diff_cache = [
 			'generated_at' => $now,
 			'baseline_created' => false,
@@ -675,6 +682,67 @@ class Freesiem_Scanner
 		ksort($merged);
 
 		return $merged;
+	}
+
+	/**
+	 * When a diff touches a large share of the baseline it is a bulk operation
+	 * (core/plugin update, migration, restore from backup), not an intrusion.
+	 * Replace the per-file findings with one summary and let the fresh snapshot
+	 * become the new baseline.
+	 */
+	private function collapse_mass_integrity_event(array $diff, array $baseline, string $now): array
+	{
+		$new = (int) ($diff['new_files_count'] ?? 0);
+		$modified = (int) ($diff['modified_files_count'] ?? 0);
+		$deleted = (int) ($diff['deleted_files_count'] ?? 0);
+		$total = $new + $modified + $deleted;
+		$baseline_size = max(1, count($baseline));
+
+		if ($total < 120 && $total < (int) ($baseline_size * 0.4)) {
+			return $diff;
+		}
+
+		// "new" alone just means the per-run hash budget is still catching up on
+		// files that were always there — grow the baseline quietly, no finding.
+		if ($modified === 0 && $deleted === 0) {
+			$diff['changes'] = [];
+			$diff['findings'] = [];
+			$diff['partial'] = false;
+
+			return $diff;
+		}
+
+		$evidence = [
+			'change_type' => 'bulk',
+			'path' => '',
+			'new_files_count' => $new,
+			'modified_files_count' => $modified,
+			'deleted_files_count' => $deleted,
+			'baseline_size' => $baseline_size,
+			'detected_at' => $now,
+		];
+
+		$diff['changes'] = [$evidence];
+		$diff['findings'] = [
+			$this->finding(
+				'file_integrity_bulk_change',
+				'file_integrity',
+				'medium',
+				'Large-scale file changes detected',
+				sprintf(
+					'freeSIEM Sentinel saw %d new, %d modified and %d removed monitored files in one run — the pattern of a WordPress/plugin update, migration or restore rather than a targeted change. The integrity baseline has been re-established.',
+					$new,
+					$modified,
+					$deleted
+				),
+				'If you just updated, migrated or restored the site, no action is needed. If not, treat this as suspicious: compare the site against a known-good backup.',
+				$evidence,
+				80
+			),
+		];
+		$diff['partial'] = false;
+
+		return $diff;
 	}
 
 	private function append_integrity_change(string $change_type, ?array $previous, ?array $current, array &$changes, array &$findings): void
