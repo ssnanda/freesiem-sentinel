@@ -706,7 +706,15 @@ class Freesiem_Admin
 			$score = (int) ($meta['score'] ?? freesiem_sentinel_score_from_findings($findings));
 			$counts = freesiem_sentinel_safe_array($meta['severity_counts'] ?? []);
 			$label = 'run-' . $run_id;
-			$metrics = $meta;
+			$scan = [
+				'status' => !empty($meta['partial']) ? 'partial' : 'complete',
+				'scan_type' => (string) ($meta['type'] ?? 'deep') . (!empty($meta['full']) ? ' (full)' : ''),
+				'files_content_scanned' => (int) ($meta['files_scanned'] ?? 0),
+				'malware_hits' => (int) ($meta['malware_hits'] ?? 0),
+				'core_files_modified' => (int) ($meta['core_files_modified'] ?? 0),
+				'plugin_files_modified' => (int) ($meta['plugin_files_modified'] ?? 0),
+				'database_issues' => (int) ($meta['database_issues'] ?? 0),
+			];
 		} else {
 			$cache = $results->get_cache();
 			$findings = array_values(array_filter(freesiem_sentinel_safe_array($cache['local_findings'] ?? []), 'is_array'));
@@ -715,7 +723,22 @@ class Freesiem_Admin
 			$score = (int) ($summary['local_score'] ?? freesiem_sentinel_score_from_findings($findings));
 			$counts = freesiem_sentinel_safe_array($cache['severity_counts'] ?? []);
 			$label = 'current';
-			$metrics = $summary;
+
+			$running = $this->plugin->get_deep_scanner()->is_running();
+			$scan = [
+				'status' => $running ? 'in_progress' : (!empty($summary['deep_scan_partial']) ? 'partial' : 'complete'),
+				'scan_type' => 'deep',
+				'modules' => array_values((array) ($summary['scan_modules'] ?? [])),
+				'files_discovered' => (int) ($summary['files_discovered'] ?? 0),
+				'files_heuristic_scanned' => (int) ($summary['files_analyzed'] ?? 0),
+				'files_content_scanned' => (int) ($summary['files_content_scanned'] ?? 0),
+				'bytes_scanned' => (int) ($summary['bytes_scanned'] ?? 0),
+				'malware_hits' => (int) ($summary['malware_hits'] ?? 0),
+				'core_files_modified' => (int) ($summary['core_files_modified'] ?? 0),
+				'plugin_files_modified' => (int) ($summary['plugin_files_modified'] ?? 0),
+				'database_issues' => (int) ($summary['database_issues'] ?? 0),
+				'last_deep_scan_at' => (string) ($summary['last_deep_scan_at'] ?? ''),
+			];
 		}
 
 		$export = freesiem_sentinel_build_scan_export($format, [
@@ -723,7 +746,7 @@ class Freesiem_Admin
 			'scanned_at' => $scanned_at,
 			'score' => $score,
 			'severity_counts' => $counts,
-			'metrics' => $metrics,
+			'scan' => $scan,
 			'label' => $label,
 		]);
 
@@ -2777,11 +2800,18 @@ class Freesiem_Admin
 				. '</span>';
 		}
 
-		return '<span style="display:inline-flex;gap:8px;flex-wrap:wrap;">'
+		$running_hint = '';
+
+		if ($args === [] && $this->plugin->get_deep_scanner()->is_running()) {
+			$running_hint = '<span style="align-self:center;color:#b45309;font-size:12px;">' . esc_html__('deep scan still running — export will be incomplete', 'freesiem-sentinel') . '</span>';
+		}
+
+		return '<span style="display:inline-flex;gap:8px;flex-wrap:wrap;align-items:center;">'
 			. '<a class="button button-secondary" href="' . esc_url($json) . '">' . esc_html__('Export JSON', 'freesiem-sentinel') . '</a>'
 			. '<button type="button" class="button button-secondary fs-copy-export" data-url="' . esc_url($json) . '" data-label="' . esc_attr__('JSON', 'freesiem-sentinel') . '">' . esc_html__('Copy JSON', 'freesiem-sentinel') . '</button>'
 			. '<a class="button button-secondary" href="' . esc_url($csv) . '">' . esc_html__('Export CSV', 'freesiem-sentinel') . '</a>'
 			. '<button type="button" class="button button-secondary fs-copy-export" data-url="' . esc_url($csv) . '" data-label="' . esc_attr__('CSV', 'freesiem-sentinel') . '">' . esc_html__('Copy CSV', 'freesiem-sentinel') . '</button>'
+			. $running_hint
 			. '</span>';
 	}
 

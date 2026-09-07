@@ -5195,18 +5195,30 @@ function freesiem_sentinel_build_scan_export(string $format, array $data): array
 		];
 	}
 
+	$scan = freesiem_sentinel_safe_array($data['scan'] ?? []);
+	$scan = array_merge([
+		'status' => 'complete',
+		'scanned_at' => (string) ($data['scanned_at'] ?? ''),
+		'score' => (int) ($data['score'] ?? 0),
+	], $scan);
+
 	$payload = [
 		'generated_at' => freesiem_sentinel_get_iso8601_time(),
 		'site_url' => home_url('/'),
 		'wp_version' => get_bloginfo('version'),
 		'plugin_version' => defined('FREESIEM_SENTINEL_VERSION') ? FREESIEM_SENTINEL_VERSION : '',
-		'scanned_at' => (string) ($data['scanned_at'] ?? ''),
-		'score' => (int) ($data['score'] ?? 0),
-		'severity_counts' => (object) freesiem_sentinel_safe_array($data['severity_counts'] ?? []),
-		'metrics' => (object) freesiem_sentinel_safe_array($data['metrics'] ?? []),
+		'scan' => $scan,
+		'severity_counts' => (object) array_merge(
+			['critical' => 0, 'high' => 0, 'medium' => 0, 'low' => 0, 'info' => 0],
+			array_map('intval', freesiem_sentinel_safe_array($data['severity_counts'] ?? []))
+		),
 		'findings_count' => count($findings),
 		'findings' => array_map($row, $findings),
 	];
+
+	if (($scan['status'] ?? '') === 'in_progress') {
+		$payload['note'] = 'The deep scan was still running when this export was taken — file/malware counts and findings are incomplete. Re-export once the scan finishes.';
+	}
 
 	return [
 		'filename' => $filename,
