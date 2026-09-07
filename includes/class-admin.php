@@ -600,15 +600,16 @@ class Freesiem_Admin
 
 		$notice_type = $is_error ? 'error' : 'success';
 
-		if (!$is_error && $upload !== [] && empty($upload['ok'])) {
+		// Only surface an upload problem the admin can actually act on. "Cloud sync
+		// not provisioned on freeSIEM Core" (404/405) and "cloud upload turned off"
+		// are normal local-only operation — say nothing.
+		if (!$is_error && $upload !== [] && empty($upload['ok']) && empty($upload['unavailable']) && empty($upload['skipped'])) {
 			$notice_type = 'warning';
-			$message .= ' ' . (!empty($upload['unavailable'])
-				? __('Cloud sync is not available for this site yet — results are saved locally.', 'freesiem-sentinel')
-				: sprintf(
-					/* translators: %s: upload error detail */
-					__('Results are saved locally, but the upload to freeSIEM Core failed: %s', 'freesiem-sentinel'),
-					(string) ($upload['error'] ?? '')
-				));
+			$message .= ' ' . sprintf(
+				/* translators: %s: upload error detail */
+				__('Results are saved locally, but the upload to freeSIEM Core failed: %s', 'freesiem-sentinel'),
+				(string) ($upload['error'] ?? '')
+			);
 		}
 
 		freesiem_sentinel_set_notice($notice_type, $message);
@@ -1934,7 +1935,10 @@ class Freesiem_Admin
 		echo '<p style="margin:0 0 10px;"><label>' . esc_html__('Heuristic pass: max files', 'freesiem-sentinel') . '<br /><input type="number" min="100" max="200000" step="100" name="max_files" value="' . esc_attr(freesiem_sentinel_safe_string($prefs['max_files'] ?? '1000')) . '" /></label></p>';
 		echo '<p style="margin:0 0 10px;"><label>' . esc_html__('Directory depth limit', 'freesiem-sentinel') . '<br /><input type="number" min="1" max="20" step="1" name="max_depth" value="' . esc_attr(freesiem_sentinel_safe_string($prefs['max_depth'] ?? '5')) . '" /></label></p>';
 		echo '<p style="margin:0 0 10px;"><label>' . esc_html__('Exclude paths (one per line, relative to the WordPress root)', 'freesiem-sentinel') . '<br /><textarea name="exclude_paths" rows="3" class="large-text" placeholder="wp-content/uploads/cache">' . esc_textarea(implode("\n", array_map('freesiem_sentinel_safe_string', is_array($prefs['exclude_paths'] ?? null) ? $prefs['exclude_paths'] : []))) . '</textarea></label></p>';
-		echo '<p style="margin:0;"><label><input type="checkbox" name="include_uploads" value="1"' . checked(!empty($prefs['include_uploads']), true, false) . ' /> ' . esc_html__('Include uploads in the heuristic pass', 'freesiem-sentinel') . '</label></p>';
+		echo '<p style="margin:0 0 10px;"><label><input type="checkbox" name="include_uploads" value="1"' . checked(!empty($prefs['include_uploads']), true, false) . ' /> ' . esc_html__('Include uploads in the heuristic pass', 'freesiem-sentinel') . '</label></p>';
+		$cloud_upload_on = !array_key_exists('cloud_upload', $prefs) || !empty($prefs['cloud_upload']);
+		echo '<p style="margin:0;"><label><input type="checkbox" name="cloud_upload" value="1"' . checked($cloud_upload_on, true, false) . ' /> ' . esc_html__('Upload results to freeSIEM Core (Cloud)', 'freesiem-sentinel') . '</label>';
+		echo '<span style="display:block;color:#50575e;font-size:12px;margin-top:2px;">' . esc_html__('Off = scan and store results on this site only. Turn off if freeSIEM Core is not set up to receive scans yet.', 'freesiem-sentinel') . '</span></p>';
 		echo '</div>';
 		echo '</div>';
 		echo '<p style="margin:16px 0 0;display:flex;gap:10px;flex-wrap:wrap;">';
@@ -3082,6 +3086,7 @@ class Freesiem_Admin
 			'throttle_us' => max(-1, min(200000, (int) ($input['throttle_us'] ?? ($current['throttle_us'] ?? -1)))),
 			'exclude_paths' => $exclude_paths,
 			'include_uploads' => empty($input['include_uploads']) ? 0 : 1,
+			'cloud_upload' => empty($input['cloud_upload']) ? 0 : 1,
 			'max_files' => max(100, min(200000, (int) ($input['max_files'] ?? ($current['max_files'] ?? 1000)))),
 			'max_depth' => max(1, min(20, (int) ($input['max_depth'] ?? ($current['max_depth'] ?? 5)))),
 		];

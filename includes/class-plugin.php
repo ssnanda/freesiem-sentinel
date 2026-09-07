@@ -237,8 +237,12 @@ class Freesiem_Plugin
 		}
 
 		$settings = freesiem_sentinel_get_settings();
+		$cloud_upload = freesiem_sentinel_safe_array($settings['scan_preferences'] ?? []);
+		$cloud_upload = !array_key_exists('cloud_upload', $cloud_upload) || !empty($cloud_upload['cloud_upload']);
 
-		if (empty($settings['site_id'])) {
+		if (empty($settings['site_id']) || !$cloud_upload) {
+			$scan['upload'] = ['ok' => true, 'skipped' => true, 'unavailable' => false, 'error' => ''];
+
 			return $scan;
 		}
 

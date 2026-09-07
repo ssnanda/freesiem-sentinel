@@ -76,6 +76,7 @@ function freesiem_sentinel_get_default_settings(): array
 			'include_uploads' => 0,
 			'max_files' => 1000,
 			'max_depth' => 5,
+			'cloud_upload' => 1,
 		],
 		'deep_scan_weekly_enabled' => 1,
 		'deep_scan_weekly_day' => -1,
@@ -425,6 +426,9 @@ function freesiem_sentinel_sanitize_settings(array $settings): array
 	$settings['scan_preferences']['scan_plugin_integrity'] = empty($settings['scan_preferences']['scan_plugin_integrity']) ? 0 : 1;
 	$settings['scan_preferences']['scan_database'] = empty($settings['scan_preferences']['scan_database']) ? 0 : 1;
 	$settings['scan_preferences']['scan_uploads_deep'] = empty($settings['scan_preferences']['scan_uploads_deep']) ? 0 : 1;
+	$settings['scan_preferences']['cloud_upload'] = array_key_exists('cloud_upload', $settings['scan_preferences'])
+		? (empty($settings['scan_preferences']['cloud_upload']) ? 0 : 1)
+		: 1;
 	$settings['scan_preferences']['scan_intensity'] = in_array((string) ($settings['scan_preferences']['scan_intensity'] ?? 'balanced'), ['gentle', 'balanced', 'thorough'], true)
 		? (string) $settings['scan_preferences']['scan_intensity']
 		: 'balanced';
