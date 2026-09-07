@@ -1605,8 +1605,13 @@ class Freesiem_Deep_Scanner
 			'finished_at' => (string) ($state['finished_at'] ?? freesiem_sentinel_get_iso8601_time()),
 		];
 
-		$this->plugin->get_results()->merge_deep_scan($findings, $metrics);
-		$this->plugin->get_results()->record_scan_run($mode === 'weekly' ? 'weekly' : 'deep', $findings, $metrics);
+		$merged_cache = $this->plugin->get_results()->merge_deep_scan($findings, $metrics);
+
+		// Record the run against the FULL merged result set (deep findings +
+		// the quick config-scan findings), so the history row and its drill-in
+		// match what "Scan Results" shows for this run — not just the deep subset.
+		$merged_findings = array_values(freesiem_sentinel_safe_array($merged_cache['local_findings'] ?? $findings));
+		$this->plugin->get_results()->record_scan_run($mode === 'weekly' ? 'weekly' : 'deep', $merged_findings, $metrics);
 		$this->plugin->push_local_findings_snapshot();
 
 		if ($mode === 'weekly' && !empty(freesiem_sentinel_get_setting('scan_email_on_weekly', 1))) {

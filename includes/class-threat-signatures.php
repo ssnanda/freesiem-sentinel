@@ -346,10 +346,12 @@ class Freesiem_Threat_Signatures
 				'id' => 'php_write_executable_file',
 				'label' => 'Writes a PHP file to disk',
 				'severity' => 'medium',
-				'score' => 56,
+				'score' => 62,
 				'category' => 'malware',
 				'classes' => ['php'],
-				'pattern' => '/\b(?:file_put_contents|fwrite|fputs)\s*\(\s*[^,;\n]{0,140}\.(?:php\d?|phtml|phar|pht)[\'"]\s*[,)]/i',
+				// Exclude "…/index.php": every plugin writes an empty
+				// "<?php // Silence is golden" guard file into its own directories.
+				'pattern' => '/\b(?:file_put_contents|fwrite|fputs)\s*\(\s*[^,;\n]{0,140}(?<!index)\.(?:php\d?|phtml|phar|pht)[\'"]\s*,/i',
 				'recommendation' => 'Droppers write new PHP files that become backdoors. Verify this behaviour is expected.',
 			],
 			[

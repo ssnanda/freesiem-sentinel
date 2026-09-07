@@ -286,7 +286,7 @@ class Freesiem_Scanner
 		}
 
 		if ($rest_enabled) {
-			$findings[] = $this->finding('rest_api_exposed', 'surface', 'low', 'REST API is reachable', 'The WordPress REST API is publicly reachable, which is common but still worth reviewing.', 'Limit unnecessary user enumeration and review exposed endpoints.', ['rest_url' => rest_url()], 94);
+			$findings[] = $this->finding('rest_api_exposed', 'surface', 'info', 'REST API is reachable', 'The WordPress REST API is publicly reachable. This is the default and expected on every modern WordPress site — noted for completeness.', 'Restrict user enumeration endpoints if they are not needed; otherwise no action required.', ['rest_url' => rest_url()], 99);
 		}
 
 		if ($wp_debug) {
@@ -329,9 +329,9 @@ class Freesiem_Scanner
 			$findings[] = $this->finding('high_plugin_count', 'posture', 'low', 'High active plugin count', 'A high number of active plugins can increase attack surface and maintenance burden.', 'Remove unused plugins and consolidate overlapping functionality.', ['active_plugin_count' => count($active_plugins)], 94);
 		}
 
-		if (!is_ssl()) {
-			$findings[] = $this->finding('frontend_not_ssl', 'transport', 'high', 'Current request is not using SSL', 'The site does not appear to be enforcing SSL for frontend traffic.', 'Enable HTTPS and configure redirects from HTTP to HTTPS.', ['is_ssl' => false], 74);
-		}
+		// (SSL posture is covered by the ssl_consistency check above, which reads
+		// the saved site/home URL scheme. is_ssl() only describes the current
+		// request and is always false for a WP-Cron / WP-CLI triggered scan.)
 
 		if ($theme->parent()) {
 			$findings[] = $this->finding('child_theme_active', 'inventory', 'info', 'Child theme active', 'A child theme is active on this site.', 'Ensure the parent theme is maintained and updated together with the child theme.', ['theme' => $theme->get_stylesheet(), 'parent' => $theme->parent()->get_stylesheet()], 98);
@@ -341,11 +341,16 @@ class Freesiem_Scanner
 		// below are expected and shouldn't drag the score down or crowd out real
 		// signal — record them as informational instead of a graded weakness.
 		$env = function_exists('wp_get_environment_type') ? wp_get_environment_type() : 'production';
+		$is_ddev = getenv('IS_DDEV_PROJECT') === 'true' || defined('DDEV_PRIMARY_URL');
+
+		if ($is_ddev && $env === 'production') {
+			$env = 'local'; // a DDEV project is a local dev environment regardless of the constant
+		}
 
 		if (in_array($env, ['local', 'development', 'staging'], true)) {
 			$soften = [
 				'file_editor_enabled', 'file_mods_enabled', 'wp_config_writable', 'wp_content_writable',
-				'frontend_not_ssl', 'ssl_consistency', 'wp_debug_enabled', 'wp_debug_log_enabled',
+				'ssl_consistency', 'wp_debug_enabled', 'wp_debug_log_enabled',
 				'wp_cron_disabled', 'default_db_prefix', 'xmlrpc_enabled',
 			];
 
