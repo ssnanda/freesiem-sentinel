@@ -301,6 +301,12 @@ class Freesiem_Deep_Scanner
 			ignore_user_abort(true);
 		}
 
+		// A cron / ajax slice does not always inherit the admin memory bump, and
+		// memory_ceiling() trusts the live limit — raise it before measuring.
+		if (function_exists('wp_raise_memory_limit')) {
+			wp_raise_memory_limit('admin');
+		}
+
 		@set_time_limit(max(60, (int) $budget['seconds'] + 45));
 
 		$deadline = microtime(true) + max(3.0, (float) $budget['seconds']);
@@ -1857,15 +1863,31 @@ class Freesiem_Deep_Scanner
 
 	private function memory_ceiling(): int
 	{
-		$limit = function_exists('wp_convert_hr_to_bytes')
-			? wp_convert_hr_to_bytes((string) (defined('WP_MEMORY_LIMIT') ? WP_MEMORY_LIMIT : ini_get('memory_limit')))
-			: 0;
+		$parse = static function ($value): int {
+			$value = trim((string) $value);
 
-		if ($limit <= 0) {
-			$limit = (int) wp_convert_hr_to_bytes((string) ini_get('memory_limit'));
+			if ($value === '' || $value === '-1' || !function_exists('wp_convert_hr_to_bytes')) {
+				return 0;
+			}
+
+			return (int) wp_convert_hr_to_bytes($value);
+		};
+
+		// Guard against the REAL, PHP-enforced limit. The scan runs in an admin /
+		// cron request that has already raised the limit toward WP_MAX_MEMORY_LIMIT
+		// (256M by default) — NOT the 40M front-end WP_MEMORY_LIMIT, whose 32M
+		// guard would abort the scan after a handful of files.
+		$limit = $parse(ini_get('memory_limit'));
+
+		if ($limit <= 0 && defined('WP_MAX_MEMORY_LIMIT')) {
+			$limit = $parse(WP_MAX_MEMORY_LIMIT);
 		}
 
-		return $limit > 0 ? (int) ($limit * 0.8) : 0;
+		if ($limit <= 0) {
+			$limit = 256 * MB_IN_BYTES;
+		}
+
+		return (int) ($limit * 0.8);
 	}
 
 	private function resolve_preferences(array $options): array
