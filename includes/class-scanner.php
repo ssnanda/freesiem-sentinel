@@ -337,6 +337,28 @@ class Freesiem_Scanner
 			$findings[] = $this->finding('child_theme_active', 'inventory', 'info', 'Child theme active', 'A child theme is active on this site.', 'Ensure the parent theme is maintained and updated together with the child theme.', ['theme' => $theme->get_stylesheet(), 'parent' => $theme->parent()->get_stylesheet()], 98);
 		}
 
+		// On a local / development / staging environment, the hardening findings
+		// below are expected and shouldn't drag the score down or crowd out real
+		// signal — record them as informational instead of a graded weakness.
+		$env = function_exists('wp_get_environment_type') ? wp_get_environment_type() : 'production';
+
+		if (in_array($env, ['local', 'development', 'staging'], true)) {
+			$soften = [
+				'file_editor_enabled', 'file_mods_enabled', 'wp_config_writable', 'wp_content_writable',
+				'frontend_not_ssl', 'ssl_consistency', 'wp_debug_enabled', 'wp_debug_log_enabled',
+				'wp_cron_disabled', 'default_db_prefix', 'xmlrpc_enabled',
+			];
+
+			foreach ($findings as &$finding) {
+				if (in_array($finding['finding_key'] ?? '', $soften, true)) {
+					$finding['severity'] = 'info';
+					$finding['score'] = max((int) ($finding['score'] ?? 90), 96);
+					$finding['description'] = sprintf('[%s environment] %s', $env, $finding['description'] ?? '');
+				}
+			}
+			unset($finding);
+		}
+
 		return array_values($findings);
 	}
 
@@ -928,10 +950,14 @@ class Freesiem_Scanner
 			$score = 45;
 		}
 
-		if (in_array($basename, ['shell.php', 'cmd.php', 'eval.php', 'up.php', 'wshell.php', 'mini.php', 'phpinfo.php'], true)) {
-			$reasons[] = 'Matches a common web shell or reconnaissance filename';
+		if (class_exists('Freesiem_Threat_Signatures') && Freesiem_Threat_Signatures::is_webshell_filename($basename)) {
+			$reasons[] = 'Matches a known web shell or disguised-executable filename';
 			$severity = 'critical';
 			$score = min($score, 42);
+		} elseif ($basename === 'phpinfo.php' && ($in_public_root || $in_uploads)) {
+			$reasons[] = 'phpinfo() page reachable in a public location';
+			$severity = $severity === 'critical' ? 'critical' : 'medium';
+			$score = min($score, 68);
 		}
 
 		if ($basename === 'install.php' && !str_starts_with($relative, 'wp-admin/')) {
@@ -940,7 +966,7 @@ class Freesiem_Scanner
 			$score = min($score, 58);
 		}
 
-		if (in_array($extension, ['zip', 'tar', 'gz', 'tgz', 'sql', 'bak', 'old'], true) && ($in_public_root || $in_uploads || str_starts_with($relative, 'wp-content/'))) {
+		if (in_array($extension, ['zip', 'tar', 'gz', 'tgz', 'sql', 'bak', 'old'], true) && ($in_public_root || $in_uploads)) {
 			$reasons[] = 'Publicly reachable backup or archive file';
 			$severity = $severity === 'critical' ? 'critical' : 'high';
 			$score = min($score, 60);
@@ -968,21 +994,18 @@ class Freesiem_Scanner
 			}
 		}
 
-		if ($extension === 'php' && (strlen($basename) > 35 || preg_match('/^[a-f0-9]{16,}\.php$/i', $basename))) {
+		if ($extension === 'php'
+			&& class_exists('Freesiem_Threat_Signatures')
+			&& Freesiem_Threat_Signatures::looks_random_filename($basename)) {
 			if ($this->filesystem_advanced_enabled) {
-				$reasons[] = 'Oddly named or random-looking PHP filename';
+				$reasons[] = 'Random-looking PHP filename';
 				$severity = $severity === 'critical' ? 'critical' : 'high';
 				$score = min($score, 62);
 			}
 		}
 
-		if ($is_writable && in_array($basename, ['wp-config.php', '.env', 'debug.log', 'error_log'], true)) {
-			if ($this->filesystem_advanced_enabled) {
-				$reasons[] = 'Sensitive file is writable by the current process';
-				$severity = $severity === 'critical' ? 'critical' : 'medium';
-				$score = min($score, 73);
-			}
-		}
+		// (wp-config.php writability is covered as a graded config finding in
+		// collect_findings(), with environment awareness — not repeated here.)
 
 		if ($reasons === []) {
 			return;

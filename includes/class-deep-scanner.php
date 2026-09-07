@@ -509,6 +509,15 @@ class Freesiem_Deep_Scanner
 			// signature scan run so an injected payload is caught too.
 		}
 
+		// A file that byte-matches its official WordPress.org checksum (core, or a
+		// wp.org-hosted plugin) is known-good — running content signatures or
+		// filename heuristics against it only produces false positives (WP core
+		// docblocks quote `$_POST['x']` in backticks, ship long class filenames,
+		// call ini_set('display_errors', 0), embed sandboxed <iframe>s, etc.).
+		if ($this->is_vendor_verified($path, $rel)) {
+			return;
+		}
+
 		$this->check_filename_heuristics($path, $rel, $basename, $extension, $size, $state);
 
 		$mode = Freesiem_Threat_Signatures::scan_mode($basename, $extension);
@@ -608,13 +617,14 @@ class Freesiem_Deep_Scanner
 			$score = min($score, 30);
 		}
 
-		if ($extension === 'php' && (strlen($basename) > 40 || preg_match('/^[a-f0-9]{16,}\.php$/i', $basename))) {
-			$reasons[] = 'Random-looking or overly long PHP filename';
+		if (in_array($extension, $php_like, true) && Freesiem_Threat_Signatures::looks_random_filename($basename)) {
+			$reasons[] = 'Random-looking PHP filename';
 			$severity = $severity === 'critical' ? 'critical' : 'high';
 			$score = min($score, 55);
 		}
 
-		if (in_array($extension, ['zip', 'tar', 'gz', 'tgz', 'sql', 'bak', 'old', 'swp'], true) && ($in_public_root || $in_content)) {
+		if (in_array($extension, ['zip', 'tar', 'gz', 'tgz', 'sql', 'bak', 'old', 'swp'], true)
+			&& ($in_public_root || $in_uploads)) {
 			$reasons[] = 'Publicly reachable archive, backup, or database dump';
 			$severity = $severity === 'critical' ? 'critical' : 'high';
 			$score = min($score, 58);
@@ -691,6 +701,110 @@ class Freesiem_Deep_Scanner
 		$state['integrity_cursor'] = $cursor;
 	}
 
+	/**
+	 * True only for an exact released WordPress version (6.9, 6.8.2). Nightly /
+	 * alpha / beta / RC / -src builds have no published checksum manifest, and
+	 * comparing against the nearest release's manifest just produces noise
+	 * (files that build moved or does not ship reported as "missing" / "modified").
+	 */
+	private function is_released_version(): bool
+	{
+		return (bool) preg_match('/^\d+\.\d+(?:\.\d+)?$/', (string) get_bloginfo('version'));
+	}
+
+	/**
+	 * Is $path a file that byte-matches its official WordPress.org checksum?
+	 * Covers WordPress core and wp.org-hosted plugins. Results are memoised per
+	 * request; the underlying checksum fetches are transient-cached.
+	 */
+	private function is_vendor_verified(string $path, string $rel): bool
+	{
+		// --- WordPress core ---
+		if (($rel === 'wp-settings.php' || str_starts_with($rel, 'wp-admin/') || str_starts_with($rel, 'wp-includes/'))
+			&& $this->is_released_version()) {
+			$sums = $this->core_checksums();
+
+			if (isset($sums[$rel]) && hash_equals((string) $sums[$rel], (string) @md5_file($path))) {
+				return true;
+			}
+		}
+
+		// --- wp.org-hosted plugins ---
+		$plugin_root = wp_normalize_path(untrailingslashit(WP_PLUGIN_DIR));
+		$norm = wp_normalize_path($path);
+
+		if (str_starts_with($norm, $plugin_root . '/')) {
+			$after = substr($norm, strlen($plugin_root) + 1);
+			$slash = strpos($after, '/');
+
+			if ($slash !== false) {
+				$slug = substr($after, 0, $slash);
+				$inner = substr($after, $slash + 1);
+				$sums = $this->plugin_checksums_for_slug($slug);
+
+				if ($sums !== null) {
+					$hashes = $sums[$inner] ?? null;
+					$expected = is_array($hashes) ? (string) ($hashes['md5'] ?? '') : (string) $hashes;
+
+					if ($expected !== '' && hash_equals($expected, (string) @md5_file($path))) {
+						return true;
+					}
+				}
+			}
+		}
+
+		return false;
+	}
+
+	/**
+	 * Checksums for an installed plugin by slug, resolving its version from its
+	 * header. Memoised per request. Null when the plugin is not on wordpress.org.
+	 */
+	private function plugin_checksums_for_slug(string $slug): ?array
+	{
+		static $memo = [];
+
+		if (array_key_exists($slug, $memo)) {
+			return $memo[$slug];
+		}
+
+		$memo[$slug] = null;
+
+		if ($slug === '' || $slug === FREESIEM_SENTINEL_SLUG) {
+			return null;
+		}
+
+		$main = WP_PLUGIN_DIR . '/' . $slug . '/' . $slug . '.php';
+		$version = '';
+
+		if (is_readable($main) && function_exists('get_file_data')) {
+			$data = get_file_data($main, ['Version' => 'Version']);
+			$version = (string) ($data['Version'] ?? '');
+		}
+
+		if ($version === '') {
+			// Fall back: any *.php in the plugin root with a Version header.
+			foreach ((array) @glob(WP_PLUGIN_DIR . '/' . $slug . '/*.php') as $candidate) {
+				if (function_exists('get_file_data')) {
+					$data = get_file_data($candidate, ['Version' => 'Version']);
+
+					if (!empty($data['Version'])) {
+						$version = (string) $data['Version'];
+						break;
+					}
+				}
+			}
+		}
+
+		if ($version === '') {
+			return null;
+		}
+
+		$memo[$slug] = $this->plugin_checksums($slug, $version);
+
+		return $memo[$slug];
+	}
+
 	private function core_checksums(): array
 	{
 		$version = get_bloginfo('version');
@@ -724,6 +838,11 @@ class Freesiem_Deep_Scanner
 
 	private function integrity_core_step(array &$state, array &$cursor): bool
 	{
+		if (!$this->is_released_version()) {
+			// Nightly / alpha / beta / RC / -src build — no authoritative manifest.
+			return true;
+		}
+
 		$checksums = $this->core_checksums();
 
 		if ($checksums === []) {
@@ -749,16 +868,21 @@ class Freesiem_Deep_Scanner
 			}
 
 			if (!file_exists($full)) {
-				if (str_starts_with($file, 'wp-admin/') || str_starts_with($file, 'wp-includes/')) {
+				// Only flag a missing file that actually matters. The manifest for a
+				// given version routinely lists optional/bundled files (default
+				// themes, the php-ai-client vendor tree, locale data) that a slim or
+				// slightly-off build legitimately doesn't ship — reporting each one
+				// as "missing / possible tampering" is pure noise.
+				if (in_array($file, $critical_files, true) || preg_match('#^wp-(admin|includes)/[^/]+\.php$#', $file)) {
 					$this->add_finding($state, [
 						'finding_key' => 'deep_core_missing_' . md5($file),
 						'category' => 'core_integrity',
-						'severity' => 'high',
-						'title' => 'WordPress core file is missing',
-						'description' => sprintf('The core file %s is absent. Missing core files break updates and can indicate tampering.', $file),
+						'severity' => 'medium',
+						'title' => 'A top-level WordPress core file is missing',
+						'description' => sprintf('The core file %s is absent. If you did not remove it deliberately, reinstall WordPress %s.', $file, get_bloginfo('version')),
 						'recommendation' => 'Reinstall WordPress core of the exact same version to restore the original files.',
 						'evidence' => ['path' => $file],
-						'score' => 55,
+						'score' => 68,
 					]);
 				}
 
@@ -798,6 +922,10 @@ class Freesiem_Deep_Scanner
 
 	private function integrity_core_extra_step(array &$state): void
 	{
+		if (!$this->is_released_version()) {
+			return;
+		}
+
 		$checksums = $this->core_checksums();
 
 		if ($checksums === []) {
@@ -1170,13 +1298,28 @@ class Freesiem_Deep_Scanner
 		}
 
 		$admins = get_users(['role' => 'administrator', 'fields' => ['ID', 'user_login', 'user_email', 'user_registered']]);
-		$state['counters']['database_issues'] += 0;
 
-		if (count($admins) >= 1) {
-			$recent = array_filter($admins, static function ($u): bool {
+		$now = time();
+		$cutoff = 30 * DAY_IN_SECONDS;
+		$established = false;
+
+		foreach ($admins as $u) {
+			$ts = strtotime((string) ($u->user_registered ?? '')) ?: 0;
+
+			if ($ts > 0 && ($now - $ts) >= $cutoff) {
+				$established = true;
+				break;
+			}
+		}
+
+		// A recently-added admin only means something on a site that already has
+		// an older admin. On a brand-new / freshly-migrated site every admin is
+		// "recent" and flagging them all is noise.
+		if ($established) {
+			$recent = array_filter($admins, static function ($u) use ($now, $cutoff): bool {
 				$ts = strtotime((string) ($u->user_registered ?? '')) ?: 0;
 
-				return $ts > 0 && (time() - $ts) < 30 * DAY_IN_SECONDS;
+				return $ts > 0 && ($now - $ts) < $cutoff;
 			});
 
 			foreach (array_slice(array_values($recent), 0, 10) as $u) {
@@ -1185,8 +1328,8 @@ class Freesiem_Deep_Scanner
 					'finding_key' => 'deep_db_recent_admin_' . (int) $u->ID,
 					'category' => 'database',
 					'severity' => 'medium',
-					'title' => 'Administrator account created in the last 30 days',
-					'description' => sprintf('User "%s" (%s) has the administrator role and was registered on %s.', $u->user_login, $u->user_email, $u->user_registered),
+					'title' => 'Administrator account added recently',
+					'description' => sprintf('User "%s" (%s) was given the administrator role on %s, on a site that already had an established admin.', $u->user_login, $u->user_email, $u->user_registered),
 					'recommendation' => 'Confirm you created this account. Unexpected recent admins are the most common sign of a break-in — remove it and reset all admin passwords.',
 					'evidence' => ['user_id' => (int) $u->ID, 'user_login' => (string) $u->user_login, 'registered' => (string) $u->user_registered],
 					'score' => 60,

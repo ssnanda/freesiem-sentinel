@@ -44,12 +44,14 @@ class Freesiem_Threat_Signatures
 	 * Common web-shell / recon filenames (lower-cased basenames).
 	 */
 	private const WEBSHELL_FILENAMES = [
-		'shell.php', 'c99.php', 'c100.php', 'r57.php', 'wso.php', 'b374k.php', 'alfa.php',
-		'0byt3m1n1.php', 'cmd.php', 'up.php', 'upload.php.php', 'wshell.php', 'mini.php',
-		'minishell.php', 'adminer.php', 'sql.php', 'x.php', 'xx.php', 'xxx.php', 'z.php',
-		'404.php.php', 'wp-conflg.php', 'wp-conf.php', 'wp-login.php.php', 'radio.php',
-		'marijuana.php', 'indoxploit.php', 'idx.php', 'gel4y.php', 'priv8.php', 'byp.php',
-		'bypass.php', 'sym.php', 'symlink.php', 'madspot.php', 'lock360.php', 'dropdown.php',
+		// Distinctive, effectively-never-legitimate shell / dropper names only.
+		// Deliberately excludes generic names (shell.php, sql.php, x.php, cmd.php,
+		// up.php, mini.php, idx.php, radio.php, dropdown.php, ...) that turn up in
+		// legitimate libraries — Text_Diff ships wp-includes/Text/Diff/Engine/shell.php.
+		'c99.php', 'c100.php', 'r57.php', 'wso.php', 'b374k.php', '0byt3m1n1.php',
+		'wshell.php', 'minishell.php', 'wp-conflg.php', 'wp-login.php.php', 'upload.php.php',
+		'404.php.php', 'marijuana.php', 'indoxploit.php', 'gel4y.php', 'madspot.php',
+		'lock360.php', 'alfa-rex.php', 'wsoyanz.php', 'priv8.php', 'k2ll33d.php',
 	];
 
 	public static function full_extensions(): array
@@ -133,6 +135,45 @@ class Freesiem_Threat_Signatures
 	}
 
 	/**
+	 * Whether a PHP filename looks machine-generated rather than human-named —
+	 * the pattern droppers use (hex/base32 blobs, no word structure). Plain
+	 * length is NOT a signal: WordPress core ships class-wp-customize-nav-menu-
+	 * item-setting.php and dozens like it.
+	 */
+	public static function looks_random_filename(string $basename): bool
+	{
+		$name = strtolower((string) preg_replace('/\.(php\d?|phtml|phar|pht|inc)$/i', '', $basename));
+
+		if ($name === '' || strlen($name) < 8) {
+			return false;
+		}
+
+		// Pure hex / base32-ish blob (a1b2c3d4e5f6..., zx8f2k9d...).
+		if (preg_match('/^[a-f0-9]{12,}$/', $name) || preg_match('/^[a-z2-7]{16,}$/', $name)) {
+			return true;
+		}
+
+		// A long token with no separators (- _ .) and no vowels at all — e.g.
+		// "kjhgtrfvbn". Real names have word boundaries or vowels.
+		if (strlen($name) >= 12
+			&& !preg_match('/[-_.]/', $name)
+			&& !preg_match('/[aeiou]/', $name)) {
+			return true;
+		}
+
+		// High share of digits in a separator-less token ("x8291736451a").
+		if (!preg_match('/[-_.]/', $name)) {
+			$digits = preg_match_all('/\d/', $name);
+
+			if ($digits >= 6 && $digits / strlen($name) >= 0.4) {
+				return true;
+			}
+		}
+
+		return false;
+	}
+
+	/**
 	 * The full rule set. Cached per-request.
 	 */
 	public static function rules(): array
@@ -192,7 +233,10 @@ class Freesiem_Threat_Signatures
 				'score' => 22,
 				'category' => 'malware',
 				'classes' => ['php'],
-				'pattern' => '/`[^`\n]{0,200}\$_(?:GET|POST|REQUEST|COOKIE)[^`\n]{0,200}`/',
+				// Must be at a statement/expression position (after = ( , => return echo
+				// print .). Without that anchor this matches PHPDoc prose that quotes
+				// `$_POST['action']` in a code span, which WP core does constantly.
+				'pattern' => '/(?:[=(,.]|=>|\breturn|\becho|\bprint)\s*`[^`\n]{1,180}\$_(?:GET|POST|REQUEST|COOKIE)\b[^`\n]{0,120}`/',
 				'recommendation' => 'Backtick operators run shell commands. Combined with request input this is remote command execution — remove it immediately.',
 			],
 			[
@@ -237,13 +281,16 @@ class Freesiem_Threat_Signatures
 			],
 			[
 				'id' => 'php_hex_escape_blob',
-				'label' => 'Long \\x hex-escaped string',
-				'severity' => 'medium',
-				'score' => 58,
+				'label' => 'Executable-looking \\x hex-escaped string',
+				'severity' => 'low',
+				'score' => 82,
 				'category' => 'malware',
 				'classes' => ['php'],
-				'pattern' => '/(?:\\\\x[0-9A-Fa-f]{2}){24,}/',
-				'recommendation' => 'Extended hex-escaped strings are used to hide function names and payloads. Verify the intent of this code.',
+				// Long hex-escaped strings are also just binary constants (crypto
+				// tables in sodium_compat, etc.). Only treat it as suspicious when
+				// it is being fed straight into eval/assert/a decoder/a callable.
+				'pattern' => '/(?:eval|assert|create_function|call_user_func|base64_decode|gzinflate|preg_replace)\s*\(\s*["\'](?:\\\\x[0-9A-Fa-f]{2}){12,}/i',
+				'recommendation' => 'A hex-escaped string passed to eval() or a decoder is an obfuscated payload. Reconstruct it to confirm.',
 			],
 			[
 				'id' => 'php_globals_dynamic_call',
@@ -319,10 +366,13 @@ class Freesiem_Threat_Signatures
 				'id' => 'php_creates_admin_user',
 				'label' => 'Creates or elevates an administrator account',
 				'severity' => 'high',
-				'score' => 40,
+				'score' => 44,
 				'category' => 'malware',
 				'classes' => ['php'],
-				'pattern' => '/(?:wp_insert_user|wp_create_user)\s*\([^;]{0,400}[\'"]administrator[\'"]|->\s*set_role\s*\(\s*[\'"]administrator[\'"]\s*\)|[\'"]role[\'"]\s*=>\s*[\'"]administrator[\'"]/i',
+				// Needs an actual user-creation / role-setting call. A bare
+				// "'role' => 'administrator'" array key shows up in capability maps,
+				// role editors and test factories all over legitimate code.
+				'pattern' => '/(?:wp_insert_user|wp_create_user|wp_update_user)\s*\([^;]{0,300}[\'"]administrator[\'"]|->\s*(?:set_role|add_role)\s*\(\s*[\'"]administrator[\'"]\s*\)/i',
 				'recommendation' => 'Backdoors often add a hidden admin. Confirm this code belongs to a trusted plugin/theme and review your user list.',
 			],
 			[
@@ -337,13 +387,16 @@ class Freesiem_Threat_Signatures
 			],
 			[
 				'id' => 'php_suspicious_ini_set',
-				'label' => 'Disables logging / error output at runtime',
+				'label' => 'Redirects the error log at runtime',
 				'severity' => 'low',
-				'score' => 82,
+				'score' => 85,
 				'category' => 'malware',
 				'classes' => ['php'],
-				'pattern' => '/@?ini_set\s*\(\s*[\'"](?:error_log|log_errors|display_errors)[\'"]\s*,\s*(?:NULL|0|[\'"]0[\'"]|false)\s*\)/i',
-				'recommendation' => 'Malware frequently silences logging to stay hidden. Check the surrounding code.',
+				// display_errors / log_errors toggling is normal hardening (WP core
+				// does it in load.php). The shell tell is nulling the error_log path
+				// so its own noise never lands anywhere.
+				'pattern' => '/@?ini_set\s*\(\s*[\'"]error_log[\'"]\s*,\s*(?:NULL|[\'"][\'"]|false|0)\s*\)/i',
+				'recommendation' => 'Nulling the error_log path is a way for injected code to stay silent. Check the surrounding code.',
 			],
 
 			// ---- Known web-shell fingerprints ----
@@ -426,18 +479,22 @@ class Freesiem_Threat_Signatures
 				'score' => 56,
 				'category' => 'malware',
 				'classes' => ['js', 'html', 'php'],
-				'pattern' => '/<iframe[^>]{0,200}(?:width\s*=\s*[\'"]?0|height\s*=\s*[\'"]?0|style\s*=\s*[\'"][^\'"]{0,120}(?:display\s*:\s*none|visibility\s*:\s*hidden))/i',
+				// (?<![\w-]) so marginwidth="0" / marginheight="0" on WP core's
+				// sandboxed oEmbed iframe (embed.php) don't count as width/height 0.
+				'pattern' => '/<iframe[^>]{0,200}(?:(?<![\w-])(?:width|height)\s*=\s*[\'"]?0(?![\d.])|style\s*=\s*[\'"][^\'"]{0,120}(?:display\s*:\s*none|visibility\s*:\s*hidden|left\s*:\s*-\d{3}))/i',
 				'recommendation' => 'Invisible iframes are used for drive-by downloads and ad fraud. Remove the injected markup.',
 			],
 			[
 				'id' => 'js_external_script_injection',
-				'label' => 'Script written into the DOM from a string',
+				'label' => 'External script injected into the DOM',
 				'severity' => 'medium',
-				'score' => 60,
+				'score' => 66,
 				'category' => 'malware',
 				'classes' => ['js', 'html'],
-				'pattern' => '/(?:innerHTML|insertAdjacentHTML|document\s*\.\s*write)\s*[^;\n]{0,60}<script\b/i',
-				'recommendation' => 'Injecting <script> tags at runtime is a common defacement / redirect technique. Confirm the source.',
+				// Require a hard-coded external src. document.write('<script src="'+url)
+				// with a local variable is a normal lazy-loader (tinymce, polyfills).
+				'pattern' => '/(?:innerHTML|insertAdjacentHTML|document\s*\.\s*write)\s*(?:\(|=)[^;\n]{0,40}[\'"]<script[^>]+src\s*=\s*[\\\\\'"]*(?:https?:)?\/\/[a-z0-9.-]/i',
+				'recommendation' => 'Loading a script from a hard-coded external host at runtime is a common defacement / redirect technique. Confirm the source.',
 			],
 
 			// ---- .htaccess / .user.ini abuse ----
