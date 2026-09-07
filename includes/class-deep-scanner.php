@@ -632,11 +632,18 @@ class Freesiem_Deep_Scanner
 			$score = min($score, 55);
 		}
 
-		if (in_array($extension, ['zip', 'tar', 'gz', 'tgz', 'sql', 'bak', 'old', 'swp'], true)
+		if (in_array($extension, ['zip', 'tar', 'gz', 'tgz', 'bz2', 'xz', '7z', 'rar', 'sql', 'bak', 'old', 'orig', 'save', 'swp'], true)
 			&& ($in_public_root || $in_uploads)) {
 			$reasons[] = 'Publicly reachable archive, backup, or database dump';
 			$severity = $severity === 'critical' ? 'critical' : 'high';
 			$score = min($score, 58);
+		}
+
+		if (in_array($extension, ['sh', 'bash', 'zsh', 'ksh', 'py', 'pl', 'cgi'], true)
+			&& ($in_public_root || $in_uploads)) {
+			$reasons[] = 'Shell or interpreter script in a web-accessible location';
+			$severity = $severity === 'critical' ? 'critical' : 'high';
+			$score = min($score, 52);
 		}
 
 		if (in_array($basename, ['.env', 'debug.log', 'error_log', 'wp-config.php.bak', 'wp-config.php.save', '.wp-config.php.swp'], true)) {
@@ -649,6 +656,30 @@ class Freesiem_Deep_Scanner
 			return;
 		}
 
+		// For data / script files, read a head and say in plain language what the
+		// file actually does, so the admin is not left guessing from the name.
+		$content_summary = '';
+		$describe_exts = ['sql', 'sh', 'bash', 'zsh', 'ksh', 'py', 'pl', 'cgi', 'bak', 'old', 'orig', 'save', 'swp', 'zip', 'gz', 'tgz', 'tar', 'bz2', 'xz', '7z', 'rar'];
+
+		if (in_array($extension, $describe_exts, true)) {
+			$head = (string) @file_get_contents($path, false, null, 0, 131072);
+			$desc = Freesiem_Threat_Signatures::describe_data_file($head, $extension, $basename);
+			$content_summary = (string) ($desc['summary'] ?? '');
+
+			if (!empty($desc['danger'])) {
+				$reasons[] = 'Its contents perform high-risk operations';
+				$severity = 'critical';
+				$score = min($score, 24);
+			} elseif (in_array('empty', (array) ($desc['flags'] ?? []), true)) {
+				// An empty "dump" / "backup" is inert. Note it, but do not cry wolf.
+				$severity = $severity === 'critical' ? $severity : 'low';
+				$score = max($score, 88);
+			} elseif (in_array('contains_credentials', (array) ($desc['flags'] ?? []), true)) {
+				$severity = $severity === 'critical' ? 'critical' : 'high';
+				$score = min($score, 40);
+			}
+		}
+
 		$abspath_root = wp_normalize_path(untrailingslashit(ABSPATH));
 		$full_path = wp_normalize_path($path);
 
@@ -657,7 +688,9 @@ class Freesiem_Deep_Scanner
 			'category' => 'filesystem',
 			'severity' => $severity,
 			'title' => 'Suspicious file on disk',
-			'description' => sprintf('%s: %s', $rel, implode('; ', $reasons)),
+			'description' => $content_summary !== ''
+				? sprintf('%s: %s. What it contains: %s', $rel, implode('; ', $reasons), $content_summary)
+				: sprintf('%s: %s', $rel, implode('; ', $reasons)),
 			'recommendation' => sprintf(
 				'Full path: %s (WordPress root: %s). Confirm whether this file is expected. If not, remove it and review access logs for how it arrived.',
 				$full_path,
@@ -669,6 +702,7 @@ class Freesiem_Deep_Scanner
 				'extension' => $extension,
 				'size' => $size,
 				'reasons' => $reasons,
+				'content_summary' => $content_summary,
 				'writable' => is_writable($path),
 			],
 			'score' => $score,

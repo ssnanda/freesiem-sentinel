@@ -192,6 +192,188 @@ class Freesiem_Threat_Signatures
 	}
 
 	/**
+	 * Plain-language summary of what a flagged data / script file actually does,
+	 * so an admin can judge "database dump" vs "deploy script" vs "reverse shell"
+	 * without opening it. $head is the first chunk of the file.
+	 *
+	 * @return array{summary:string,danger:bool,flags:string[]}
+	 */
+	public static function describe_data_file(string $head, string $extension, string $basename): array
+	{
+		$extension = strtolower($extension);
+		$basename = strtolower($basename);
+		$flags = [];
+		$danger = false;
+
+		if (trim($head) === '') {
+			return ['summary' => 'Empty file — contains nothing.', 'danger' => false, 'flags' => ['empty']];
+		}
+
+		$lines = substr_count($head, "\n") + 1;
+
+		$is_shell = in_array($extension, ['sh', 'bash', 'zsh', 'ksh'], true)
+			|| (bool) preg_match('~^#!\s*/\S*/(?:ba|z|k)?sh\b~', $head);
+		$is_python = $extension === 'py' || (bool) preg_match('~^#!\s*\S*python~', $head);
+		$is_perl = in_array($extension, ['pl', 'cgi'], true) || (bool) preg_match('~^#!\s*\S*perl~', $head);
+
+		if ($is_shell || $is_python || $is_perl) {
+			$does = [];
+
+			if (preg_match('~\b(?:curl|wget|fetch)\b[^\n|]*\|\s*(?:sudo\s+)?(?:ba|z|k)?sh\b~i', $head)
+				|| preg_match('~\b(?:curl|wget)\b[^\n]*\|\s*(?:python|perl|php)\b~i', $head)) {
+				$does[] = 'downloads remote content and pipes it straight into an interpreter';
+				$danger = true;
+				$flags[] = 'remote_exec';
+			}
+
+			if (preg_match('~authorized_keys~', $head)) {
+				$does[] = 'writes to SSH authorized_keys';
+				$danger = true;
+				$flags[] = 'ssh_key';
+			}
+
+			if (preg_match('~\bcrontab\b|/etc/cron|/var/spool/cron~i', $head)) {
+				$does[] = 'installs a cron job';
+				$danger = true;
+				$flags[] = 'cron';
+			}
+
+			if (preg_match('~/dev/tcp/|\bnc(?:at)?\b\s+-\S*l|bash\s+-i\b|sh\s+-i\b|socket\.socket~i', $head)) {
+				$does[] = 'opens a network listener or reverse shell';
+				$danger = true;
+				$flags[] = 'reverse_shell';
+			}
+
+			if (preg_match('~\bbase64\b\s+-{0,2}d[^\n]*\|\s*(?:ba)?sh|\beval\b\s*[("`$]|\bexec\s*\(~i', $head)) {
+				$does[] = 'decodes and runs an embedded payload';
+				$danger = true;
+				$flags[] = 'obfuscated_exec';
+			}
+
+			if (preg_match('~\brm\s+-[a-z]*r[a-z]*f\b|\brm\s+-[a-z]*f[a-z]*r\b~i', $head)) {
+				$does[] = 'recursively deletes files (rm -rf)';
+				$flags[] = 'destructive';
+			}
+
+			if (preg_match('~\bchmod\s+(?:[0-7]?7[0-7]{2}\b|\+s\b|[ugo]\+s\b)~', $head)) {
+				$does[] = 'loosens file permissions (world-writable or setuid)';
+				$flags[] = 'perms';
+			}
+
+			if (preg_match('~\b(?:mysqldump|mysql|pg_dump|psql|wp\s+db)\b~i', $head)) {
+				$does[] = 'runs database commands';
+			}
+
+			if (preg_match('~\bwp\s+(?:plugin|theme|user|option|core|config|cron|search-replace|eval)\b~i', $head)) {
+				$does[] = 'runs WP-CLI commands';
+			}
+
+			if (preg_match('~\b(?:apt|apt-get|yum|dnf|apk|brew)\s+(?:install|add)\b~i', $head)) {
+				$does[] = 'installs system packages';
+			}
+
+			if (preg_match('~\bgit\s+(?:clone|pull|fetch|checkout|reset)\b~i', $head)) {
+				$does[] = 'runs git operations';
+			}
+
+			if (preg_match('~\b(?:rsync|scp|sftp)\b~i', $head)) {
+				$does[] = 'transfers files to or from another host';
+			}
+
+			$kind = $is_python ? 'Python script' : ($is_perl ? 'Perl / CGI script' : 'Shell script');
+			$summary = $does === []
+				? sprintf('%s, ~%d line(s). No high-risk operations recognised.', $kind, $lines)
+				: sprintf('%s that %s.', $kind, self::join_clauses($does));
+
+			return ['summary' => $summary, 'danger' => $danger, 'flags' => array_values(array_unique($flags))];
+		}
+
+		if ($extension === 'sql' || preg_match('~^\s*(?:--|/\*|SET\s|START TRANSACTION|CREATE\s+TABLE|INSERT\s+INTO|DROP\s+TABLE)~i', $head)) {
+			$does = [];
+			$creates = (int) preg_match_all('~\bCREATE\s+TABLE\b~i', $head);
+			$inserts = (int) preg_match_all('~\bINSERT\s+INTO\b~i', $head);
+			$drops = (int) preg_match_all('~\bDROP\s+(?:TABLE|DATABASE)\b~i', $head);
+
+			if ($creates > 0) {
+				$does[] = sprintf('%d CREATE TABLE', $creates);
+			}
+
+			if ($inserts > 0) {
+				$does[] = sprintf('%d INSERT', $inserts);
+			}
+
+			if ($drops > 0) {
+				$does[] = sprintf('%d DROP', $drops);
+				$flags[] = 'destructive';
+			}
+
+			if (preg_match('~`?\w*users`?[^\n;]{0,80}(?:user_pass|user_login|user_email)~i', $head)
+				|| preg_match('~(?:CREATE\s+TABLE|INSERT\s+INTO)\s+`?\w*users`?~i', $head)) {
+				$does[] = 'includes a users table (login names and password hashes)';
+				$flags[] = 'contains_credentials';
+			}
+
+			if (preg_match('~`?\w*options`?[^\n;]{0,80}siteurl~i', $head) || preg_match('~siteurl[^\n;]{0,80}`?\w*options`?~i', $head)) {
+				$does[] = 'appears to be a full site database export';
+			}
+
+			if (preg_match('~UPDATE\s+`?\w*users`?\s+SET[^\n;]*user_pass~i', $head)) {
+				$does[] = 'changes a user password';
+				$flags[] = 'contains_credentials';
+			}
+
+			$summary = $does === []
+				? sprintf('SQL script, ~%d statement line(s).', $lines)
+				: sprintf('SQL dump / script: %s.', self::join_clauses($does));
+
+			return ['summary' => $summary, 'danger' => false, 'flags' => array_values(array_unique($flags))];
+		}
+
+		if (in_array($extension, ['bak', 'old', 'save', 'orig', 'swp', 'swo'], true) || str_contains($basename, 'wp-config')) {
+			if (preg_match('~DB_PASSWORD|DB_USER|AUTH_KEY|SECURE_AUTH_KEY|LOGGED_IN_SALT~', $head)) {
+				return [
+					'summary' => 'Backup copy of wp-config.php — exposes the database credentials and secret keys if it can be fetched over the web.',
+					'danger' => true,
+					'flags' => ['contains_credentials'],
+				];
+			}
+
+			if (preg_match('~<\?php~', $head)) {
+				return ['summary' => sprintf('Backup of a PHP file, ~%d line(s).', $lines), 'danger' => false, 'flags' => []];
+			}
+
+			return ['summary' => sprintf('Backup / editor temp file, ~%d line(s).', $lines), 'danger' => false, 'flags' => []];
+		}
+
+		if (in_array($extension, ['zip', 'gz', 'tgz', 'tar', 'bz2', 'xz', '7z', 'rar'], true)) {
+			return [
+				'summary' => 'Compressed archive — contents not inspected here. If it is not something you placed, download and examine it offline before deleting.',
+				'danger' => false,
+				'flags' => ['archive'],
+			];
+		}
+
+		return ['summary' => sprintf('~%d line(s) of text; no notable operations recognised.', $lines), 'danger' => false, 'flags' => []];
+	}
+
+	private static function join_clauses(array $items): string
+	{
+		$items = array_values(array_filter($items, static fn ($i): bool => $i !== ''));
+
+		if ($items === []) {
+			return '';
+		}
+
+		if (count($items) === 1) {
+			return $items[0];
+		}
+
+		$last = array_pop($items);
+
+		return implode(', ', $items) . ' and ' . $last;
+	}
+
+	/**
 	 * The full rule set. Cached per-request.
 	 */
 	public static function rules(): array
