@@ -327,6 +327,17 @@ function freesiem_sentinel_update_settings(array $updates): array
 {
 	$settings = freesiem_sentinel_get_settings();
 	$merged = array_replace_recursive($settings, $updates);
+
+	// array_replace_recursive() merges by key, so it can never REMOVE an entry:
+	// a file deleted from the site would stay in fim_baseline forever (re-flagged
+	// "disappeared" every run), and stale rows would pile up in fim_diff_cache.
+	// These keys hold an authoritative snapshot/list — replace them wholesale.
+	foreach (['fim_baseline', 'fim_diff_cache'] as $replace_key) {
+		if (array_key_exists($replace_key, $updates)) {
+			$merged[$replace_key] = $updates[$replace_key];
+		}
+	}
+
 	$sanitized = freesiem_sentinel_sanitize_settings($merged);
 
 	if (get_option(FREESIEM_SENTINEL_OPTION, null) === null) {
