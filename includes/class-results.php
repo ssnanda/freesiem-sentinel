@@ -125,9 +125,14 @@ class Freesiem_Results
 		}
 
 		$merged = $this->sort_findings(array_values($by_key));
+		// Keep the settings option a sane size — the most severe 2000 is plenty
+		// for the on-screen list; the per-run history keeps its own copy.
+		$total_findings = count($merged);
+		$merged = array_slice($merged, 0, 2000);
 
 		$cache['fetched_at'] = $now;
 		$cache['local_findings'] = $merged;
+		$cache['local_findings_truncated'] = $total_findings > count($merged) ? $total_findings : 0;
 		$cache['severity_counts'] = $this->count_severities($merged);
 		$cache['top_issues'] = array_slice($merged, 0, 5);
 		$cache['recommendations'] = array_values(array_unique(array_map(static function (array $finding): string {
@@ -174,7 +179,120 @@ class Freesiem_Results
 
 		update_option(FREESIEM_SENTINEL_OPTION, freesiem_sentinel_sanitize_settings($settings), false);
 
+		$this->clear_scan_history();
+
 		return $this->get_cache();
+	}
+
+	// -----------------------------------------------------------------
+	// Per-run scan history
+	// -----------------------------------------------------------------
+
+	private const HISTORY_OPTION = 'freesiem_sentinel_scan_history';
+	private const HISTORY_INDEX_MAX = 20;
+	private const HISTORY_DETAIL_MAX = 5;
+
+	/**
+	 * Append a completed scan run to the history.
+	 *
+	 * The index (kept for HISTORY_INDEX_MAX runs) holds one summary row per run.
+	 * The full findings for the most recent HISTORY_DETAIL_MAX runs are stored in
+	 * their own options; older detail options are pruned.
+	 */
+	public function record_scan_run(string $type, array $findings, array $metrics): void
+	{
+		$type = in_array($type, ['quick', 'deep', 'weekly', 'combined'], true) ? $type : 'deep';
+		$findings = array_values(array_filter($findings, 'is_array'));
+		$id = gmdate('Ymd-His') . '-' . substr(md5(uniqid('', true)), 0, 6);
+
+		$row = [
+			'id' => $id,
+			'type' => $type,
+			'started_at' => (string) ($metrics['started_at'] ?? ''),
+			'finished_at' => (string) ($metrics['finished_at'] ?? freesiem_sentinel_get_iso8601_time()),
+			'score' => freesiem_sentinel_score_from_findings($findings),
+			'severity_counts' => $this->count_severities($findings),
+			'findings_count' => count($findings),
+			'files_scanned' => (int) ($metrics['files_scanned'] ?? 0),
+			'malware_hits' => (int) ($metrics['malware_hits'] ?? 0),
+			'core_files_modified' => (int) ($metrics['core_files_modified'] ?? 0),
+			'database_issues' => (int) ($metrics['database_issues'] ?? 0),
+			'partial' => !empty($metrics['partial']),
+			'full' => !empty($metrics['full']),
+			'has_detail' => true,
+		];
+
+		$index = $this->get_scan_history();
+		array_unshift($index, $row);
+		$index = array_slice($index, 0, self::HISTORY_INDEX_MAX);
+
+		// Store findings for this run (most-severe first, bounded so a badly
+		// infected site cannot bloat wp_options).
+		update_option($this->run_option_key($id), [
+			'meta' => $row,
+			'findings' => array_slice($this->sort_findings($findings), 0, 750),
+		], false);
+
+		// Prune detail options beyond the newest HISTORY_DETAIL_MAX.
+		foreach ($index as $pos => &$entry) {
+			if ($pos < self::HISTORY_DETAIL_MAX) {
+				continue;
+			}
+
+			if (!empty($entry['has_detail'])) {
+				delete_option($this->run_option_key((string) $entry['id']));
+				$entry['has_detail'] = false;
+			}
+		}
+		unset($entry);
+
+		update_option(self::HISTORY_OPTION, $index, false);
+	}
+
+	public function get_scan_history(): array
+	{
+		$index = get_option(self::HISTORY_OPTION, []);
+
+		return is_array($index) ? array_values(array_filter($index, 'is_array')) : [];
+	}
+
+	/**
+	 * @return array{meta:array,findings:array}|null
+	 */
+	public function get_scan_run(string $id): ?array
+	{
+		foreach ($this->get_scan_history() as $row) {
+			if ((string) ($row['id'] ?? '') !== $id) {
+				continue;
+			}
+
+			$detail = get_option($this->run_option_key($id), null);
+
+			if (is_array($detail) && isset($detail['findings'])) {
+				return [
+					'meta' => is_array($detail['meta'] ?? null) ? $detail['meta'] : $row,
+					'findings' => array_values(array_filter((array) $detail['findings'], 'is_array')),
+				];
+			}
+
+			return ['meta' => $row, 'findings' => []];
+		}
+
+		return null;
+	}
+
+	public function clear_scan_history(): void
+	{
+		foreach ($this->get_scan_history() as $row) {
+			delete_option($this->run_option_key((string) ($row['id'] ?? '')));
+		}
+
+		delete_option(self::HISTORY_OPTION);
+	}
+
+	private function run_option_key(string $id): string
+	{
+		return 'freesiem_sentinel_scan_run_' . preg_replace('/[^A-Za-z0-9\-]/', '', $id);
 	}
 
 	public function store_remote_summary(array $summary): array

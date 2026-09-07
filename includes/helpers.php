@@ -75,6 +75,10 @@ function freesiem_sentinel_get_default_settings(): array
 			'max_files' => 1000,
 			'max_depth' => 5,
 		],
+		'deep_scan_weekly_enabled' => 1,
+		'deep_scan_weekly_day' => -1,
+		'scan_email_recipients' => '',
+		'scan_email_on_weekly' => 1,
 		'summary_cache' => [
 			'fetched_at' => '',
 			'summary' => [],
@@ -417,6 +421,14 @@ function freesiem_sentinel_sanitize_settings(array $settings): array
 	$settings['scan_preferences']['include_uploads'] = empty($settings['scan_preferences']['include_uploads']) ? 0 : 1;
 	$settings['scan_preferences']['max_files'] = max(100, min(200000, (int) ($settings['scan_preferences']['max_files'] ?? 1000)));
 	$settings['scan_preferences']['max_depth'] = max(1, min(20, (int) ($settings['scan_preferences']['max_depth'] ?? 5)));
+
+	$settings['deep_scan_weekly_enabled'] = empty($settings['deep_scan_weekly_enabled']) ? 0 : 1;
+	$settings['deep_scan_weekly_day'] = in_array((int) ($settings['deep_scan_weekly_day'] ?? -1), [-1, 0, 1, 2, 3, 4, 5, 6], true) ? (int) $settings['deep_scan_weekly_day'] : -1;
+	$settings['scan_email_on_weekly'] = empty($settings['scan_email_on_weekly']) ? 0 : 1;
+	$settings['scan_email_recipients'] = implode(', ', array_slice(array_values(array_unique(array_filter(array_map(
+		'sanitize_email',
+		preg_split('/[\s,;]+/', (string) ($settings['scan_email_recipients'] ?? '')) ?: []
+	)))), 0, 20));
 
 	$settings['summary_cache'] = is_array($settings['summary_cache']) ? $settings['summary_cache'] : $defaults['summary_cache'];
 	$settings['updater_cache'] = is_array($settings['updater_cache']) ? $settings['updater_cache'] : [];
@@ -4942,4 +4954,178 @@ function freesiem_sentinel_format_datetime(string $value): string
 function freesiem_sentinel_array_get(array $data, string $key, $default = null)
 {
 	return array_key_exists($key, $data) ? $data[$key] : $default;
+}
+
+/**
+ * Recipients for scan report emails: the site admin address plus any addresses
+ * configured in the Scan settings, de-duplicated.
+ *
+ * @param string[] $extra additional addresses to include for this send
+ * @return string[]
+ */
+function freesiem_sentinel_scan_email_recipients(array $extra = []): array
+{
+	$configured = preg_split('/[\s,;]+/', (string) freesiem_sentinel_get_setting('scan_email_recipients', '')) ?: [];
+	$all = array_merge([(string) get_option('admin_email')], $configured, $extra);
+	$all = array_values(array_unique(array_filter(array_map('sanitize_email', $all))));
+
+	return $all;
+}
+
+/**
+ * Pick a deterministic-but-spread weekly run time for this site so many sites on
+ * one server do not all scan at the same moment.
+ *
+ * The weekday can be pinned via the deep_scan_weekly_day setting (0 = Sunday);
+ * -1 means "derive from the site fingerprint". The hour (01:00-05:00 local) and
+ * minute are always derived from the fingerprint.
+ */
+function freesiem_sentinel_weekly_scan_timestamp(): int
+{
+	$seed = crc32(get_site_url() . '|' . (defined('ABSPATH') ? ABSPATH : ''));
+	$pref_day = (int) freesiem_sentinel_get_setting('deep_scan_weekly_day', -1);
+	$target_dow = $pref_day >= 0 && $pref_day <= 6 ? $pref_day : ($seed % 7);
+	$hour = 1 + (($seed >> 3) % 5);      // 01:00 - 05:00
+	$minute = ($seed >> 8) % 60;
+
+	$tz = wp_timezone();
+	$now = new DateTimeImmutable('now', $tz);
+	$candidate = $now->setTime($hour, $minute, (int) (($seed >> 14) % 60));
+
+	// Advance to the next occurrence of the target weekday (PHP: 0 = Sunday via 'w').
+	$days_ahead = ($target_dow - (int) $candidate->format('w') + 7) % 7;
+
+	if ($days_ahead === 0 && $candidate <= $now) {
+		$days_ahead = 7;
+	}
+
+	$candidate = $candidate->modify('+' . $days_ahead . ' days');
+
+	return $candidate->getTimestamp();
+}
+
+/**
+ * (Re)schedule the weekly full-scan cron event to match current settings.
+ */
+function freesiem_sentinel_reschedule_weekly_scan(): void
+{
+	if (!function_exists('wp_clear_scheduled_hook')) {
+		return;
+	}
+
+	wp_clear_scheduled_hook(Freesiem_Cron::WEEKLY_DEEP_SCAN_HOOK);
+
+	if (!freesiem_sentinel_get_setting('deep_scan_weekly_enabled', 1)) {
+		return;
+	}
+
+	wp_schedule_event(freesiem_sentinel_weekly_scan_timestamp(), 'weekly', Freesiem_Cron::WEEKLY_DEEP_SCAN_HOOK);
+}
+
+/**
+ * Build and send the current scan report by email.
+ *
+ * @param string[] $extra_recipients
+ * @param string   $context 'manual' | 'weekly'
+ * @return true|WP_Error
+ */
+function freesiem_sentinel_send_scan_report_email(array $extra_recipients = [], string $context = 'manual')
+{
+	$recipients = freesiem_sentinel_scan_email_recipients($extra_recipients);
+
+	if ($recipients === []) {
+		return new WP_Error('freesiem_no_recipients', __('No valid email recipients are configured.', 'freesiem-sentinel'));
+	}
+
+	$plugin = Freesiem_Plugin::instance();
+	$cache = $plugin->get_results()->get_cache();
+	$findings = array_values(array_filter(freesiem_sentinel_safe_array($cache['local_findings'] ?? []), 'is_array'));
+	$summary = freesiem_sentinel_safe_array($cache['summary'] ?? []);
+	$counts = freesiem_sentinel_safe_array($cache['severity_counts'] ?? []);
+
+	$site = wp_parse_url(home_url(), PHP_URL_HOST) ?: home_url();
+	$score = (int) ($summary['local_score'] ?? freesiem_sentinel_score_from_findings($findings));
+	$scanned_at = freesiem_sentinel_format_datetime((string) ($summary['last_deep_scan_at'] ?? ($summary['last_local_scan_at'] ?? '')));
+
+	$subject = sprintf(
+		/* translators: 1: site host, 2: critical count, 3: high count */
+		__('[freeSIEM] Scan report for %1$s — %2$d critical, %3$d high', 'freesiem-sentinel'),
+		$site,
+		(int) ($counts['critical'] ?? 0),
+		(int) ($counts['high'] ?? 0)
+	);
+
+	$palette = [
+		'critical' => '#8b1e1e',
+		'high' => '#b42318',
+		'medium' => '#b45309',
+		'low' => '#1d4ed8',
+		'info' => '#475569',
+	];
+
+	$rows = '';
+	$shown = array_slice($findings, 0, 200);
+
+	foreach ($shown as $finding) {
+		$sev = freesiem_sentinel_normalize_severity((string) ($finding['severity'] ?? 'info'));
+		$path = freesiem_sentinel_safe_string($finding['evidence']['path'] ?? '');
+		$line = freesiem_sentinel_safe_string($finding['evidence']['line'] ?? '');
+		$where = $path !== '' ? $path . ($line !== '' ? ':' . $line : '') : freesiem_sentinel_safe_string($finding['category'] ?? '');
+		$rows .= sprintf(
+			'<tr>'
+			. '<td style="padding:6px 10px;border-bottom:1px solid #e5e7eb;"><span style="display:inline-block;padding:2px 8px;border-radius:999px;background:%s;color:#fff;font-size:11px;font-weight:700;">%s</span></td>'
+			. '<td style="padding:6px 10px;border-bottom:1px solid #e5e7eb;"><strong>%s</strong><br><span style="color:#475569;font-size:12px;">%s</span></td>'
+			. '<td style="padding:6px 10px;border-bottom:1px solid #e5e7eb;font-family:monospace;font-size:12px;word-break:break-all;">%s</td>'
+			. '</tr>',
+			esc_attr($palette[$sev] ?? $palette['info']),
+			esc_html(strtoupper($sev)),
+			esc_html(freesiem_sentinel_safe_string($finding['title'] ?? '')),
+			esc_html(freesiem_sentinel_safe_string($finding['recommendation'] ?? '')),
+			esc_html($where)
+		);
+	}
+
+	if ($rows === '') {
+		$rows = '<tr><td colspan="3" style="padding:12px 10px;color:#16794a;">' . esc_html__('No findings — the scan is clean.', 'freesiem-sentinel') . '</td></tr>';
+	}
+
+	$more = count($findings) > count($shown)
+		? '<p style="color:#475569;font-size:12px;">' . esc_html(sprintf(__('%d more findings not shown — open the Scan screen for the full list.', 'freesiem-sentinel'), count($findings) - count($shown))) . '</p>'
+		: '';
+
+	$body = '<div style="font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#111;max-width:820px;">'
+		. '<h2 style="margin:0 0 4px;">' . esc_html__('freeSIEM Sentinel scan report', 'freesiem-sentinel') . '</h2>'
+		. '<p style="margin:0 0 16px;color:#475569;">' . esc_html($site) . ' &middot; ' . esc_html($scanned_at)
+		. ($context === 'weekly' ? ' &middot; ' . esc_html__('weekly full scan', 'freesiem-sentinel') : '') . '</p>'
+		. '<table style="border-collapse:collapse;margin-bottom:16px;">'
+		. '<tr>'
+		. '<td style="padding:8px 14px;background:#f1f5f9;border-radius:8px;font-size:13px;">' . esc_html__('Score', 'freesiem-sentinel') . ': <strong>' . esc_html((string) $score) . '/100</strong></td>'
+		. '<td style="width:10px;"></td>'
+		. '<td style="padding:8px 14px;background:#fef2f2;border-radius:8px;font-size:13px;">' . esc_html__('Critical', 'freesiem-sentinel') . ': <strong>' . esc_html((string) (int) ($counts['critical'] ?? 0)) . '</strong></td>'
+		. '<td style="width:10px;"></td>'
+		. '<td style="padding:8px 14px;background:#fff7ed;border-radius:8px;font-size:13px;">' . esc_html__('High', 'freesiem-sentinel') . ': <strong>' . esc_html((string) (int) ($counts['high'] ?? 0)) . '</strong></td>'
+		. '<td style="width:10px;"></td>'
+		. '<td style="padding:8px 14px;background:#eff6ff;border-radius:8px;font-size:13px;">' . esc_html__('Medium', 'freesiem-sentinel') . ': <strong>' . esc_html((string) (int) ($counts['medium'] ?? 0)) . '</strong> &middot; ' . esc_html__('Low', 'freesiem-sentinel') . ': <strong>' . esc_html((string) (int) ($counts['low'] ?? 0)) . '</strong></td>'
+		. '</tr></table>'
+		. '<p style="color:#475569;font-size:12px;margin:0 0 12px;">'
+		. esc_html(sprintf(__('Files content-scanned: %1$s · Core files modified: %2$s · Database issues: %3$s', 'freesiem-sentinel'),
+			number_format_i18n((int) ($summary['files_content_scanned'] ?? 0)),
+			number_format_i18n((int) ($summary['core_files_modified'] ?? 0)),
+			number_format_i18n((int) ($summary['database_issues'] ?? 0))))
+		. (!empty($summary['deep_scan_partial']) ? ' · <em>' . esc_html__('partial scan', 'freesiem-sentinel') . '</em>' : '')
+		. '</p>'
+		. '<table style="border-collapse:collapse;width:100%;font-size:13px;">'
+		. '<thead><tr>'
+		. '<th style="text-align:left;padding:6px 10px;border-bottom:2px solid #cbd5e1;">' . esc_html__('Severity', 'freesiem-sentinel') . '</th>'
+		. '<th style="text-align:left;padding:6px 10px;border-bottom:2px solid #cbd5e1;">' . esc_html__('Finding', 'freesiem-sentinel') . '</th>'
+		. '<th style="text-align:left;padding:6px 10px;border-bottom:2px solid #cbd5e1;">' . esc_html__('Location', 'freesiem-sentinel') . '</th>'
+		. '</tr></thead><tbody>' . $rows . '</tbody></table>'
+		. $more
+		. '<p style="margin-top:20px;"><a href="' . esc_url(freesiem_sentinel_admin_page_url('freesiem-scan', ['show_results' => '1'])) . '" style="background:#2271b1;color:#fff;padding:10px 18px;border-radius:8px;text-decoration:none;">' . esc_html__('Open the Scan screen', 'freesiem-sentinel') . '</a></p>'
+		. '</div>';
+
+	$headers = ['Content-Type: text/html; charset=UTF-8'];
+	$sent = wp_mail($recipients, $subject, $body, $headers);
+
+	return $sent ? true : new WP_Error('freesiem_mail_failed', __('WordPress could not send the report email.', 'freesiem-sentinel'));
 }

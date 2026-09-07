@@ -26,6 +26,9 @@ class Freesiem_Deep_Scanner
 	private const LOCK_TRANSIENT = 'freesiem_sentinel_deep_scan_lock';
 
 	private const MAX_FINDINGS = 500;
+	private const MAX_FINDINGS_FULL = 1500;
+	private const DIR_FILE_CAP = 20000;
+	private const DIR_FILE_CAP_FULL = 120000;
 	private const MAX_READ_BYTES = 5242880; // 5 MB content read cap
 	private const PEEK_BYTES = 8192;
 	private const STALE_LOCK_SECONDS = 3600; // a slice that hasn't advanced in an hour is treated as crashed
@@ -84,14 +87,31 @@ class Freesiem_Deep_Scanner
 
 	/**
 	 * Reset state and seed the work queue for a fresh scan.
+	 *
+	 * @param array  $options per-run preference overrides
+	 * @param string $mode    'deep' (manual / 12-hourly) or 'weekly' (scheduled full sweep)
 	 */
-	public function start(array $options = []): array
+	public function start(array $options = [], string $mode = 'deep'): array
 	{
+		$full = $mode === 'weekly' || !empty($options['full']);
+
+		if ($full) {
+			// A full sweep always runs every module and covers uploads, whatever
+			// the saved per-module toggles say.
+			$options['scan_malware'] = 1;
+			$options['scan_core_integrity'] = 1;
+			$options['scan_plugin_integrity'] = 1;
+			$options['scan_database'] = 1;
+			$options['scan_uploads_deep'] = 1;
+		}
+
 		$prefs = $this->resolve_preferences($options);
 		$now = freesiem_sentinel_get_iso8601_time();
 
 		$state = [
 			'run_token' => wp_generate_uuid4(),
+			'mode' => in_array($mode, ['deep', 'weekly'], true) ? $mode : 'deep',
+			'full' => $full,
 			'phase' => 'filesystem',
 			'started_at' => $now,
 			'updated_at' => $now,
@@ -132,6 +152,37 @@ class Freesiem_Deep_Scanner
 		$this->save_state($state);
 
 		return $state;
+	}
+
+	/**
+	 * Start a full, uncapped sweep (all modules, uploads, higher finding limit)
+	 * and queue the first background continuation. Used by the weekly cron and the
+	 * "Run Full Scan Now" button.
+	 */
+	public function start_full(string $mode = 'weekly'): array
+	{
+		$state = $this->start(['full' => 1], $mode === 'weekly' ? 'weekly' : 'deep');
+		$this->schedule_continue(5);
+
+		return $state;
+	}
+
+	/**
+	 * Weekly cron entry: start a full scan unless one is already running.
+	 */
+	public function run_weekly_full_scan(): void
+	{
+		if (!freesiem_sentinel_get_setting('deep_scan_weekly_enabled', 1)) {
+			return;
+		}
+
+		if ($this->is_running() && !$this->is_stalled()) {
+			$this->schedule_continue(10);
+
+			return;
+		}
+
+		$this->start_full('weekly');
 	}
 
 	public function maybe_start_scheduled(): void
@@ -413,8 +464,10 @@ class Freesiem_Deep_Scanner
 
 		// Guard against a single directory with an enormous file count blowing up
 		// the serialized state option.
-		if (count($queued) > 20000) {
-			$queued = array_slice($queued, 0, 20000);
+		$dir_cap = empty($state['full']) ? self::DIR_FILE_CAP : self::DIR_FILE_CAP_FULL;
+
+		if (count($queued) > $dir_cap) {
+			$queued = array_slice($queued, 0, $dir_cap);
 			$state['partial'] = true;
 			$state['partial_reason'] = $state['partial_reason'] ?: 'dir_file_cap';
 		}
@@ -627,11 +680,15 @@ class Freesiem_Deep_Scanner
 			return $cached;
 		}
 
-		if (!function_exists('get_core_checksums')) {
+		if (!function_exists('get_core_checksums') && is_readable(ABSPATH . 'wp-admin/includes/update.php')) {
 			require_once ABSPATH . 'wp-admin/includes/update.php';
 		}
 
-		$checksums = function_exists('get_core_checksums') ? get_core_checksums($version, $locale) : false;
+		if (!function_exists('get_core_checksums')) {
+			return [];
+		}
+
+		$checksums = get_core_checksums($version, $locale);
 
 		if (!is_array($checksums) || $checksums === []) {
 			$checksums = function_exists('get_core_checksums') ? get_core_checksums($version, 'en_US') : false;
@@ -776,8 +833,12 @@ class Freesiem_Deep_Scanner
 
 	private function integrity_plugins_step(array &$state, array &$cursor): bool
 	{
-		if (!function_exists('get_plugins')) {
+		if (!function_exists('get_plugins') && is_readable(ABSPATH . 'wp-admin/includes/plugin.php')) {
 			require_once ABSPATH . 'wp-admin/includes/plugin.php';
+		}
+
+		if (!function_exists('get_plugins')) {
+			return true;
 		}
 
 		$plugins = array_keys(get_plugins());
@@ -1295,8 +1356,11 @@ class Freesiem_Deep_Scanner
 
 		$findings = array_values(is_array($state['findings'] ?? null) ? $state['findings'] : []);
 		$counters = is_array($state['counters'] ?? null) ? $state['counters'] : [];
+		$mode = (string) ($state['mode'] ?? 'deep');
 
 		$metrics = [
+			'mode' => $mode,
+			'full' => !empty($state['full']),
 			'files_scanned' => (int) ($counters['files_scanned'] ?? 0),
 			'files_seen' => (int) ($counters['files_seen'] ?? 0),
 			'bytes_scanned' => (int) ($counters['bytes_scanned'] ?? 0),
@@ -1313,7 +1377,12 @@ class Freesiem_Deep_Scanner
 		];
 
 		$this->plugin->get_results()->merge_deep_scan($findings, $metrics);
+		$this->plugin->get_results()->record_scan_run($mode === 'weekly' ? 'weekly' : 'deep', $findings, $metrics);
 		$this->plugin->push_local_findings_snapshot();
+
+		if ($mode === 'weekly' && !empty(freesiem_sentinel_get_setting('scan_email_on_weekly', 1))) {
+			freesiem_sentinel_send_scan_report_email([], 'weekly');
+		}
 
 		// Keep a slim record of the last run; drop the bulky work queue + findings.
 		$state['phase'] = 'done';
@@ -1355,6 +1424,8 @@ class Freesiem_Deep_Scanner
 			'running' => $phase !== 'done',
 			'stalled' => $this->is_stalled(),
 			'phase' => $phase,
+			'mode' => (string) ($state['mode'] ?? 'deep'),
+			'full' => !empty($state['full']),
 			'percent' => (int) max(0, min(100, $percent)),
 			'label' => $labels[$phase] ?? $phase,
 			'files_scanned' => (int) ($counters['files_scanned'] ?? 0),
@@ -1411,7 +1482,9 @@ class Freesiem_Deep_Scanner
 			return;
 		}
 
-		if (count($state['findings']) >= self::MAX_FINDINGS) {
+		$cap = empty($state['full']) ? self::MAX_FINDINGS : self::MAX_FINDINGS_FULL;
+
+		if (count($state['findings']) >= $cap) {
 			$state['partial'] = true;
 			$state['partial_reason'] = $state['partial_reason'] ?: 'finding_cap';
 
@@ -1507,6 +1580,11 @@ class Freesiem_Deep_Scanner
 		$state = $this->get_state();
 		$prefs = is_array($state['prefs'] ?? null) ? $state['prefs'] : $this->resolve_preferences([]);
 		$intensity = (string) ($prefs['scan_intensity'] ?? 'balanced');
+
+		// A full sweep should not crawl at the slowest pace.
+		if (!empty($state['full']) && $intensity === 'gentle') {
+			$intensity = 'balanced';
+		}
 
 		$base = match ($intensity) {
 			'gentle' => ['files' => 400, 'seconds' => 8.0, 'throttle_us' => 20000, 'batch' => 10],

@@ -13,6 +13,7 @@ class Freesiem_Cron
 	public const TASK_HEARTBEAT_HOOK = 'freesiem_sentinel_task_priority_heartbeat';
 	public const INSTALL_BASE_HEARTBEAT_HOOK = 'freesiem_sentinel_install_base_heartbeat';
 	public const SSL_AUTO_RENEW_HOOK = 'freesiem_sentinel_ssl_auto_renew';
+	public const WEEKLY_DEEP_SCAN_HOOK = 'freesiem_sentinel_deep_scan_weekly';
 
 	private Freesiem_Plugin $plugin;
 
@@ -31,12 +32,17 @@ class Freesiem_Cron
 		add_action(self::TASK_PROCESS_HOOK, [$this, 'process_pending_tasks']);
 		add_action(self::INSTALL_BASE_HEARTBEAT_HOOK, [$this, 'install_base_heartbeat']);
 		add_action(self::SSL_AUTO_RENEW_HOOK, [$this, 'ssl_auto_renew']);
+		add_action(self::WEEKLY_DEEP_SCAN_HOOK, [$this, 'weekly_deep_scan']);
 
 		// Self-heal the schedule on every load (not just plugin activation) so
 		// upgrading an already-active install picks up newly added hooks like
 		// this one without requiring a deactivate/reactivate cycle.
 		if (!wp_next_scheduled(self::SSL_AUTO_RENEW_HOOK)) {
 			wp_schedule_event(time() + (20 * MINUTE_IN_SECONDS), 'daily', self::SSL_AUTO_RENEW_HOOK);
+		}
+
+		if (freesiem_sentinel_get_setting('deep_scan_weekly_enabled', 1) && !wp_next_scheduled(self::WEEKLY_DEEP_SCAN_HOOK)) {
+			wp_schedule_event(freesiem_sentinel_weekly_scan_timestamp(), 'weekly', self::WEEKLY_DEEP_SCAN_HOOK);
 		}
 	}
 
@@ -79,10 +85,15 @@ class Freesiem_Cron
 		if (!wp_next_scheduled(self::SSL_AUTO_RENEW_HOOK)) {
 			wp_schedule_event(time() + (20 * MINUTE_IN_SECONDS), 'daily', self::SSL_AUTO_RENEW_HOOK);
 		}
+
+		if (freesiem_sentinel_get_setting('deep_scan_weekly_enabled', 1) && !wp_next_scheduled(self::WEEKLY_DEEP_SCAN_HOOK)) {
+			wp_schedule_event(freesiem_sentinel_weekly_scan_timestamp(), 'weekly', self::WEEKLY_DEEP_SCAN_HOOK);
+		}
 	}
 
 	public static function clear_events(): void
 	{
+		wp_clear_scheduled_hook(self::WEEKLY_DEEP_SCAN_HOOK);
 		wp_clear_scheduled_hook(self::HEARTBEAT_HOOK);
 		wp_clear_scheduled_hook(self::LOCAL_SCAN_HOOK);
 		wp_clear_scheduled_hook(self::SYNC_HOOK);
@@ -107,6 +118,11 @@ class Freesiem_Cron
 	public function deep_scan_continue(): void
 	{
 		$this->plugin->deep_scan_continue();
+	}
+
+	public function weekly_deep_scan(): void
+	{
+		$this->plugin->get_deep_scanner()->run_weekly_full_scan();
 	}
 
 	public function sync_results(): void
