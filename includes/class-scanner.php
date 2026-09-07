@@ -8,7 +8,8 @@ class Freesiem_Scanner
 {
 	private const MAX_FILES = 1000;
 	private const MAX_DEPTH = 5;
-	private const MAX_HASHED_FILES = 500;
+	private const MAX_HASHED_FILES = 1500;
+	private const MAX_BASELINE_FILES = 25000;
 	private const MAX_STORED_DIFFS = 200;
 	private int $max_files = self::MAX_FILES;
 	private int $max_depth = self::MAX_DEPTH;
@@ -130,7 +131,10 @@ class Freesiem_Scanner
 		$this->include_uploads = !empty($resolved['include_uploads']);
 		$this->max_files = max(100, min(5000, (int) ($resolved['max_files'] ?? self::MAX_FILES)));
 		$this->max_depth = max(1, min(10, (int) ($resolved['max_depth'] ?? self::MAX_DEPTH)));
-		$this->max_hashed_files = max(100, min(self::MAX_HASHED_FILES, $this->max_files));
+		// FIM gets its own fixed per-run budget — it is independent of the
+		// "heuristic pass: max files" setting, and merge_forward_baseline() lets
+		// coverage accumulate across runs regardless.
+		$this->max_hashed_files = self::MAX_HASHED_FILES;
 	}
 
 	private function build_metadata(): array
@@ -491,6 +495,7 @@ class Freesiem_Scanner
 		}
 
 		$diff = $this->compare_integrity_snapshots($baseline, $current_snapshot);
+		$merged_baseline = $this->merge_forward_baseline($baseline, $current_snapshot);
 		$diff_cache = [
 			'generated_at' => $now,
 			'baseline_created' => false,
@@ -502,7 +507,7 @@ class Freesiem_Scanner
 		];
 
 		freesiem_sentinel_update_settings([
-			'fim_baseline' => $current_snapshot,
+			'fim_baseline' => $merged_baseline,
 			'fim_last_baseline_at' => $now,
 			'fim_last_diff_at' => $now,
 			'fim_diff_cache' => $diff_cache,
@@ -616,6 +621,16 @@ class Freesiem_Scanner
 				continue;
 			}
 
+			// The current snapshot is capped at max_hashed_files, so a baseline
+			// path that was not re-hashed this run is NOT evidence of deletion —
+			// only a file that is genuinely gone from disk is. Without this check
+			// every baseline entry past the cap is reported as "disappeared".
+			$absolute = wp_normalize_path(untrailingslashit(ABSPATH) . '/' . ltrim((string) $path, '/'));
+
+			if (file_exists($absolute)) {
+				continue;
+			}
+
 			$deleted_files_count++;
 			$this->append_integrity_change('deleted', is_array($entry) ? $entry : [], null, $changes, $findings);
 		}
@@ -628,6 +643,38 @@ class Freesiem_Scanner
 			'deleted_files_count' => $deleted_files_count,
 			'partial' => count($changes) >= self::MAX_STORED_DIFFS,
 		];
+	}
+
+	/**
+	 * The snapshot only covers max_hashed_files paths per run, so writing it back
+	 * as the whole baseline would drop every file past the cap (and re-flag it as
+	 * "new" next time it is reached). Instead: take this run's fresh entries, then
+	 * carry forward any prior baseline entry whose file still exists but was not
+	 * re-hashed this run. Genuinely deleted files (absent from disk) fall away.
+	 */
+	private function merge_forward_baseline(array $baseline, array $current): array
+	{
+		$merged = $current;
+		$carried = 0;
+
+		foreach ($baseline as $path => $entry) {
+			if (isset($merged[$path]) || $carried >= self::MAX_BASELINE_FILES) {
+				continue;
+			}
+
+			$absolute = wp_normalize_path(untrailingslashit(ABSPATH) . '/' . ltrim((string) $path, '/'));
+
+			if (!file_exists($absolute)) {
+				continue;
+			}
+
+			$merged[$path] = is_array($entry) ? $entry : [];
+			$carried++;
+		}
+
+		ksort($merged);
+
+		return $merged;
 	}
 
 	private function append_integrity_change(string $change_type, ?array $previous, ?array $current, array &$changes, array &$findings): void
