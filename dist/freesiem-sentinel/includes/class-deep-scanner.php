@@ -43,6 +43,19 @@ class Freesiem_Deep_Scanner
 
 	private Freesiem_Plugin $plugin;
 
+	/**
+	 * Set by scan_file() while scanning a file that lives inside freeSIEM
+	 * Sentinel's own plugin directory but is NOT byte-identical to (or is absent
+	 * from) the release checksum manifest. add_finding() reads it to reframe any
+	 * finding raised against such a file: it is not "injected malware in an
+	 * unknown file" — it is an unrecognized file sitting inside our own plugin,
+	 * which means either a development copy was deployed (our own tests/ ship
+	 * signature-shaped fixtures) or a file was planted in our directory.
+	 *
+	 * @var array{rel:string,self_rel:string}|null
+	 */
+	private ?array $self_file_context = null;
+
 	public function __construct(Freesiem_Plugin $plugin)
 	{
 		$this->plugin = $plugin;
@@ -399,6 +412,7 @@ class Freesiem_Deep_Scanner
 		if (!empty($state['file_queue'])) {
 			$file = array_shift($state['file_queue']);
 			$this->scan_file((string) $file, $state);
+			$this->self_file_context = null;
 
 			return;
 		}
@@ -510,6 +524,7 @@ class Freesiem_Deep_Scanner
 		// and, if it is byte-identical, do not run content signatures against it —
 		// but DO still scan it (and flag it hard) if it has been modified.
 		$self_rel = $this->self_relative_path($path);
+		$this->self_file_context = null;
 
 		if ($self_rel !== null) {
 			$manifest = $this->self_manifest();
@@ -518,9 +533,17 @@ class Freesiem_Deep_Scanner
 			if ($expected !== '' && hash_equals($expected, (string) @md5_file($path))) {
 				return; // our own file, unchanged since release — nothing to scan
 			}
+
 			// Fall through: modified or unrecognized file inside our own plugin.
-			// integrity_self_step() reports the tampering; here we still let the
-			// signature scan run so an injected payload is caught too.
+			// integrity_self_step() reports manifest tampering; here we still let
+			// the signature scan run so an injected payload is caught too — but
+			// add_finding() reframes whatever it raises, because the honest story
+			// is "unrecognized file inside freeSIEM Sentinel", not "malware in a
+			// random file". Only meaningful when we actually have a manifest to
+			// compare against (a real release, not a symlinked dev checkout).
+			if ($manifest !== []) {
+				$this->self_file_context = ['rel' => $rel, 'self_rel' => $self_rel];
+			}
 		}
 
 		// A file that byte-matches its official WordPress.org checksum (core, or a
@@ -580,7 +603,7 @@ class Freesiem_Deep_Scanner
 			$count = strlen($contents) <= 524288 ? (@preg_match_all($pattern, $contents) ?: 1) : 1;
 			$category = $category_override !== '' ? $category_override : (string) ($rule['category'] ?? 'malware');
 
-			$this->add_finding($state, [
+			$added = $this->add_finding($state, [
 				'finding_key' => 'deep_' . $rule['id'] . '_' . md5($rel),
 				'category' => $category,
 				'severity' => (string) ($rule['severity'] ?? 'high'),
@@ -597,7 +620,9 @@ class Freesiem_Deep_Scanner
 				'score' => (int) ($rule['score'] ?? 45),
 			]);
 
-			if (($rule['category'] ?? 'malware') === 'malware') {
+			// Not counted as a malware hit when the "finding" was really a
+			// reframed unrecognized-own-file notice, or a dedupe no-op.
+			if ($added && $this->self_file_context === null && ($rule['category'] ?? 'malware') === 'malware') {
 				$state['counters']['malware_hits']++;
 			}
 		}
@@ -688,6 +713,15 @@ class Freesiem_Deep_Scanner
 			} elseif (array_intersect(['contains_credentials', 'contains_secrets'], $desc_flags) !== []) {
 				$severity = $severity === 'critical' ? 'critical' : 'high';
 				$score = min($score, 40);
+
+				// A credentials-bearing backup that a backup tool has sealed off
+				// with its own "deny all" .htaccess is a lower (defence-in-depth,
+				// not front-door) risk — say so instead of screaming.
+				if ($this->directory_denies_web_access(dirname($path))) {
+					$reasons[] = 'The containing folder has a deny-all rule (Apache); still verify nginx / LiteSpeed block it too';
+					$severity = 'medium';
+					$score = max($score, 55);
+				}
 			}
 		}
 
@@ -718,6 +752,25 @@ class Freesiem_Deep_Scanner
 			],
 			'score' => $score,
 		]);
+	}
+
+	/**
+	 * True when the directory carries an .htaccess that blanket-denies web
+	 * access ("Require all denied" / "Deny from all"). Apache-only signal — nginx
+	 * and LiteSpeed ignore .htaccess — but enough to distinguish a backup tool's
+	 * sealed folder from a credentials file dropped straight in the doc root.
+	 */
+	private function directory_denies_web_access(string $dir): bool
+	{
+		$htaccess = rtrim(wp_normalize_path($dir), '/') . '/.htaccess';
+
+		if (!is_file($htaccess) || !is_readable($htaccess)) {
+			return false;
+		}
+
+		$contents = (string) @file_get_contents($htaccess, false, null, 0, 4096);
+
+		return (bool) preg_match('~require\s+all\s+denied|deny\s+from\s+all~i', $contents);
 	}
 
 	/**
@@ -1318,32 +1371,147 @@ class Freesiem_Deep_Scanner
 			}
 		}
 
-		if ($modified === [] && $missing === []) {
+		$extra = $this->find_unrecognized_self_files($base, $manifest, $state);
+
+		if ($modified === [] && $missing === [] && $extra === []) {
 			return;
 		}
 
 		$state['counters']['plugin_files_modified'] += count($modified);
 
-		$this->add_finding($state, [
-			'finding_key' => 'deep_self_integrity_' . md5(FREESIEM_SENTINEL_VERSION),
-			'category' => 'plugin_integrity',
-			'severity' => 'critical',
-			'title' => 'freeSIEM Sentinel\'s own files were modified',
-			'description' => sprintf(
-				'%d file(s) modified and %d missing versus the released freeSIEM Sentinel %s. If you did not edit the plugin yourself, its code has been tampered with and its scan results can no longer be trusted.',
-				count($modified),
-				count($missing),
-				FREESIEM_SENTINEL_VERSION
-			),
-			'recommendation' => 'Reinstall freeSIEM Sentinel from a clean copy (Plugins → delete and re-add, or the built-in updater), then re-run the scan. Investigate how the files were changed.',
-			'evidence' => [
-				'path' => 'wp-content/plugins/' . FREESIEM_SENTINEL_SLUG,
-				'version' => FREESIEM_SENTINEL_VERSION,
-				'modified_files' => array_slice($modified, 0, 20),
-				'missing_files' => array_slice($missing, 0, 20),
-			],
-			'score' => 18,
-		]);
+		$tampered = $modified !== [] || $missing !== [];
+
+		if ($tampered) {
+			$this->add_finding($state, [
+				'finding_key' => 'deep_self_integrity_' . md5(FREESIEM_SENTINEL_VERSION),
+				'category' => 'plugin_integrity',
+				'severity' => 'critical',
+				'title' => 'freeSIEM Sentinel\'s own files were modified',
+				'description' => sprintf(
+					'%d file(s) modified and %d missing versus the released freeSIEM Sentinel %s. If you did not edit the plugin yourself, its code has been tampered with and its scan results can no longer be trusted.',
+					count($modified),
+					count($missing),
+					FREESIEM_SENTINEL_VERSION
+				),
+				'recommendation' => 'Reinstall freeSIEM Sentinel from a clean copy (Plugins → delete and re-add, or the built-in updater), then re-run the scan. Investigate how the files were changed.',
+				'evidence' => [
+					'path' => 'wp-content/plugins/' . FREESIEM_SENTINEL_SLUG,
+					'version' => FREESIEM_SENTINEL_VERSION,
+					'modified_files' => array_slice($modified, 0, 20),
+					'missing_files' => array_slice($missing, 0, 20),
+				],
+				'score' => 18,
+			]);
+		}
+
+		if ($extra !== []) {
+			$dev_only = array_values(array_filter(
+				$extra,
+				static fn (string $r): bool => (bool) preg_match('~(^|/)(tests?|dist|node_modules|\.github)(/|$)~', $r) || str_ends_with($r, '.md')
+			));
+			$all_dev = count($dev_only) === count($extra);
+
+			$this->add_finding($state, [
+				'finding_key' => 'deep_self_extra_files_' . md5(FREESIEM_SENTINEL_VERSION),
+				'category' => 'plugin_integrity',
+				'severity' => $all_dev ? 'medium' : 'high',
+				'title' => __('Unrecognized files in freeSIEM Sentinel\'s directory', 'freesiem-sentinel'),
+				'description' => sprintf(
+					/* translators: 1: count, 2: version */
+					_n(
+						'%1$d file that the official freeSIEM Sentinel %2$s release does not ship is present in our plugin directory.',
+						'%1$d files that the official freeSIEM Sentinel %2$s release does not ship are present in our plugin directory.',
+						count($extra),
+						'freesiem-sentinel'
+					),
+					count($extra),
+					FREESIEM_SENTINEL_VERSION
+				) . ' ' . ($all_dev
+					? 'They all live under paths the release build strips (tests/, dist/, *.md), so this install was copied from a development tree rather than the release zip. Our own test fixtures deliberately contain malware-shaped strings.'
+					: 'Some are not development-only paths. A file that freeSIEM Sentinel neither ships nor recognises inside its own directory can be a planted shell.'),
+				'recommendation' => $all_dev
+					? sprintf('Reinstall freeSIEM Sentinel from the release zip, or delete the development-only files under wp-content/plugins/%s/.', FREESIEM_SENTINEL_SLUG)
+					: 'Review each file below. If you did not add it deliberately, quarantine it and reinstall freeSIEM Sentinel from a clean copy.',
+				'evidence' => [
+					'path' => 'wp-content/plugins/' . FREESIEM_SENTINEL_SLUG,
+					'version' => FREESIEM_SENTINEL_VERSION,
+					'unrecognized_files' => array_slice($extra, 0, 50),
+					'development_only' => $all_dev,
+				],
+				'score' => $all_dev ? 62 : 44,
+			]);
+		}
+	}
+
+	/**
+	 * Files inside our own plugin directory that are not in the release manifest.
+	 * Limited to the extensions the manifest actually covers (.php/.js/.css) so
+	 * language files, images and readme.txt are not mistaken for intruders, and
+	 * skips VCS/build directories. Any path already reported as a reframed
+	 * per-file "unrecognized file" finding is left out to avoid double-counting.
+	 *
+	 * @param array<string,string> $manifest
+	 * @return list<string> repo-relative paths (wp-content/plugins/<slug>/...)
+	 */
+	private function find_unrecognized_self_files(string $base, array $manifest, array $state): array
+	{
+		if (!is_dir($base)) {
+			return [];
+		}
+
+		$slug = defined('FREESIEM_SENTINEL_SLUG') ? (string) FREESIEM_SENTINEL_SLUG : 'freesiem-sentinel';
+		$prefix = 'wp-content/plugins/' . $slug . '/';
+		$extra = [];
+		$seen = 0;
+
+		try {
+			$it = new RecursiveIteratorIterator(
+				new RecursiveCallbackFilterIterator(
+					new RecursiveDirectoryIterator($base, FilesystemIterator::SKIP_DOTS | FilesystemIterator::UNIX_PATHS),
+					static function ($current): bool {
+						$name = strtolower($current->getFilename());
+
+						// dist/ is a full nested copy of the plugin in dev trees —
+						// skip it so it does not drown the report in its own files.
+						return !in_array($name, ['.git', '.svn', '.hg', 'node_modules', 'dist'], true);
+					}
+				)
+			);
+
+			foreach ($it as $file) {
+				if (!$file->isFile() || $file->isLink()) {
+					continue;
+				}
+
+				if (++$seen > 5000) {
+					break;
+				}
+
+				$ext = strtolower($file->getExtension());
+
+				if (!in_array($ext, ['php', 'js', 'css'], true)) {
+					continue;
+				}
+
+				$rel_self = ltrim(substr(wp_normalize_path($file->getPathname()), strlen($base)), '/');
+
+				if ($rel_self === '' || $rel_self === 'checksums.json' || isset($manifest[$rel_self])) {
+					continue;
+				}
+
+				if (isset($state['findings']['deep_self_unrecognized_' . md5($prefix . $rel_self)])) {
+					continue;
+				}
+
+				$extra[] = $prefix . $rel_self;
+			}
+		} catch (\Throwable $e) {
+			return $extra;
+		}
+
+		sort($extra);
+
+		return $extra;
 	}
 
 	// ---------------------------------------------------------------------
@@ -1865,8 +2033,10 @@ class Freesiem_Deep_Scanner
 	// Internals
 	// ---------------------------------------------------------------------
 
-	private function add_finding(array &$state, array $finding): void
+	private function add_finding(array &$state, array $finding): bool
 	{
+		$finding = $this->reframe_self_finding($finding);
+
 		$key = (string) ($finding['finding_key'] ?? '');
 
 		if ($key === '') {
@@ -1875,7 +2045,7 @@ class Freesiem_Deep_Scanner
 		}
 
 		if (isset($state['findings'][$key])) {
-			return;
+			return false;
 		}
 
 		$cap = empty($state['full']) ? self::MAX_FINDINGS : self::MAX_FINDINGS_FULL;
@@ -1884,13 +2054,86 @@ class Freesiem_Deep_Scanner
 			$state['partial'] = true;
 			$state['partial_reason'] = $state['partial_reason'] ?: 'finding_cap';
 
-			return;
+			return false;
 		}
 
 		$finding['severity'] = freesiem_sentinel_normalize_severity((string) ($finding['severity'] ?? 'info'));
 		$finding['detected_at'] = freesiem_sentinel_get_iso8601_time();
 		$finding['evidence'] = is_array($finding['evidence'] ?? null) ? $finding['evidence'] : [];
 		$state['findings'][$key] = $finding;
+
+		return true;
+	}
+
+	/**
+	 * If we are mid-scan on a file inside freeSIEM Sentinel's own directory that
+	 * is not in our release manifest, rewrite whatever finding was raised against
+	 * it into a single, honestly-worded "unrecognized file inside freeSIEM
+	 * Sentinel" finding. Collapsing to one stable finding_key per path also means
+	 * three signature matches on the same fixture produce one finding, not three.
+	 */
+	private function reframe_self_finding(array $finding): array
+	{
+		$ctx = $this->self_file_context;
+
+		if ($ctx === null) {
+			return $finding;
+		}
+
+		$rel = (string) ($finding['evidence']['path'] ?? '');
+
+		if ($rel === '' || $rel !== $ctx['rel']) {
+			return $finding;
+		}
+
+		$version = defined('FREESIEM_SENTINEL_VERSION') ? (string) FREESIEM_SENTINEL_VERSION : '';
+		$self_rel = $ctx['self_rel'];
+		$looks_dev = (bool) preg_match('~(^|/)(tests?|dist|node_modules|\.github)(/|$)~', $self_rel)
+			|| str_ends_with($self_rel, '.md');
+
+		$evidence = is_array($finding['evidence'] ?? null) ? $finding['evidence'] : [];
+		$evidence['self_unrecognized'] = true;
+		$evidence['self_relative_path'] = $self_rel;
+		$evidence['release_version'] = $version;
+		$evidence['looks_like_dev_copy'] = $looks_dev;
+
+		if (!empty($finding['title'])) {
+			$evidence['original_title'] = (string) $finding['title'];
+		}
+
+		if (!empty($finding['evidence']['signature_id'])) {
+			$evidence['matched_signature'] = (string) $finding['evidence']['signature_id'];
+		}
+
+		$description = sprintf(
+			'%s sits inside the freeSIEM Sentinel plugin directory but is not part of the official freeSIEM Sentinel%s release. %s',
+			$rel,
+			$version !== '' ? ' ' . $version : '',
+			$looks_dev
+				? 'The path (tests/, dist/, a .md file, ...) is one the release build strips out, so this install was almost certainly copied from a development tree rather than installed from the release zip. freeSIEM Sentinel\'s own test fixtures deliberately contain malware-shaped strings to exercise the scanner.'
+				: 'It is not a file the release ships and not one our detection code recognises.'
+		);
+
+		$recommendation = $looks_dev
+			? sprintf(
+				'If you deployed a development copy, reinstall freeSIEM Sentinel from the release zip (or delete the development-only files: %s and any tests/, dist/ or *.md paths under wp-content/plugins/%s/). If you did NOT put this file here, treat it as planted: quarantine it and review access logs.',
+				$rel,
+				defined('FREESIEM_SENTINEL_SLUG') ? (string) FREESIEM_SENTINEL_SLUG : 'freesiem-sentinel'
+			)
+			: sprintf(
+				'A file that is neither shipped by freeSIEM Sentinel nor recognised by it is sitting in our plugin directory. If you did not add it deliberately, quarantine it, reinstall freeSIEM Sentinel from a clean copy, and review access logs for how it arrived.'
+			);
+
+		return [
+			'finding_key' => 'deep_self_unrecognized_' . md5($rel),
+			'category' => 'plugin_integrity',
+			'severity' => $looks_dev ? 'medium' : (string) ($finding['severity'] ?? 'high'),
+			'title' => __('Unrecognized file in freeSIEM Sentinel\'s directory', 'freesiem-sentinel'),
+			'description' => $description,
+			'recommendation' => $recommendation,
+			'evidence' => $evidence,
+			'score' => $looks_dev ? 60 : (int) ($finding['score'] ?? 40),
+		];
 	}
 
 	private function snippet(string $contents, int $offset): string

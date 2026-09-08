@@ -72,6 +72,9 @@ class Freesiem_Admin
 		add_action('admin_post_freesiem_sentinel_clear_logs', [$this, 'handle_clear_logs']);
 		add_action('admin_post_freesiem_sentinel_save_rustfs_settings', [$this, 'handle_save_rustfs_settings']);
 		add_action('admin_post_freesiem_sentinel_test_rustfs_connection', [$this, 'handle_test_rustfs_connection']);
+		add_action('admin_post_freesiem_sentinel_quarantine_file', [$this, 'handle_quarantine_file']);
+		add_action('admin_post_freesiem_sentinel_delete_file', [$this, 'handle_delete_file']);
+		add_action('admin_post_freesiem_sentinel_restore_file', [$this, 'handle_restore_file']);
 		add_action('wp_ajax_freesiem_sentinel_deep_scan_tick', [$this, 'handle_deep_scan_tick']);
 		add_action('wp_login_failed', [$this, 'handle_login_failed_event'], 10, 2);
 		add_action('wp_login', [$this, 'handle_login_success_event'], 10, 2);
@@ -796,6 +799,117 @@ class Freesiem_Admin
 		$this->plugin->clear_scan_results();
 		freesiem_sentinel_set_notice('success', __('Stored scan results were cleared.', 'freesiem-sentinel'));
 		$this->redirect_to_page('freesiem-scan');
+	}
+
+	/**
+	 * The relative path carried by the finding whose reference was POSTed, so a
+	 * file action can only ever touch a path that actually appears in a finding.
+	 */
+	private function posted_finding_path(): array
+	{
+		$reference = isset($_POST['finding']) ? sanitize_text_field(wp_unslash((string) $_POST['finding'])) : '';
+		$cache = $this->plugin->get_results()->get_cache();
+		$findings = array_values(freesiem_sentinel_safe_array($cache['local_findings'] ?? []));
+		$finding = $reference !== '' ? $this->find_finding_by_reference($findings, $reference) : null;
+		$path = is_array($finding) ? freesiem_sentinel_safe_string($finding['evidence']['path'] ?? '') : '';
+
+		return ['reference' => $reference, 'path' => $path];
+	}
+
+	private function redirect_after_file_action(string $reference): void
+	{
+		$args = ['show_results' => '1'];
+
+		if ($reference !== '') {
+			$args['finding'] = $reference;
+		}
+
+		$this->redirect_to_page('freesiem-scan', $args);
+	}
+
+	public function handle_quarantine_file(): void
+	{
+		$this->assert_manage_permissions();
+		freesiem_sentinel_require_admin_post_nonce();
+
+		if (!Freesiem_File_Actions::can_act()) {
+			freesiem_sentinel_set_notice('error', __('File actions are disabled on this site.', 'freesiem-sentinel'));
+			$this->redirect_to_page('freesiem-scan', ['show_results' => '1']);
+		}
+
+		['reference' => $reference, 'path' => $path] = $this->posted_finding_path();
+
+		if ($path === '') {
+			freesiem_sentinel_set_notice('error', __('That finding is no longer available.', 'freesiem-sentinel'));
+			$this->redirect_to_page('freesiem-scan', ['show_results' => '1']);
+		}
+
+		$result = Freesiem_File_Actions::quarantine($path);
+
+		freesiem_sentinel_set_notice(
+			is_wp_error($result) ? 'error' : 'success',
+			is_wp_error($result)
+				? $result->get_error_message()
+				: sprintf(__('Moved %s to quarantine. Re-run the scan to confirm it is gone.', 'freesiem-sentinel'), $path)
+		);
+		$this->redirect_after_file_action($reference);
+	}
+
+	public function handle_delete_file(): void
+	{
+		$this->assert_manage_permissions();
+		freesiem_sentinel_require_admin_post_nonce();
+
+		if (!Freesiem_File_Actions::can_act()) {
+			freesiem_sentinel_set_notice('error', __('File actions are disabled on this site.', 'freesiem-sentinel'));
+			$this->redirect_to_page('freesiem-scan', ['show_results' => '1']);
+		}
+
+		$quarantine_id = isset($_POST['quarantine_id']) ? sanitize_text_field(wp_unslash((string) $_POST['quarantine_id'])) : '';
+
+		if ($quarantine_id !== '') {
+			$result = Freesiem_File_Actions::delete($quarantine_id);
+			freesiem_sentinel_set_notice(
+				is_wp_error($result) ? 'error' : 'success',
+				is_wp_error($result) ? $result->get_error_message() : __('Quarantined copy permanently deleted.', 'freesiem-sentinel')
+			);
+			$this->redirect_to_page('freesiem-scan', ['show_results' => '1']);
+		}
+
+		['reference' => $reference, 'path' => $path] = $this->posted_finding_path();
+
+		if ($path === '') {
+			freesiem_sentinel_set_notice('error', __('That finding is no longer available.', 'freesiem-sentinel'));
+			$this->redirect_to_page('freesiem-scan', ['show_results' => '1']);
+		}
+
+		$result = Freesiem_File_Actions::delete($path);
+
+		freesiem_sentinel_set_notice(
+			is_wp_error($result) ? 'error' : 'success',
+			is_wp_error($result) ? $result->get_error_message() : sprintf(__('Deleted %s.', 'freesiem-sentinel'), $path)
+		);
+		$this->redirect_after_file_action(is_wp_error($result) ? $reference : '');
+	}
+
+	public function handle_restore_file(): void
+	{
+		$this->assert_manage_permissions();
+		freesiem_sentinel_require_admin_post_nonce();
+
+		if (!Freesiem_File_Actions::can_act()) {
+			freesiem_sentinel_set_notice('error', __('File actions are disabled on this site.', 'freesiem-sentinel'));
+			$this->redirect_to_page('freesiem-scan', ['show_results' => '1']);
+		}
+
+		$id = isset($_POST['quarantine_id']) ? sanitize_text_field(wp_unslash((string) $_POST['quarantine_id'])) : '';
+		$result = $id !== '' ? Freesiem_File_Actions::restore($id) : new WP_Error('freesiem_no_id', __('No quarantine item was specified.', 'freesiem-sentinel'));
+
+		freesiem_sentinel_set_notice(
+			is_wp_error($result) ? 'error' : 'success',
+			is_wp_error($result) ? $result->get_error_message() : __('File restored to its original location.', 'freesiem-sentinel')
+		);
+		$this->redirect_to_page('freesiem-scan', ['show_results' => '1']);
 	}
 
 	public function handle_start_cloud_connect(): void
@@ -3334,6 +3448,16 @@ class Freesiem_Admin
 		echo '<p><span style="' . esc_attr($this->severity_badge_style($severity)) . '">' . esc_html(strtoupper($severity)) . '</span></p>';
 		echo '<h2 style="margin-top:0;">' . esc_html(freesiem_sentinel_safe_string($finding['title'] ?? '')) . '</h2>';
 		echo '<p>' . esc_html(freesiem_sentinel_safe_string($finding['description'] ?? '')) . '</p>';
+
+		$explainer = $this->finding_explainer($finding);
+
+		if ($explainer !== '') {
+			echo '<div style="margin:0 0 18px;padding:14px 16px;background:#f0f6fc;border:1px solid #c3d9ed;border-left:4px solid #2271b1;border-radius:8px;">';
+			echo '<strong style="display:block;margin-bottom:4px;">' . esc_html__('Why this matters', 'freesiem-sentinel') . '</strong>';
+			echo '<span style="color:#1d2327;">' . esc_html($explainer) . '</span>';
+			echo '</div>';
+		}
+
 		echo '<table class="form-table" role="presentation">';
 		$this->render_detail_row(__('Finding Key', 'freesiem-sentinel'), freesiem_sentinel_safe_string($finding['finding_key'] ?? ''));
 		$this->render_detail_row(__('Category', 'freesiem-sentinel'), freesiem_sentinel_safe_string($finding['category'] ?? ''));
@@ -3343,6 +3467,29 @@ class Freesiem_Admin
 		$this->render_detail_row(__('Source', 'freesiem-sentinel'), $this->derive_finding_source($finding));
 		if ($path !== '') {
 			$this->render_detail_row(__('Path', 'freesiem-sentinel'), $path);
+
+			$recorded_size = $evidence['size'] ?? ($evidence['current_size'] ?? null);
+
+			if (is_numeric($recorded_size)) {
+				$this->render_detail_row(__('File size (at scan time)', 'freesiem-sentinel'), size_format((int) $recorded_size) . ' (' . number_format_i18n((int) $recorded_size) . ' bytes)');
+			}
+
+			$live_abs = Freesiem_File_Actions::resolve($path);
+
+			if (is_wp_error($live_abs)) {
+				$this->render_detail_row(__('On disk now', 'freesiem-sentinel'), $live_abs->get_error_code() === 'freesiem_missing'
+					? __('No longer present', 'freesiem-sentinel')
+					: sprintf(__('Present (%s)', 'freesiem-sentinel'), $live_abs->get_error_message()));
+			} else {
+				$live_size = (int) @filesize($live_abs);
+				$this->render_detail_row(__('On disk now', 'freesiem-sentinel'), sprintf(
+					/* translators: 1: human size 2: byte count 3: modified date */
+					__('%1$s (%2$s bytes), modified %3$s', 'freesiem-sentinel'),
+					size_format($live_size),
+					number_format_i18n($live_size),
+					freesiem_sentinel_format_datetime(gmdate('c', (int) @filemtime($live_abs)))
+				));
+			}
 		}
 		if (!empty($evidence['change_type'])) {
 			$this->render_detail_row(__('Change Type', 'freesiem-sentinel'), strtoupper(freesiem_sentinel_safe_string($evidence['change_type'] ?? '')));
@@ -3373,6 +3520,11 @@ class Freesiem_Admin
 			$this->render_detail_row(__('Actual MD5', 'freesiem-sentinel'), freesiem_sentinel_safe_string($evidence['actual_md5'] ?? ''));
 		}
 		echo '</table>';
+
+		if ($path !== '') {
+			$this->render_finding_file_actions($finding, $path);
+		}
+
 		if (!empty($evidence['snippet'])) {
 			echo '<h3>' . esc_html__('Matched Content', 'freesiem-sentinel') . '</h3>';
 			echo '<pre style="white-space:pre-wrap;overflow:auto;background:#1d2327;color:#f0f0f1;padding:12px;border-radius:8px;">' . esc_html(freesiem_sentinel_safe_string($evidence['snippet'])) . '</pre>';
@@ -3389,6 +3541,187 @@ class Freesiem_Admin
 	private function render_detail_row(string $label, string $value): void
 	{
 		echo '<tr><th scope="row">' . esc_html(freesiem_sentinel_safe_string($label)) . '</th><td>' . esc_html(freesiem_sentinel_safe_string($value)) . '</td></tr>';
+	}
+
+	/**
+	 * Plain-language background for a finding: what the flagged thing is and why
+	 * a scanner cares, keyed off the signature / category / filename so the admin
+	 * is not left to look it up.
+	 */
+	private function finding_explainer(array $finding): string
+	{
+		$evidence = freesiem_sentinel_safe_array($finding['evidence'] ?? []);
+		$category = strtolower(freesiem_sentinel_safe_string($finding['category'] ?? ''));
+		$signature = strtolower(freesiem_sentinel_safe_string($evidence['signature_id'] ?? ''));
+		$path = strtolower(freesiem_sentinel_safe_string($evidence['path'] ?? ''));
+		$ext = strtolower((string) pathinfo($path, PATHINFO_EXTENSION));
+		$reasons = array_map('strtolower', array_map('freesiem_sentinel_safe_string', freesiem_sentinel_safe_array($evidence['reasons'] ?? [])));
+		$reason_text = implode(' ', $reasons);
+
+		if (!empty($evidence['self_unrecognized']) || !empty($evidence['unrecognized_files'])) {
+			return __('freeSIEM Sentinel checksums every file it ships (checksums.json). A byte-perfect copy of its own code is trusted and skipped. This file is inside our plugin folder but is NOT in that manifest — so either a development copy of the plugin was deployed (the release build strips tests/, dist/ and *.md, and our test fixtures deliberately contain malware-shaped strings), or someone dropped a file into our directory. A stranger file inside a trusted plugin is a classic hiding spot for a web shell, which is why it is surfaced rather than ignored.', 'freesiem-sentinel');
+		}
+
+		if ($ext === 'sql' || str_contains($reason_text, 'database dump')) {
+			return __('A .sql file is a database dump — a plain-text copy of part or all of the site database: user accounts, hashed passwords, secret keys, orders, personal data. If it sits in a web-reachable folder, anyone who guesses the URL can download the whole thing. These files are normally left behind by a backup plugin, a migration/staging tool, or a manual export, and should be moved out of the web root (or deleted) once you no longer need them. An empty one exposes nothing, but still should not be there.', 'freesiem-sentinel');
+		}
+
+		if (str_contains($signature, 'eval') || str_contains($signature, 'encoded') || str_contains($signature, 'base64')) {
+			return __('This code decodes a hidden string (base64 / gzip / hex) and immediately executes it with eval() or a similar call. Legitimate plugins almost never need to hide code from you this way; attackers do it constantly so a shell reads as gibberish and slips past a casual look. Treat any file you cannot personally account for that does this as a live backdoor.', 'freesiem-sentinel');
+		}
+
+		if (str_contains($signature, 'polyglot') || (str_contains($reason_text, 'php') && in_array($ext, ['jpg', 'jpeg', 'png', 'gif', 'webp', 'ico'], true))) {
+			return __('This file carries an image header but also contains runnable PHP — a "polyglot". Uploading a real image that is secretly executable is a common way to get code onto a site through an avatar or media upload form, then run it by requesting the file directly.', 'freesiem-sentinel');
+		}
+
+		if (str_contains($signature, 'htaccess') || str_contains($path, '.htaccess')) {
+			return __('An .htaccess file changes how Apache serves a folder. Malware uses it to make normally-inert file types (.jpg, .txt) execute as PHP, to hide URLs, or to redirect your visitors to another site. Review every directive against what that folder legitimately needs.', 'freesiem-sentinel');
+		}
+
+		if (str_contains($reason_text, 'uploads')) {
+			return __('The uploads folder is for media — it should never contain executable PHP. A .php file here almost always means an upload form was abused to plant one. Anything runnable in uploads should be treated as hostile until proven otherwise.', 'freesiem-sentinel');
+		}
+
+		if (str_contains($reason_text, 'web shell') || str_contains($signature, 'webshell') || str_contains($signature, 'shell')) {
+			return __('A web shell is a small script that lets a remote attacker run commands, browse files, and upload more malware through a normal web request — a remote-control panel for your server. They are often named to blend in (e.g. wp-info.php, class-wp.php) and are the usual payload left behind after a break-in.', 'freesiem-sentinel');
+		}
+
+		if (in_array($ext, ['bak', 'old', 'orig', 'save', 'swp'], true) || str_contains($path, 'wp-config')) {
+			return __('Backup and editor temp copies of PHP files (.bak, .old, ~, .swp) are served as plain text, not executed — so a backup of wp-config.php hands out your database password and secret keys to anyone who requests it. Keep backups outside the web root.', 'freesiem-sentinel');
+		}
+
+		if (in_array($ext, ['zip', 'tar', 'gz', 'tgz', 'bz2', 'xz', '7z', 'rar'], true)) {
+			return __('A publicly-reachable archive in the web root often contains a full copy of the site (code and configuration). If it is not something you deliberately published for download, remove it — and check whether it exposes wp-config.php or a database dump inside.', 'freesiem-sentinel');
+		}
+
+		if ($category === 'plugin_integrity' || $category === 'file_integrity' || $category === 'core') {
+			return __('This file does not match the known-good checksum for its version. That is expected right after you edit a file yourself; if you did not, it means something changed the code on disk — a compromised update, a planted change, or a failed deploy — and the affected component should be reinstalled from a clean source.', 'freesiem-sentinel');
+		}
+
+		if ($category === 'database') {
+			return __('This finding is about data stored in the WordPress database rather than a file — an injected admin user, a malicious scheduled task, spam URLs in post content, or a rogue option. Database malware survives reinstalling files, so it has to be cleaned separately.', 'freesiem-sentinel');
+		}
+
+		return '';
+	}
+
+	/**
+	 * View / quarantine / delete / restore controls for the file a finding
+	 * points at. Gated on Freesiem_File_Actions::can_act().
+	 */
+	private function render_finding_file_actions(array $finding, string $path): void
+	{
+		if (!Freesiem_File_Actions::can_act()) {
+			return;
+		}
+
+		$reference = freesiem_sentinel_safe_string($finding['_reference'] ?? '');
+		$resolved = Freesiem_File_Actions::resolve($path);
+		$records = Freesiem_File_Actions::records();
+		$quarantined_id = '';
+
+		foreach ($records as $id => $record) {
+			if (freesiem_sentinel_safe_string($record['relative_path'] ?? '') === ltrim($path, '/')) {
+				$quarantined_id = (string) $id;
+				break;
+			}
+		}
+
+		echo '<h3>' . esc_html__('File actions', 'freesiem-sentinel') . '</h3>';
+
+		if ($quarantined_id !== '') {
+			echo '<p>' . esc_html__('This file is currently in quarantine (moved out of the web root, kept so it can be restored).', 'freesiem-sentinel') . '</p>';
+			echo '<div style="display:flex;gap:10px;flex-wrap:wrap;">';
+			echo '<form method="post" action="' . esc_url(admin_url('admin-post.php')) . '" onsubmit="return confirm(\'' . esc_js(__('Move this file back to its original location?', 'freesiem-sentinel')) . '\');">';
+			echo '<input type="hidden" name="action" value="freesiem_sentinel_restore_file" />';
+			echo '<input type="hidden" name="quarantine_id" value="' . esc_attr($quarantined_id) . '" />';
+			wp_nonce_field(FREESIEM_SENTINEL_NONCE_ACTION);
+			echo '<button type="submit" class="button button-secondary">' . esc_html__('Restore file', 'freesiem-sentinel') . '</button>';
+			echo '</form>';
+			echo '<form method="post" action="' . esc_url(admin_url('admin-post.php')) . '" onsubmit="return confirm(\'' . esc_js(__('Permanently delete the quarantined copy? This cannot be undone.', 'freesiem-sentinel')) . '\');">';
+			echo '<input type="hidden" name="action" value="freesiem_sentinel_delete_file" />';
+			echo '<input type="hidden" name="quarantine_id" value="' . esc_attr($quarantined_id) . '" />';
+			wp_nonce_field(FREESIEM_SENTINEL_NONCE_ACTION);
+			echo '<button type="submit" class="button button-link-delete" style="color:#b32d2e;">' . esc_html__('Delete quarantined copy', 'freesiem-sentinel') . '</button>';
+			echo '</form>';
+			echo '</div>';
+
+			return;
+		}
+
+		if (is_wp_error($resolved)) {
+			echo '<p style="color:#646970;">' . esc_html(sprintf(
+				/* translators: %s: reason */
+				__('No file actions available: %s', 'freesiem-sentinel'),
+				$resolved->get_error_message()
+			)) . '</p>';
+
+			return;
+		}
+
+		$viewing = isset($_GET['view_file']) && $_GET['view_file'] === '1';
+		$detail_url = $this->build_scan_url(['show_results' => '1', 'finding' => $reference]);
+
+		echo '<div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:12px;">';
+
+		if ($viewing) {
+			echo '<a class="button button-secondary" href="' . esc_url($detail_url . '#freesiem-results-section') . '">' . esc_html__('Hide file contents', 'freesiem-sentinel') . '</a>';
+		} else {
+			echo '<a class="button button-secondary" href="' . esc_url(add_query_arg('view_file', '1', $detail_url) . '#freesiem-file-view') . '">' . esc_html__('View file contents', 'freesiem-sentinel') . '</a>';
+		}
+
+		echo '<form method="post" action="' . esc_url(admin_url('admin-post.php')) . '" onsubmit="return confirm(\'' . esc_js(__('Move this file into quarantine? It leaves the web root but can be restored.', 'freesiem-sentinel')) . '\');">';
+		echo '<input type="hidden" name="action" value="freesiem_sentinel_quarantine_file" />';
+		echo '<input type="hidden" name="finding" value="' . esc_attr($reference) . '" />';
+		wp_nonce_field(FREESIEM_SENTINEL_NONCE_ACTION);
+		echo '<button type="submit" class="button button-primary">' . esc_html__('Quarantine file', 'freesiem-sentinel') . '</button>';
+		echo '</form>';
+
+		echo '<form method="post" action="' . esc_url(admin_url('admin-post.php')) . '" onsubmit="return confirm(\'' . esc_js(__('Permanently delete this file? This cannot be undone. Quarantine instead if you are not sure.', 'freesiem-sentinel')) . '\');">';
+		echo '<input type="hidden" name="action" value="freesiem_sentinel_delete_file" />';
+		echo '<input type="hidden" name="finding" value="' . esc_attr($reference) . '" />';
+		wp_nonce_field(FREESIEM_SENTINEL_NONCE_ACTION);
+		echo '<button type="submit" class="button button-link-delete" style="color:#b32d2e;">' . esc_html__('Delete file', 'freesiem-sentinel') . '</button>';
+		echo '</form>';
+
+		echo '</div>';
+
+		if (!$viewing) {
+			return;
+		}
+
+		$view = Freesiem_File_Actions::read_for_display($path);
+
+		echo '<div id="freesiem-file-view">';
+
+		if (is_wp_error($view)) {
+			echo '<p style="color:#b32d2e;">' . esc_html($view->get_error_message()) . '</p>';
+			echo '</div>';
+
+			return;
+		}
+
+		$notes = [];
+
+		if (!empty($view['masked'])) {
+			$notes[] = __('secret values masked', 'freesiem-sentinel');
+		}
+
+		if (!empty($view['truncated'])) {
+			$shown = $view['type'] === 'binary' ? Freesiem_File_Actions::MAX_BINARY_VIEW_BYTES : Freesiem_File_Actions::MAX_VIEW_BYTES;
+			$notes[] = sprintf(__('showing the first %s of %s', 'freesiem-sentinel'), size_format($shown), size_format((int) $view['bytes']));
+		}
+
+		if ($view['type'] === 'binary') {
+			$notes[] = __('binary file, shown as a hex dump', 'freesiem-sentinel');
+		}
+
+		if ($notes !== []) {
+			echo '<p style="color:#646970;margin-bottom:6px;">' . esc_html(ucfirst(implode('; ', $notes))) . '.</p>';
+		}
+
+		echo '<pre style="white-space:pre-wrap;overflow:auto;max-height:520px;background:#1d2327;color:#f0f0f1;padding:12px;border-radius:8px;font-size:12px;line-height:1.5;">' . esc_html((string) $view['content']) . '</pre>';
+		echo '</div>';
 	}
 
 	private function derive_finding_source(array $finding): string

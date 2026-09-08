@@ -339,6 +339,24 @@ function synchyInstallerBuildCleanupTargets(string $wordpressRoot, string $packa
 		];
 	}
 
+	$configBackupDir = synchyInstallerPath($wordpressRoot, 'synchy-config-backups');
+
+	if (synchyInstallerExists($configBackupDir)) {
+		$targets[] = [
+			'label' => 'wp-config.php backups (recovery copies — only remove once the site is verified)',
+			'path' => $configBackupDir,
+			'type' => 'dir',
+		];
+	}
+
+	foreach (glob(synchyInstallerPath($wordpressRoot, 'wp-config.php.synchy-*.bak')) ?: [] as $legacyBackup) {
+		$targets[] = [
+			'label' => 'Exposed wp-config.php backup in the site root — delete this',
+			'path' => $legacyBackup,
+			'type' => 'file',
+		];
+	}
+
 	if (synchyInstallerExists($installerPath)) {
 		$targets[] = [
 			'label' => 'installer.php',
@@ -396,6 +414,40 @@ function synchyInstallerEnsureDirectory(string $path): void
 	if (!@mkdir($path, 0755, true) && !is_dir($path)) {
 		throw new RuntimeException('Could not create directory: ' . $path);
 	}
+}
+
+/**
+ * A folder under the WordPress root where the installer keeps the pre-update
+ * copy of wp-config.php, sealed off from the web (Apache, LiteSpeed and IIS).
+ * Returns the directory path, or '' if it could not be created/hardened.
+ */
+function synchyInstallerConfigBackupDir(string $wordpressRoot): string
+{
+	$dir = synchyInstallerPath($wordpressRoot, 'synchy-config-backups');
+
+	if (!is_dir($dir) && !@mkdir($dir, 0700, true) && !is_dir($dir)) {
+		return '';
+	}
+
+	@chmod($dir, 0700);
+
+	$guards = [
+		'.htaccess' => "Require all denied\n<IfModule !mod_authz_core.c>\nOrder allow,deny\nDeny from all\n</IfModule>\n",
+		'index.php' => "<?php // Silence is golden.\n",
+		'web.config' => "<configuration>\n<system.webServer>\n<authorization>\n<deny users=\"*\" />\n</authorization>\n</system.webServer>\n</configuration>\n",
+	];
+
+	foreach ($guards as $name => $body) {
+		$path = synchyInstallerPath($dir, $name);
+
+		if (!file_exists($path)) {
+			@file_put_contents($path, $body, LOCK_EX);
+		}
+	}
+
+	// If the deny rules did not get written, a config backup here would still be
+	// fetchable — better to fall back to the (equally exposed) root than pretend.
+	return file_exists(synchyInstallerPath($dir, '.htaccess')) ? $dir : '';
 }
 
 function synchyInstallerWriteMaintenanceFile(string $root): void
@@ -1200,18 +1252,31 @@ function synchyInstallerUpdateWpConfig(string $wordpressRoot, string $extractDir
 			throw new RuntimeException('wp-config.php is not writable, so Backup & Restore cannot update the destination database credentials.');
 		}
 
-		$backup_path = $config_path . '.synchy-' . date('Ymd-His') . '.bak';
+		$backup_name = 'wp-config.php.synchy-' . date('Ymd-His') . '.bak';
+		$backup_dir = synchyInstallerConfigBackupDir($wordpressRoot);
+		$root_backup_path = synchyInstallerPath($wordpressRoot, $backup_name);
+		$backup_path = $backup_dir !== '' ? synchyInstallerPath($backup_dir, $backup_name) : $root_backup_path;
 
 		if (!@copy($config_path, $backup_path)) {
-			throw new RuntimeException('Could not create a backup of wp-config.php before updating it.');
+			// The private folder write failed — fall back to the site root.
+			$backup_path = $root_backup_path;
+
+			if (!@copy($config_path, $backup_path)) {
+				throw new RuntimeException('Could not create a backup of wp-config.php before updating it.');
+			}
 		}
+
+		@chmod($backup_path, 0600);
+		$backup_protected = $backup_path !== $root_backup_path;
 
 		if (@file_put_contents($config_path, $contents, LOCK_EX) === false) {
 			throw new RuntimeException('Could not write the updated database credentials into wp-config.php.');
 		}
 
 		$messages[] = 'Updated wp-config.php to use database ' . $config['name'] . ' at ' . $config['host'] . ' (prefix ' . $config['prefix'] . ').';
-		$messages[] = 'Created a wp-config.php backup at ' . $backup_path . '.';
+		$messages[] = $backup_protected
+			? 'Saved the previous wp-config.php to a web-protected folder: ' . $backup_path . '. Delete it once the destination is verified.'
+			: 'WARNING: saved the previous wp-config.php to ' . $backup_path . ', which may be reachable over the web. Move or delete it now — it contains database credentials and secret keys.';
 		return;
 	}
 
@@ -1579,7 +1644,7 @@ a{color:#1e7bc8}
 	<?php if ($restore_complete && !$cleanup_complete) : ?>
 		<div class="card stack">
 			<h2>Cleanup Files</h2>
-			<p>Use the button below to remove the temporary Backup & Restore files from this destination. Backup & Restore keeps any <code>wp-config.php.synchy-*.bak</code> backup file in place so you can recover it manually if needed.</p>
+			<p>Use the button below to remove the temporary Backup &amp; Restore files from this destination. The pre-update copy of <code>wp-config.php</code> is kept in a web-protected <code>synchy-config-backups/</code> folder so you can recover it manually; the cleanup list includes it (and any older exposed <code>wp-config.php.synchy-*.bak</code> in the site root) so you can remove it once the destination is verified.</p>
 			<?php if ($cleanup_targets === []) : ?>
 				<div class="notice info">No Backup & Restore cleanup files were found at this location.</div>
 			<?php else : ?>
