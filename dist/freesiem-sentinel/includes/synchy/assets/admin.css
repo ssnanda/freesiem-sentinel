@@ -2178,21 +2178,23 @@
 	display: flex;
 	flex-wrap: wrap;
 	justify-content: flex-end;
-	gap: 8px;
+	gap: 10px;
 	margin-bottom: 20px;
 }
 
 .synchy-quick-link {
 	position: relative;
-	border: 1px solid #e3e9e5;
+	border: 1px solid #c3c4c7;
 	border-radius: 8px;
-	background: #f6f8f7;
+	background: #ffffff;
+	box-shadow: 0 1px 2px rgba(16, 24, 40, 0.06);
 }
 
 /* Pushes itself to the far left while the rest of the row (justify-content: flex-end) stays
    grouped together on the right -- keeps Export History visually separate from the how-to links. */
 .synchy-quick-link--history {
 	margin-right: auto;
+	border-color: #2271b1;
 }
 
 .synchy-quick-link--history .synchy-quick-link__body {
@@ -2203,14 +2205,18 @@
 .synchy-quick-link > summary {
 	display: flex;
 	align-items: center;
-	gap: 6px;
-	padding: 6px 12px;
+	gap: 8px;
+	padding: 8px 14px;
 	list-style: none;
 	cursor: pointer;
-	color: #7c8a83;
-	font-size: 12px;
+	color: #1d2327;
+	font-size: 13px;
 	font-weight: 600;
 	white-space: nowrap;
+}
+
+.synchy-quick-link--history > summary {
+	color: #135e96;
 }
 
 .synchy-quick-link > summary::-webkit-details-marker {
@@ -2220,31 +2226,38 @@
 .synchy-quick-link > summary::after {
 	content: "\25be";
 	flex-shrink: 0;
-	color: #a4b0aa;
+	font-size: 11px;
+	color: #50575e;
 	transition: transform 120ms ease, color 120ms ease;
 }
 
 .synchy-quick-link:hover {
-	border-color: #ccd6d0;
-	background: #ffffff;
+	border-color: #2271b1;
+	background: #f2f8fd;
 }
 
 .synchy-quick-link:hover > summary,
 .synchy-quick-link:hover > summary::after {
-	color: #12323b;
+	color: #135e96;
+}
+
+.synchy-quick-link:focus-within {
+	border-color: #2271b1;
+	box-shadow: 0 0 0 2px rgba(34, 113, 177, 0.35);
 }
 
 .synchy-quick-link[open] {
-	border-color: #ccd6d0;
+	border-color: #2271b1;
 	background: #ffffff;
+	box-shadow: 0 1px 2px rgba(16, 24, 40, 0.12);
 }
 
-.synchy-quick-link[open] > summary {
-	color: #12323b;
+.synchy-quick-link[open] > summary,
+.synchy-quick-link[open] > summary::after {
+	color: #135e96;
 }
 
 .synchy-quick-link[open] > summary::after {
-	color: #12323b;
 	transform: rotate(180deg);
 }
 
