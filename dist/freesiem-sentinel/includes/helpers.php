@@ -80,6 +80,7 @@ function freesiem_sentinel_get_default_settings(): array
 		],
 		'deep_scan_weekly_enabled' => 1,
 		'deep_scan_weekly_day' => -1,
+		'report_primary_email' => '',
 		'scan_email_recipients' => '',
 		'scan_email_on_weekly' => 1,
 		'summary_cache' => [
@@ -446,6 +447,7 @@ function freesiem_sentinel_sanitize_settings(array $settings): array
 	$settings['deep_scan_weekly_enabled'] = empty($settings['deep_scan_weekly_enabled']) ? 0 : 1;
 	$settings['deep_scan_weekly_day'] = in_array((int) ($settings['deep_scan_weekly_day'] ?? -1), [-1, 0, 1, 2, 3, 4, 5, 6], true) ? (int) $settings['deep_scan_weekly_day'] : -1;
 	$settings['scan_email_on_weekly'] = empty($settings['scan_email_on_weekly']) ? 0 : 1;
+	$settings['report_primary_email'] = sanitize_email((string) ($settings['report_primary_email'] ?? ''));
 	$settings['scan_email_recipients'] = implode(', ', array_slice(array_values(array_unique(array_filter(array_map(
 		'sanitize_email',
 		preg_split('/[\s,;]+/', (string) ($settings['scan_email_recipients'] ?? '')) ?: []
@@ -4987,7 +4989,13 @@ function freesiem_sentinel_array_get(array $data, string $key, $default = null)
 function freesiem_sentinel_scan_email_recipients(array $extra = []): array
 {
 	$configured = preg_split('/[\s,;]+/', (string) freesiem_sentinel_get_setting('scan_email_recipients', '')) ?: [];
-	$all = array_merge([(string) get_option('admin_email')], $configured, $extra);
+	$primary = (string) freesiem_sentinel_get_setting('report_primary_email', '');
+
+	if ($primary === '') {
+		$primary = (string) get_option('admin_email');
+	}
+
+	$all = array_merge([$primary], $configured, $extra);
 	$all = array_values(array_unique(array_filter(array_map('sanitize_email', $all))));
 
 	return $all;

@@ -658,6 +658,7 @@ class Freesiem_Admin
 			'deep_scan_weekly_enabled' => empty($_POST['deep_scan_weekly_enabled']) ? 0 : 1,
 			'deep_scan_weekly_day' => in_array((int) ($_POST['deep_scan_weekly_day'] ?? -1), [-1, 0, 1, 2, 3, 4, 5, 6], true) ? (int) $_POST['deep_scan_weekly_day'] : -1,
 			'scan_email_on_weekly' => empty($_POST['scan_email_on_weekly']) ? 0 : 1,
+			'report_primary_email' => isset($_POST['report_primary_email']) ? sanitize_email(wp_unslash((string) $_POST['report_primary_email'])) : '',
 			'scan_email_recipients' => isset($_POST['scan_email_recipients']) ? sanitize_textarea_field(wp_unslash((string) $_POST['scan_email_recipients'])) : '',
 		]);
 
@@ -1897,103 +1898,24 @@ class Freesiem_Admin
 			freesiem_sentinel_safe_array($summary),
 			freesiem_sentinel_safe_array($view['inventory']['scan_metrics'] ?? [])
 		);
-		$clear_results_url = freesiem_sentinel_admin_post_url('freesiem_sentinel_clear_results');
+		$results_url = $this->build_scan_url(['show_results' => '1']) . '#freesiem-results-section';
+		$severity_counts = array_merge(
+			['critical' => 0, 'high' => 0, 'medium' => 0, 'low' => 0, 'info' => 0],
+			freesiem_sentinel_safe_array($cache['severity_counts'] ?? [])
+		);
+		$has_scan = !empty($settings['last_local_scan_at']);
 
 		echo '<div class="wrap">';
 		echo '<h1>' . esc_html__('Scan', 'freesiem-sentinel') . '</h1>';
-		echo '<p>' . esc_html__('Configure a scan, run it, and investigate findings from one workflow.', 'freesiem-sentinel') . '</p>';
 
 		$this->render_deep_scan_progress();
 
-		echo '<div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;align-items:start;margin-bottom:20px;">';
-		echo '<div style="background:#fff;padding:18px 20px;border:1px solid #dcdcde;border-radius:16px;">';
-		echo '<h2 style="margin-top:0;">' . esc_html__('Scan Configuration', 'freesiem-sentinel') . '</h2>';
-		echo '<form method="post" action="' . esc_url(admin_url('admin-post.php')) . '">';
-		wp_nonce_field(FREESIEM_SENTINEL_NONCE_ACTION);
-		echo '<input type="hidden" name="action" value="freesiem_sentinel_run_configured_scan" />';
-		$intensity = in_array((string) ($prefs['scan_intensity'] ?? 'balanced'), ['gentle', 'balanced', 'thorough'], true) ? (string) $prefs['scan_intensity'] : 'balanced';
-		echo '<div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;">';
-		echo '<div>';
-		echo '<h3 style="margin:0 0 10px;font-size:16px;">' . esc_html__('Scan Modules', 'freesiem-sentinel') . '</h3>';
-		echo '<label style="display:block;margin-bottom:8px;font-size:14px;"><input type="checkbox" name="scan_wordpress" value="1"' . checked(!empty($prefs['scan_wordpress']), true, false) . ' /> ' . esc_html__('WordPress Configuration Scan', 'freesiem-sentinel') . '</label>';
-		echo '<label style="display:block;margin-bottom:8px;font-size:14px;"><input type="checkbox" name="scan_filesystem" value="1"' . checked(!empty($prefs['scan_filesystem']), true, false) . ' /> ' . esc_html__('Filesystem Heuristics', 'freesiem-sentinel') . '</label>';
-		echo '<label style="display:block;margin-bottom:8px;font-size:14px;"><input type="checkbox" name="scan_fim" value="1"' . checked(!empty($prefs['scan_fim']), true, false) . ' /> ' . esc_html__('File Integrity Monitoring', 'freesiem-sentinel') . '</label>';
-		echo '<label style="display:block;margin-bottom:8px;font-size:14px;"><input type="checkbox" name="scan_malware" value="1"' . checked(!empty($prefs['scan_malware']), true, false) . ' /> ' . esc_html__('Malware & web-shell signatures (reads file contents)', 'freesiem-sentinel') . '</label>';
-		echo '<label style="display:block;margin-bottom:8px;font-size:14px;"><input type="checkbox" name="scan_core_integrity" value="1"' . checked(!empty($prefs['scan_core_integrity']), true, false) . ' /> ' . esc_html__('WordPress core checksum verification', 'freesiem-sentinel') . '</label>';
-		echo '<label style="display:block;margin-bottom:8px;font-size:14px;"><input type="checkbox" name="scan_plugin_integrity" value="1"' . checked(!empty($prefs['scan_plugin_integrity']), true, false) . ' /> ' . esc_html__('Plugin checksum verification (WordPress.org)', 'freesiem-sentinel') . '</label>';
-		echo '<label style="display:block;margin-bottom:8px;font-size:14px;"><input type="checkbox" name="scan_database" value="1"' . checked(!empty($prefs['scan_database']), true, false) . ' /> ' . esc_html__('Database scan (users, options, cron, content)', 'freesiem-sentinel') . '</label>';
-		echo '<label style="display:block;"><input type="checkbox" name="scan_uploads_deep" value="1"' . checked(!empty($prefs['scan_uploads_deep']), true, false) . ' /> ' . esc_html__('Include the uploads directory in the deep scan', 'freesiem-sentinel') . '</label>';
-		echo '</div>';
-		echo '<div>';
-		echo '<h3 style="margin:0 0 10px;font-size:16px;">' . esc_html__('Advanced Options', 'freesiem-sentinel') . '</h3>';
-		echo '<p style="margin:0 0 10px;"><label>' . esc_html__('Scan intensity', 'freesiem-sentinel') . '<br /><select name="scan_intensity">';
-		foreach (['gentle' => __('Gentle — smallest footprint, slowest', 'freesiem-sentinel'), 'balanced' => __('Balanced (recommended)', 'freesiem-sentinel'), 'thorough' => __('Thorough — finishes sooner, more load', 'freesiem-sentinel')] as $value => $label) {
-			echo '<option value="' . esc_attr($value) . '"' . selected($intensity, $value, false) . '>' . esc_html($label) . '</option>';
-		}
-		echo '</select></label></p>';
-		echo '<p style="margin:0 0 6px;color:#50575e;font-size:12px;">' . esc_html__('The deep scan runs in short throttled batches in the background so it never overloads the site — intensity tunes batch size and the pause between batches.', 'freesiem-sentinel') . '</p>';
-		echo '<p style="margin:0 0 10px;"><label>' . esc_html__('Heuristic pass: max files', 'freesiem-sentinel') . '<br /><input type="number" min="100" max="200000" step="100" name="max_files" value="' . esc_attr(freesiem_sentinel_safe_string($prefs['max_files'] ?? '1000')) . '" /></label></p>';
-		echo '<p style="margin:0 0 10px;"><label>' . esc_html__('Directory depth limit', 'freesiem-sentinel') . '<br /><input type="number" min="1" max="20" step="1" name="max_depth" value="' . esc_attr(freesiem_sentinel_safe_string($prefs['max_depth'] ?? '5')) . '" /></label></p>';
-		echo '<p style="margin:0 0 10px;"><label>' . esc_html__('Exclude paths (one per line, relative to the WordPress root)', 'freesiem-sentinel') . '<br /><textarea name="exclude_paths" rows="3" class="large-text" placeholder="wp-content/uploads/cache">' . esc_textarea(implode("\n", array_map('freesiem_sentinel_safe_string', is_array($prefs['exclude_paths'] ?? null) ? $prefs['exclude_paths'] : []))) . '</textarea></label></p>';
-		echo '<p style="margin:0 0 10px;"><label><input type="checkbox" name="include_uploads" value="1"' . checked(!empty($prefs['include_uploads']), true, false) . ' /> ' . esc_html__('Include uploads in the heuristic pass', 'freesiem-sentinel') . '</label></p>';
-		$cloud_upload_on = !array_key_exists('cloud_upload', $prefs) || !empty($prefs['cloud_upload']);
-		echo '<p style="margin:0;"><label><input type="checkbox" name="cloud_upload" value="1"' . checked($cloud_upload_on, true, false) . ' /> ' . esc_html__('Upload results to freeSIEM Core (Cloud)', 'freesiem-sentinel') . '</label>';
-		echo '<span style="display:block;color:#50575e;font-size:12px;margin-top:2px;">' . esc_html__('Off = scan and store results on this site only. Turn off if freeSIEM Core is not set up to receive scans yet.', 'freesiem-sentinel') . '</span></p>';
-		echo '</div>';
-		echo '</div>';
-		echo '<p style="margin:16px 0 0;display:flex;gap:10px;flex-wrap:wrap;">';
-		echo '<button type="submit" class="button button-primary">' . esc_html__('Run Scan', 'freesiem-sentinel') . '</button>';
-		echo '<a class="button button-secondary" href="' . esc_url($this->build_scan_url(['show_results' => '1']) . '#freesiem-results-section') . '">' . esc_html__('View Scan Results', 'freesiem-sentinel') . '</a>';
-		echo '<a class="button button-secondary" onclick="return confirm(\''
-			. esc_js(__('Clear the stored scan results and findings?', 'freesiem-sentinel'))
-			. '\');" href="' . esc_url($clear_results_url) . '">' . esc_html__('Clear Results', 'freesiem-sentinel') . '</a>';
-		echo '</p>';
-		echo '</form>';
-		echo '</div>';
+		echo '<div class="fs-scan-layout" style="display:grid;grid-template-columns:minmax(0,1fr) 340px;gap:20px;align-items:start;margin-top:12px;">';
+		echo '<div>'; // ---- main column ----
 
-		echo '<div style="background:#fff;padding:18px 20px;border:1px solid #dcdcde;border-radius:16px;">';
-		echo '<h2 style="margin-top:0;">' . esc_html__('Scan Summary', 'freesiem-sentinel') . '</h2>';
-		if (empty($settings['last_local_scan_at'])) {
-			$this->render_empty_state(__('No scan has been run yet.', 'freesiem-sentinel'), __('Run your first scan to review findings, file changes, and summary metrics here.', 'freesiem-sentinel'));
-		} else {
-			echo '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;">';
-			$this->render_summary_stat(__('Last Scan Time', 'freesiem-sentinel'), freesiem_sentinel_format_datetime((string) ($settings['last_local_scan_at'] ?? '')));
-			$this->render_summary_stat(__('Overall Score', 'freesiem-sentinel'), $this->summary_value_or_fallback($summary['overall_score'] ?? ($summary['local_score'] ?? ''), false));
-			$this->render_summary_stat(__('Files Discovered', 'freesiem-sentinel'), $this->summary_value_or_fallback($scan_metrics['files_discovered'] ?? ($filesystem['discovered_files'] ?? ''), false));
-			$this->render_summary_stat(__('Files Analyzed', 'freesiem-sentinel'), $this->summary_value_or_fallback($scan_metrics['files_analyzed'] ?? ($filesystem['inspected_files'] ?? ''), false));
-			$this->render_summary_stat(__('Flagged Files', 'freesiem-sentinel'), $this->summary_value_or_fallback($scan_metrics['files_flagged'] ?? ($filesystem['flagged_files'] ?? ''), false));
-			$this->render_summary_stat(__('Scan Duration', 'freesiem-sentinel'), $this->format_duration($scan_metrics['duration_seconds'] ?? ''));
-			if (isset($summary['files_content_scanned'])) {
-				$this->render_summary_stat(__('Files Content-Scanned', 'freesiem-sentinel'), number_format_i18n((int) $summary['files_content_scanned']));
-			}
-			if (isset($summary['malware_hits'])) {
-				$this->render_summary_stat(__('Malware Signature Hits', 'freesiem-sentinel'), number_format_i18n((int) $summary['malware_hits']));
-			}
-			if (isset($summary['core_files_modified'])) {
-				$this->render_summary_stat(__('Core Files Modified', 'freesiem-sentinel'), number_format_i18n((int) $summary['core_files_modified']));
-			}
-			if (isset($summary['database_issues'])) {
-				$this->render_summary_stat(__('Database Issues', 'freesiem-sentinel'), number_format_i18n((int) $summary['database_issues']));
-			}
-			echo '</div>';
-			if (!empty($summary['last_deep_scan_at'])) {
-				echo '<p style="margin:10px 0 0;color:#50575e;"><strong>' . esc_html__('Last Deep Scan', 'freesiem-sentinel') . ':</strong> ' . esc_html(freesiem_sentinel_format_datetime((string) $summary['last_deep_scan_at']));
-				if (!empty($summary['deep_scan_partial'])) {
-					echo ' — ' . esc_html__('partial (limits reached; the next scheduled run continues coverage)', 'freesiem-sentinel');
-				}
-				echo '</p>';
-			}
-			if (!empty($scan_metrics['scan_modules']) || !empty($scan_profile)) {
-				echo '<p style="margin:12px 0 0;color:#50575e;"><strong>' . esc_html__('Modules Used', 'freesiem-sentinel') . ':</strong> ' . esc_html($this->format_scan_modules(!empty($scan_metrics['scan_modules']) ? ['scan_modules' => $scan_metrics['scan_modules']] : $scan_profile)) . '</p>';
-			}
-			if (!empty($filesystem['partial'])) {
-				echo '<p style="margin:10px 0 0;color:#50575e;">' . esc_html__('Some directories were skipped or capped by the current scan limits.', 'freesiem-sentinel') . '</p>';
-			}
-		}
-		echo '</div>';
-		echo '</div>';
-
-		$this->render_scan_reports_card($settings);
+		$this->render_scan_action_bar($results_url);
+		$this->render_scan_summary_card($settings, $summary, $scan_metrics, $filesystem, $scan_profile, $severity_counts, $has_scan, $results_url);
+		$this->render_scan_history_card();
 
 		$requested_run = isset($_GET['scan_run']) ? sanitize_text_field(wp_unslash((string) $_GET['scan_run'])) : '';
 
@@ -2001,9 +1923,193 @@ class Freesiem_Admin
 			$this->render_scan_run_detail($requested_run);
 		}
 
-		$this->render_scan_history_card();
+		$this->render_scan_config_card($prefs);
 		$this->render_scan_results_section($view);
+
+		echo '</div>'; // ---- /main column ----
+
+		echo '<aside style="min-width:0;">';
+		$this->render_scan_reports_card($settings);
+		echo '</aside>';
+
+		echo '</div>'; // ---- /layout ----
+
+		echo '<style>'
+			. '.fs-scan-layout aside .button{width:100%;text-align:center;box-sizing:border-box;}'
+			. '@media (max-width:1180px){.fs-scan-layout{grid-template-columns:1fr!important;}}'
+			. '</style>';
+
 		echo '</div>';
+	}
+
+	/**
+	 * The big, colourful action row at the top of the Scan screen. "Run Scan"
+	 * submits the (collapsed) Scan Configuration form via its form= attribute.
+	 */
+	private function render_scan_action_bar(string $results_url): void
+	{
+		$clear_url = freesiem_sentinel_admin_post_url('freesiem_sentinel_clear_results');
+		$btn = 'display:inline-flex;align-items:center;gap:8px;padding:12px 22px;font-size:15px;font-weight:600;line-height:1;border-radius:10px;border:1px solid transparent;text-decoration:none;cursor:pointer;';
+
+		echo '<div style="display:flex;gap:12px;flex-wrap:wrap;align-items:center;margin-bottom:20px;">';
+
+		echo '<button type="submit" form="fs-scan-config-form" style="' . esc_attr($btn) . 'background:#16794a;color:#fff;box-shadow:0 1px 2px rgba(0,0,0,.15);">'
+			. '<span aria-hidden="true">&#9654;</span> ' . esc_html__('Run Scan', 'freesiem-sentinel') . '</button>';
+
+		echo '<form method="post" action="' . esc_url(admin_url('admin-post.php')) . '" style="margin:0;" onsubmit="return confirm(\'' . esc_js(__('Start a complete full scan now? It runs in the background and can take a while on large sites.', 'freesiem-sentinel')) . '\');">';
+		wp_nonce_field(FREESIEM_SENTINEL_NONCE_ACTION);
+		echo '<input type="hidden" name="action" value="freesiem_sentinel_run_full_scan_now" />';
+		echo '<button type="submit" style="' . esc_attr($btn) . 'background:#1d4ed8;color:#fff;">' . esc_html__('Run Full Scan Now', 'freesiem-sentinel') . '</button>';
+		echo '</form>';
+
+		echo '<a href="' . esc_url($results_url) . '" style="' . esc_attr($btn) . 'background:#0f172a;color:#fff;">' . esc_html__('View Results', 'freesiem-sentinel') . '</a>';
+
+		echo '<form method="post" action="' . esc_url(admin_url('admin-post.php')) . '" style="margin:0;">';
+		wp_nonce_field(FREESIEM_SENTINEL_NONCE_ACTION);
+		echo '<input type="hidden" name="action" value="freesiem_sentinel_email_scan_results" />';
+		echo '<button type="submit" style="' . esc_attr($btn) . 'background:#fff;color:#1e293b;border-color:#cbd5e1;">' . esc_html__('Email Results Now', 'freesiem-sentinel') . '</button>';
+		echo '</form>';
+
+		echo '<a href="' . esc_url($clear_url) . '" onclick="return confirm(\'' . esc_js(__('Clear the stored scan results and findings?', 'freesiem-sentinel')) . '\');" style="' . esc_attr($btn) . 'background:#fff;color:#b91c1c;border-color:#fca5a5;">' . esc_html__('Clear Results', 'freesiem-sentinel') . '</a>';
+
+		echo '</div>';
+	}
+
+	private function render_scan_summary_card(array $settings, array $summary, array $scan_metrics, array $filesystem, array $scan_profile, array $severity_counts, bool $has_scan, string $results_url): void
+	{
+		echo '<div style="background:#fff;padding:18px 20px;border:1px solid #dcdcde;border-radius:16px;margin:0 0 20px;">';
+		echo '<h2 style="margin-top:0;">' . esc_html__('Scan Summary', 'freesiem-sentinel') . '</h2>';
+
+		if (!$has_scan) {
+			$this->render_empty_state(__('No scan has been run yet.', 'freesiem-sentinel'), __('Click “Run Scan” above to review findings, file changes, and summary metrics here.', 'freesiem-sentinel'));
+			echo '</div>';
+
+			return;
+		}
+
+		// Clickable severity tiles -> filtered findings.
+		echo '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:10px;">';
+		foreach ([
+			'critical' => ['label' => __('Critical', 'freesiem-sentinel'), 'bg' => '#fef2f2', 'border' => '#fecaca', 'fg' => '#b91c1c'],
+			'high' => ['label' => __('High', 'freesiem-sentinel'), 'bg' => '#fff7ed', 'border' => '#fed7aa', 'fg' => '#c2410c'],
+			'medium' => ['label' => __('Medium', 'freesiem-sentinel'), 'bg' => '#fefce8', 'border' => '#fde68a', 'fg' => '#a16207'],
+			'low' => ['label' => __('Low', 'freesiem-sentinel'), 'bg' => '#eff6ff', 'border' => '#bfdbfe', 'fg' => '#1d4ed8'],
+			'info' => ['label' => __('Info', 'freesiem-sentinel'), 'bg' => '#f8fafc', 'border' => '#e2e8f0', 'fg' => '#475569'],
+		] as $sev => $c) {
+			$url = $this->build_scan_url(['show_results' => '1', 'severity' => [$sev]]) . '#freesiem-results-section';
+			echo '<a href="' . esc_url($url) . '" style="display:block;padding:14px;border:1px solid ' . esc_attr($c['border']) . ';border-radius:12px;background:' . esc_attr($c['bg']) . ';text-decoration:none;color:' . esc_attr($c['fg']) . ';">';
+			echo '<span style="display:block;font-size:11px;text-transform:uppercase;letter-spacing:.08em;opacity:.9;">' . esc_html($c['label']) . '</span>';
+			echo '<strong style="display:block;font-size:26px;line-height:1.1;margin-top:6px;">' . esc_html(number_format_i18n((int) ($severity_counts[$sev] ?? 0))) . '</strong>';
+			echo '</a>';
+		}
+		echo '</div>';
+
+		// Metric tiles -> jump to the findings table.
+		$metrics = [
+			[__('Overall Score', 'freesiem-sentinel'), $this->summary_value_or_fallback($summary['overall_score'] ?? ($summary['local_score'] ?? ''), false)],
+			[__('Last Scan', 'freesiem-sentinel'), freesiem_sentinel_format_datetime((string) ($settings['last_local_scan_at'] ?? ''))],
+			[__('Files Discovered', 'freesiem-sentinel'), $this->summary_value_or_fallback($scan_metrics['files_discovered'] ?? ($filesystem['discovered_files'] ?? ''), false)],
+			[__('Files Analyzed', 'freesiem-sentinel'), $this->summary_value_or_fallback($scan_metrics['files_analyzed'] ?? ($filesystem['inspected_files'] ?? ''), false)],
+			[__('Flagged Files', 'freesiem-sentinel'), $this->summary_value_or_fallback($scan_metrics['files_flagged'] ?? ($filesystem['flagged_files'] ?? ''), false)],
+			[__('Scan Duration', 'freesiem-sentinel'), $this->format_duration($scan_metrics['duration_seconds'] ?? '')],
+		];
+
+		if (isset($summary['files_content_scanned'])) {
+			$metrics[] = [__('Content-Scanned', 'freesiem-sentinel'), number_format_i18n((int) $summary['files_content_scanned'])];
+		}
+
+		if (isset($summary['malware_hits'])) {
+			$metrics[] = [__('Signature Hits', 'freesiem-sentinel'), number_format_i18n((int) $summary['malware_hits'])];
+		}
+
+		if (isset($summary['core_files_modified'])) {
+			$metrics[] = [__('Core Files Modified', 'freesiem-sentinel'), number_format_i18n((int) $summary['core_files_modified'])];
+		}
+
+		if (isset($summary['database_issues'])) {
+			$metrics[] = [__('Database Issues', 'freesiem-sentinel'), number_format_i18n((int) $summary['database_issues'])];
+		}
+
+		echo '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:8px;margin-top:10px;">';
+		foreach ($metrics as [$label, $value]) {
+			echo '<a href="' . esc_url($results_url) . '" style="display:block;padding:10px 12px;border:1px solid #e5e7eb;border-radius:10px;background:#fbfbfc;text-decoration:none;color:inherit;">';
+			echo '<span style="display:block;font-size:10px;text-transform:uppercase;letter-spacing:.06em;color:#64748b;">' . esc_html($label) . '</span>';
+			echo '<strong style="display:block;font-size:16px;line-height:1.2;margin-top:4px;">' . esc_html((string) $value) . '</strong>';
+			echo '</a>';
+		}
+		echo '</div>';
+
+		if (!empty($summary['last_deep_scan_at'])) {
+			echo '<p style="margin:12px 0 0;color:#50575e;font-size:13px;"><strong>' . esc_html__('Last Deep Scan', 'freesiem-sentinel') . ':</strong> ' . esc_html(freesiem_sentinel_format_datetime((string) $summary['last_deep_scan_at']));
+			if (!empty($summary['deep_scan_partial'])) {
+				echo ' — ' . esc_html__('partial (the next scheduled run continues coverage)', 'freesiem-sentinel');
+			}
+			echo '</p>';
+		}
+
+		if (!empty($scan_metrics['scan_modules']) || !empty($scan_profile)) {
+			echo '<p style="margin:6px 0 0;color:#50575e;font-size:13px;"><strong>' . esc_html__('Modules', 'freesiem-sentinel') . ':</strong> ' . esc_html($this->format_scan_modules(!empty($scan_metrics['scan_modules']) ? ['scan_modules' => $scan_metrics['scan_modules']] : $scan_profile)) . '</p>';
+		}
+
+		echo '</div>';
+	}
+
+	/**
+	 * The Scan Configuration form — collapsed by default. "Run Scan" in the top
+	 * action bar posts it via its form id.
+	 */
+	private function render_scan_config_card(array $prefs): void
+	{
+		$intensity = in_array((string) ($prefs['scan_intensity'] ?? 'balanced'), ['gentle', 'balanced', 'thorough'], true) ? (string) $prefs['scan_intensity'] : 'balanced';
+		$cloud_upload_on = !array_key_exists('cloud_upload', $prefs) || !empty($prefs['cloud_upload']);
+
+		echo '<details style="background:#fff;border:1px solid #dcdcde;border-radius:16px;margin:0 0 20px;">';
+		echo '<summary style="cursor:pointer;padding:16px 20px;font-size:15px;font-weight:600;">'
+			. esc_html__('Scan Configuration', 'freesiem-sentinel')
+			. '<span style="font-weight:400;color:#64748b;"> — ' . esc_html__('modules, intensity, exclusions', 'freesiem-sentinel') . '</span></summary>';
+		echo '<div style="padding:0 20px 18px;">';
+
+		echo '<form id="fs-scan-config-form" method="post" action="' . esc_url(admin_url('admin-post.php')) . '">';
+		wp_nonce_field(FREESIEM_SENTINEL_NONCE_ACTION);
+		echo '<input type="hidden" name="action" value="freesiem_sentinel_run_configured_scan" />';
+		echo '<div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;">';
+
+		echo '<div>';
+		echo '<h3 style="margin:0 0 10px;font-size:16px;">' . esc_html__('Scan Modules', 'freesiem-sentinel') . '</h3>';
+		foreach ([
+			'scan_wordpress' => __('WordPress Configuration Scan', 'freesiem-sentinel'),
+			'scan_filesystem' => __('Filesystem Heuristics', 'freesiem-sentinel'),
+			'scan_fim' => __('File Integrity Monitoring', 'freesiem-sentinel'),
+			'scan_malware' => __('Malware & web-shell signatures (reads file contents)', 'freesiem-sentinel'),
+			'scan_core_integrity' => __('WordPress core checksum verification', 'freesiem-sentinel'),
+			'scan_plugin_integrity' => __('Plugin checksum verification (WordPress.org)', 'freesiem-sentinel'),
+			'scan_database' => __('Database scan (users, options, cron, content)', 'freesiem-sentinel'),
+			'scan_uploads_deep' => __('Include the uploads directory in the deep scan', 'freesiem-sentinel'),
+		] as $key => $label) {
+			echo '<label style="display:block;margin-bottom:8px;font-size:14px;"><input type="checkbox" name="' . esc_attr($key) . '" value="1"' . checked(!empty($prefs[$key]), true, false) . ' /> ' . esc_html($label) . '</label>';
+		}
+		echo '</div>';
+
+		echo '<div>';
+		echo '<h3 style="margin:0 0 10px;font-size:16px;">' . esc_html__('Advanced Options', 'freesiem-sentinel') . '</h3>';
+		echo '<p style="margin:0 0 10px;"><label>' . esc_html__('Scan intensity', 'freesiem-sentinel') . '<br /><select name="scan_intensity">';
+		foreach (['gentle' => __('Gentle — smallest footprint, slowest', 'freesiem-sentinel'), 'balanced' => __('Balanced (recommended)', 'freesiem-sentinel'), 'thorough' => __('Thorough — finishes sooner, more load', 'freesiem-sentinel')] as $value => $label) {
+			echo '<option value="' . esc_attr($value) . '"' . selected($intensity, $value, false) . '>' . esc_html($label) . '</option>';
+		}
+		echo '</select></label></p>';
+		echo '<p style="margin:0 0 10px;"><label>' . esc_html__('Heuristic pass: max files', 'freesiem-sentinel') . '<br /><input type="number" min="100" max="200000" step="100" name="max_files" value="' . esc_attr(freesiem_sentinel_safe_string($prefs['max_files'] ?? '1000')) . '" /></label></p>';
+		echo '<p style="margin:0 0 10px;"><label>' . esc_html__('Directory depth limit', 'freesiem-sentinel') . '<br /><input type="number" min="1" max="20" step="1" name="max_depth" value="' . esc_attr(freesiem_sentinel_safe_string($prefs['max_depth'] ?? '5')) . '" /></label></p>';
+		echo '<p style="margin:0 0 10px;"><label>' . esc_html__('Exclude paths (one per line, relative to the WordPress root)', 'freesiem-sentinel') . '<br /><textarea name="exclude_paths" rows="3" class="large-text" placeholder="wp-content/uploads/cache">' . esc_textarea(implode("\n", array_map('freesiem_sentinel_safe_string', is_array($prefs['exclude_paths'] ?? null) ? $prefs['exclude_paths'] : []))) . '</textarea></label></p>';
+		echo '<p style="margin:0 0 10px;"><label><input type="checkbox" name="include_uploads" value="1"' . checked(!empty($prefs['include_uploads']), true, false) . ' /> ' . esc_html__('Include uploads in the heuristic pass', 'freesiem-sentinel') . '</label></p>';
+		echo '<p style="margin:0;"><label><input type="checkbox" name="cloud_upload" value="1"' . checked($cloud_upload_on, true, false) . ' /> ' . esc_html__('Upload results to freeSIEM Core (Cloud)', 'freesiem-sentinel') . '</label></p>';
+		echo '</div>';
+
+		echo '</div>';
+		echo '<p style="margin:14px 0 0;"><button type="submit" class="button button-primary">' . esc_html__('Save & Run Scan', 'freesiem-sentinel') . '</button></p>';
+		echo '</form>';
+
+		echo '</div>';
+		echo '</details>';
 	}
 
 	private function render_scan_reports_card(array $settings): void
@@ -2021,49 +2127,41 @@ class Freesiem_Admin
 			6 => __('Saturday', 'freesiem-sentinel'),
 		];
 
-		echo '<div style="background:#fff;padding:18px 20px;border:1px solid #dcdcde;border-radius:16px;margin:0 0 20px;">';
-		echo '<h2 style="margin-top:0;">' . esc_html__('Reports & Weekly Automation', 'freesiem-sentinel') . '</h2>';
+		$primary_email = (string) ($settings['report_primary_email'] ?? '');
 
-		echo '<form method="post" action="' . esc_url(admin_url('admin-post.php')) . '" style="display:grid;grid-template-columns:1fr 1fr;gap:16px;align-items:start;">';
+		if ($primary_email === '') {
+			$primary_email = (string) get_option('admin_email');
+		}
+
+		echo '<div style="background:#fff;padding:16px 18px;border:1px solid #dcdcde;border-radius:16px;position:sticky;top:40px;">';
+		echo '<h2 style="margin:0 0 12px;font-size:16px;">' . esc_html__('Reports & Automation', 'freesiem-sentinel') . '</h2>';
+
+		echo '<form method="post" action="' . esc_url(admin_url('admin-post.php')) . '">';
 		wp_nonce_field(FREESIEM_SENTINEL_NONCE_ACTION);
 		echo '<input type="hidden" name="action" value="freesiem_sentinel_save_scan_schedule" />';
 
-		echo '<div>';
-		echo '<label style="display:block;margin-bottom:10px;"><input type="checkbox" name="deep_scan_weekly_enabled" value="1"' . checked(!empty($settings['deep_scan_weekly_enabled']), true, false) . ' /> ' . esc_html__('Run a full deep scan every week', 'freesiem-sentinel') . '</label>';
-		echo '<p style="margin:0 0 10px;"><label>' . esc_html__('Preferred day', 'freesiem-sentinel') . '<br /><select name="deep_scan_weekly_day">';
+		echo '<label style="display:flex;gap:8px;margin-bottom:12px;font-size:14px;"><input type="checkbox" name="deep_scan_weekly_enabled" value="1"' . checked(!empty($settings['deep_scan_weekly_enabled']), true, false) . ' /> ' . esc_html__('Weekly full deep scan', 'freesiem-sentinel') . '</label>';
+
+		echo '<p style="margin:0 0 12px;"><label style="font-size:12px;color:#64748b;display:block;margin-bottom:3px;">' . esc_html__('Preferred day', 'freesiem-sentinel') . '</label><select name="deep_scan_weekly_day" style="width:100%;">';
 		foreach ($days as $value => $label) {
 			echo '<option value="' . esc_attr((string) $value) . '"' . selected($day, $value, false) . '>' . esc_html($label) . '</option>';
 		}
-		echo '</select></label></p>';
-		echo '<p style="margin:0;color:#50575e;font-size:12px;">' . esc_html__('The exact hour is randomized per site so multiple sites on one server never all scan at once. This run ignores the per-module toggles and the finding cap — it is a complete sweep.', 'freesiem-sentinel') . '</p>';
+		echo '</select></p>';
+
+		echo '<hr style="border:none;border-top:1px solid #f0f0f1;margin:12px 0;" />';
+
+		echo '<label style="display:flex;gap:8px;margin-bottom:12px;font-size:14px;"><input type="checkbox" name="scan_email_on_weekly" value="1"' . checked(!empty($settings['scan_email_on_weekly']), true, false) . ' /> ' . esc_html__('Email the report after each scan', 'freesiem-sentinel') . '</label>';
+
+		echo '<p style="margin:0 0 12px;"><label style="font-size:12px;color:#64748b;display:block;margin-bottom:3px;">' . esc_html__('Report goes to', 'freesiem-sentinel') . '</label><input type="email" name="report_primary_email" value="' . esc_attr($primary_email) . '" style="width:100%;" /></p>';
+
+		echo '<p style="margin:0 0 12px;"><label style="font-size:12px;color:#64748b;display:block;margin-bottom:3px;">' . esc_html__('Also copy (comma separated)', 'freesiem-sentinel') . '</label><textarea name="scan_email_recipients" rows="2" style="width:100%;" placeholder="ops@example.com">' . esc_textarea((string) ($settings['scan_email_recipients'] ?? '')) . '</textarea></p>';
+
 		if ($next) {
-			echo '<p style="margin:8px 0 0;color:#50575e;font-size:12px;"><strong>' . esc_html__('Next run', 'freesiem-sentinel') . ':</strong> ' . esc_html(freesiem_sentinel_format_datetime(gmdate('c', (int) $next))) . '</p>';
+			echo '<p style="margin:0 0 12px;color:#64748b;font-size:12px;"><strong>' . esc_html__('Next run', 'freesiem-sentinel') . ':</strong><br />' . esc_html(freesiem_sentinel_format_datetime(gmdate('c', (int) $next))) . '</p>';
 		}
-		echo '</div>';
 
-		echo '<div>';
-		echo '<label style="display:block;margin-bottom:10px;"><input type="checkbox" name="scan_email_on_weekly" value="1"' . checked(!empty($settings['scan_email_on_weekly']), true, false) . ' /> ' . esc_html__('Email the report after each weekly scan', 'freesiem-sentinel') . '</label>';
-		echo '<p style="margin:0 0 6px;"><label>' . esc_html__('Additional report recipients', 'freesiem-sentinel') . '<br /><textarea name="scan_email_recipients" rows="2" class="large-text" placeholder="security@example.com, ops@example.com">' . esc_textarea((string) ($settings['scan_email_recipients'] ?? '')) . '</textarea></label></p>';
-		echo '<p style="margin:0;color:#50575e;font-size:12px;">' . esc_html(sprintf(__('The site admin address (%s) always receives reports.', 'freesiem-sentinel'), (string) get_option('admin_email'))) . '</p>';
-		echo '</div>';
-
-		echo '<div style="grid-column:1 / -1;display:flex;gap:10px;flex-wrap:wrap;margin-top:4px;">';
-		echo '<button type="submit" class="button button-primary">' . esc_html__('Save Report Settings', 'freesiem-sentinel') . '</button>';
-		echo '</div>';
+		echo '<button type="submit" class="button button-primary">' . esc_html__('Save', 'freesiem-sentinel') . '</button>';
 		echo '</form>';
-
-		echo '<div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:14px;padding-top:14px;border-top:1px solid #f0f0f1;">';
-		echo '<form method="post" action="' . esc_url(admin_url('admin-post.php')) . '">';
-		wp_nonce_field(FREESIEM_SENTINEL_NONCE_ACTION);
-		echo '<input type="hidden" name="action" value="freesiem_sentinel_email_scan_results" />';
-		echo '<button type="submit" class="button button-secondary">' . esc_html__('Email Current Results Now', 'freesiem-sentinel') . '</button>';
-		echo '</form>';
-		echo '<form method="post" action="' . esc_url(admin_url('admin-post.php')) . '" onsubmit="return confirm(\'' . esc_js(__('Start a complete full scan now? It runs in the background and can take a while on large sites.', 'freesiem-sentinel')) . '\');">';
-		wp_nonce_field(FREESIEM_SENTINEL_NONCE_ACTION);
-		echo '<input type="hidden" name="action" value="freesiem_sentinel_run_full_scan_now" />';
-		echo '<button type="submit" class="button button-secondary">' . esc_html__('Run Full Scan Now', 'freesiem-sentinel') . '</button>';
-		echo '</form>';
-		echo '</div>';
 
 		echo '</div>';
 	}
@@ -2081,14 +2179,15 @@ class Freesiem_Admin
 			return;
 		}
 
+		echo '<div style="overflow-x:auto;">';
 		echo '<table class="widefat striped"><thead><tr>'
 			. '<th>' . esc_html__('Finished', 'freesiem-sentinel') . '</th>'
 			. '<th>' . esc_html__('Type', 'freesiem-sentinel') . '</th>'
 			. '<th>' . esc_html__('Score', 'freesiem-sentinel') . '</th>'
-			. '<th>' . esc_html__('Critical / High / Med / Low', 'freesiem-sentinel') . '</th>'
+			. '<th>' . esc_html__('Crit / High / Med / Low', 'freesiem-sentinel') . '</th>'
 			. '<th>' . esc_html__('Files', 'freesiem-sentinel') . '</th>'
 			. '<th>' . esc_html__('Coverage', 'freesiem-sentinel') . '</th>'
-			. '<th></th>'
+			. '<th>' . esc_html__('Export', 'freesiem-sentinel') . '</th>'
 			. '</tr></thead><tbody>';
 
 		foreach ($history as $row) {
@@ -2104,9 +2203,15 @@ class Freesiem_Admin
 			echo '<td>' . esc_html(sprintf('%d / %d / %d / %d', (int) ($counts['critical'] ?? 0), (int) ($counts['high'] ?? 0), (int) ($counts['medium'] ?? 0), (int) ($counts['low'] ?? 0))) . '</td>';
 			echo '<td>' . esc_html(number_format_i18n((int) ($row['files_scanned'] ?? 0))) . '</td>';
 			echo '<td>' . (empty($row['partial']) ? esc_html__('Complete', 'freesiem-sentinel') : '<span style="color:#b45309;">' . esc_html__('Partial', 'freesiem-sentinel') . '</span>') . '</td>';
+
 			if (!empty($row['has_detail'])) {
-				echo '<td style="white-space:nowrap;"><a href="' . esc_url($view_link) . '">' . esc_html__('View', 'freesiem-sentinel') . '</a> &middot; '
-					. $this->render_export_actions(['scan_run' => $id], true) . '</td>';
+				$json = freesiem_sentinel_admin_post_url('freesiem_sentinel_export_results', ['scan_run' => $id, 'format' => 'json']);
+				$csv = freesiem_sentinel_admin_post_url('freesiem_sentinel_export_results', ['scan_run' => $id, 'format' => 'csv']);
+				echo '<td style="white-space:nowrap;">'
+					. '<a class="button button-small" href="' . esc_url($view_link) . '">' . esc_html__('View', 'freesiem-sentinel') . '</a> '
+					. '<button type="button" class="button button-small fs-copy-export" data-url="' . esc_url($json) . '" data-label="' . esc_attr__('JSON', 'freesiem-sentinel') . '">' . esc_html__('Copy JSON', 'freesiem-sentinel') . '</button> '
+					. '<button type="button" class="button button-small fs-copy-export" data-url="' . esc_url($csv) . '" data-label="' . esc_attr__('CSV', 'freesiem-sentinel') . '">' . esc_html__('Copy CSV', 'freesiem-sentinel') . '</button>'
+					. '</td>';
 			} else {
 				echo '<td><span style="color:#8c8f94;">' . esc_html__('summary only', 'freesiem-sentinel') . '</span></td>';
 			}
@@ -2114,6 +2219,7 @@ class Freesiem_Admin
 		}
 
 		echo '</tbody></table>';
+		echo '</div>';
 		echo '</div>';
 
 		$this->render_export_copy_script();
