@@ -1910,8 +1910,8 @@ class Freesiem_Admin
 
 		$this->render_deep_scan_progress();
 
-		echo '<div class="fs-scan-layout" style="display:grid;grid-template-columns:minmax(0,1fr) 340px;gap:20px;align-items:start;margin-top:12px;">';
-		echo '<div>'; // ---- main column ----
+		echo '<div class="fs-scan-layout" style="display:grid;grid-template-columns:1fr 340px;gap:20px;align-items:start;margin-top:12px;">';
+		echo '<div style="min-width:0;">'; // ---- main column ----
 
 		$this->render_scan_action_bar($results_url);
 		$this->render_scan_summary_card($settings, $summary, $scan_metrics, $filesystem, $scan_profile, $severity_counts, $has_scan, $results_url);
