@@ -11225,7 +11225,7 @@ function synchy_render_export_history(array $history, string $page_slug): void
 		<div class="synchy-stack synchy-stack--compact synchy-quick-link__body">
 			<div class="synchy-stack__split">
 				<p class="synchy-field-note" style="margin:0;">
-					<?php esc_html_e('Every retained export package whose archive is still available on disk. Delete removes the package files from this site.', 'synchy'); ?>
+					<?php esc_html_e('Every export package this site has recorded. Download the bundle, or the individual ZIP / installer / manifest. Delete removes the package files from disk.', 'synchy'); ?>
 				</p>
 				<span class="synchy-badge">
 					<?php
