@@ -1936,7 +1936,9 @@ class Freesiem_Admin
 
 		echo '<style>'
 			. '.fs-scan-layout aside .button{width:100%;text-align:center;box-sizing:border-box;}'
-			. '@media (max-width:1180px){.fs-scan-layout{grid-template-columns:1fr!important;}}'
+			. '.fs-sev-tiles{display:flex;flex-wrap:wrap;gap:10px;}'
+			. '.fs-sev-tiles>a{flex:1 1 110px;max-width:220px;}'
+			. '@media (max-width:1080px){.fs-scan-layout{grid-template-columns:1fr!important;}.fs-scan-layout aside>div{position:static!important;}}'
 			. '</style>';
 
 		echo '</div>';
@@ -1988,7 +1990,7 @@ class Freesiem_Admin
 		}
 
 		// Clickable severity tiles -> filtered findings.
-		echo '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:10px;">';
+		echo '<div class="fs-sev-tiles">';
 		foreach ([
 			'critical' => ['label' => __('Critical', 'freesiem-sentinel'), 'bg' => '#fef2f2', 'border' => '#fecaca', 'fg' => '#b91c1c'],
 			'high' => ['label' => __('High', 'freesiem-sentinel'), 'bg' => '#fff7ed', 'border' => '#fed7aa', 'fg' => '#c2410c'],
