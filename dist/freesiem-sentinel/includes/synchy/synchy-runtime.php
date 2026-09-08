@@ -5876,6 +5876,107 @@ function synchy_build_export_history_entry_from_manifest_path(string $manifest_p
 	];
 }
 
+/**
+ * Every directory an export package might live in — the configured save path, the
+ * last export's path, and the standard upload folders. Also the same folders one
+ * level up from ABSPATH, so a sub-directory install (…/public_html/new3) still
+ * finds packages written by the parent site (…/public_html).
+ *
+ * @return string[] normalized, de-duplicated, existing directories
+ */
+function synchy_candidate_export_directories(): array
+{
+	$dirs = [];
+	$options = synchy_get_export_options();
+	$dirs[] = synchy_resolve_output_directory_path((string) ($options['output_directory'] ?? ''));
+
+	$last = synchy_get_last_export();
+
+	if (!empty($last['output_directory'])) {
+		$dirs[] = synchy_resolve_output_directory_path((string) $last['output_directory']);
+	}
+
+	$uploads = wp_get_upload_dir();
+	$roots = [
+		wp_normalize_path(untrailingslashit((string) ($uploads['basedir'] ?? WP_CONTENT_DIR . '/uploads'))),
+		wp_normalize_path(untrailingslashit(WP_CONTENT_DIR)),
+		wp_normalize_path(untrailingslashit(dirname(untrailingslashit(ABSPATH)))) . '/wp-content/uploads',
+	];
+
+	foreach ($roots as $root) {
+		foreach (['synchy-backup', 'synchy-backups', 'synchy-site-sync', 'synchy-export', 'synchy-exports'] as $sub) {
+			$dirs[] = $root . '/' . $sub;
+		}
+	}
+
+	$out = [];
+
+	foreach (array_unique(array_filter($dirs)) as $dir) {
+		$dir = wp_normalize_path(untrailingslashit((string) $dir));
+
+		if ($dir !== '' && is_dir($dir) && is_readable($dir)) {
+			$out[$dir] = $dir;
+		}
+	}
+
+	return array_values($out);
+}
+
+/**
+ * A package's files can move (a site migrated, was copied into a sub-folder, the
+ * save path changed). Re-point each artifact to wherever a file of the same name
+ * now lives before we decide the export is "gone".
+ */
+function synchy_relocate_export_entry_artifacts(array $entry): array
+{
+	$artifacts = is_array($entry['artifacts'] ?? null) ? $entry['artifacts'] : [];
+
+	if ($artifacts === [] || synchy_is_export_record_available($entry)) {
+		return $entry;
+	}
+
+	$search = synchy_candidate_export_directories();
+	$known_dir = '';
+
+	foreach (['archive', 'installer', 'manifest'] as $type) {
+		$path = (string) ($artifacts[$type]['path'] ?? '');
+
+		if ($path !== '') {
+			$known_dir = wp_normalize_path(dirname($path));
+			break;
+		}
+	}
+
+	if ($known_dir !== '' && !in_array($known_dir, $search, true)) {
+		array_unshift($search, $known_dir);
+	}
+
+	foreach ($artifacts as $type => $meta) {
+		if (!is_array($meta)) {
+			continue;
+		}
+
+		$filename = (string) ($meta['filename'] ?? ($meta['path'] !== '' ? basename((string) $meta['path']) : ''));
+
+		if ($filename === '' || (!empty($meta['path']) && is_readable((string) $meta['path']))) {
+			continue;
+		}
+
+		foreach ($search as $dir) {
+			$candidate = wp_normalize_path(trailingslashit($dir) . $filename);
+
+			if (is_readable($candidate)) {
+				$artifacts[$type]['path'] = $candidate;
+				break;
+			}
+		}
+	}
+
+	$entry['artifacts'] = $artifacts;
+
+	return $entry;
+}
+
 function synchy_discover_export_history_from_directory(string $directory): array
 {
 	$directory = wp_normalize_path(untrailingslashit($directory));
@@ -5884,7 +5985,23 @@ function synchy_discover_export_history_from_directory(string $directory): array
 		return [];
 	}
 
-	$matches = glob($directory . '/*-manifest.json') ?: [];
+	$matches = glob($directory . '/*-manifest.json');
+
+	if (!is_array($matches) || $matches === []) {
+		// glob() is disabled on some shared hosts (Hostinger included). Fall back
+		// to scandir so exports are still discoverable.
+		$matches = [];
+		$entries = @scandir($directory);
+
+		if (is_array($entries)) {
+			foreach ($entries as $name) {
+				if (substr($name, -14) === '-manifest.json') {
+					$matches[] = $directory . '/' . $name;
+				}
+			}
+		}
+	}
+
 	$history = [];
 
 	foreach ($matches as $manifest_path) {
@@ -5907,24 +6024,9 @@ function synchy_discover_export_history_from_directory(string $directory): array
 
 function synchy_discover_export_history(): array
 {
-	$options = synchy_get_export_options();
-	$directories = [];
-	$current_output = synchy_resolve_output_directory_path((string) ($options['output_directory'] ?? ''));
-
-	if ($current_output !== '') {
-		$directories[] = $current_output;
-	}
-
-	$last_export = synchy_get_last_export();
-	$last_output = trim((string) ($last_export['output_directory'] ?? ''));
-
-	if ($last_output !== '') {
-		$directories[] = synchy_resolve_output_directory_path($last_output);
-	}
-
 	$history = [];
 
-	foreach (array_values(array_unique(array_filter($directories))) as $directory) {
+	foreach (synchy_candidate_export_directories() as $directory) {
 		$history = array_merge($history, synchy_discover_export_history_from_directory((string) $directory));
 	}
 
@@ -5982,9 +6084,18 @@ function synchy_get_export_history(): array
 			continue;
 		}
 
+		// A package whose files are not where the record says can still have moved
+		// (site copied into a sub-folder, save path changed). Try to re-point its
+		// artifacts to wherever the files are now. Only when that also fails do we
+		// keep the entry as "unavailable" — we never silently delete it, so the
+		// list the admin has always seen stays visible.
 		if (!synchy_is_export_record_available($entry)) {
-			$changed = true;
-			continue;
+			$relocated = synchy_relocate_export_entry_artifacts($entry);
+
+			if ($relocated !== $entry) {
+				$entry = $relocated;
+				$changed = true;
+			}
 		}
 
 		$seen[$package_id] = true;
@@ -11173,10 +11284,36 @@ function synchy_render_export_history(array $history, string $page_slug): void
 								</div>
 
 								<div class="synchy-downloads">
-									<?php if ($package_id !== '' && synchy_is_export_record_available($entry)) : ?>
+									<?php
+									$available = $package_id !== '' && synchy_is_export_record_available($entry);
+									$artifacts = is_array($entry['artifacts'] ?? null) ? $entry['artifacts'] : [];
+									?>
+									<?php if ($available) : ?>
 										<a class="button button-primary" href="<?php echo esc_url(synchy_get_download_url($package_id, 'bundle')); ?>">
 											<?php esc_html_e('Download Export Bundle', 'synchy'); ?>
 										</a>
+										<?php foreach (['archive' => __('ZIP', 'synchy'), 'installer' => __('installer.php', 'synchy'), 'manifest' => __('manifest', 'synchy')] as $type => $label) : ?>
+											<?php if (synchy_is_export_artifact_readable($artifacts[$type] ?? null)) : ?>
+												<a class="button button-secondary" href="<?php echo esc_url(synchy_get_download_url($package_id, $type)); ?>"><?php echo esc_html($label); ?></a>
+											<?php endif; ?>
+										<?php endforeach; ?>
+									<?php else : ?>
+										<?php
+										$last_seen = '';
+
+										foreach (['archive', 'manifest', 'installer'] as $type) {
+											if (!empty($artifacts[$type]['path'])) {
+												$last_seen = (string) $artifacts[$type]['path'];
+												break;
+											}
+										}
+										?>
+										<p class="synchy-field-note" style="margin:0;color:#b45309;">
+											<?php esc_html_e('Export files were not found on disk.', 'synchy'); ?>
+											<?php if ($last_seen !== '') : ?>
+												<br /><span class="synchy-text-break"><?php echo esc_html(sprintf(__('Last known location: %s', 'synchy'), $last_seen)); ?></span>
+											<?php endif; ?>
+										</p>
 									<?php endif; ?>
 									<form
 										method="post"
