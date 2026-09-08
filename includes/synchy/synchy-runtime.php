@@ -5731,27 +5731,44 @@ README;
 function synchy_build_export_download_bundle(array $entry)
 {
 	$artifacts = isset($entry['artifacts']) && is_array($entry['artifacts']) ? $entry['artifacts'] : [];
-	$required = ['archive', 'installer', 'manifest'];
 	$bundle_path = synchy_get_export_bundle_path($entry);
 
 	if ($bundle_path === '') {
-		return new WP_Error('synchy_bundle_path_missing', __('Synchy could not determine where to write the DDEV download bundle.', 'synchy'));
+		return new WP_Error('synchy_bundle_path_missing', __('Synchy could not determine where to write the download bundle.', 'synchy'));
 	}
 
 	if (!class_exists('ZipArchive')) {
-		return new WP_Error('synchy_bundle_zip_missing', __('The PHP ZipArchive extension is required to build the DDEV download bundle.', 'synchy'));
+		return new WP_Error('synchy_bundle_zip_missing', __('The PHP ZipArchive extension is required to build the download bundle. Use the individual ZIP / installer.php / manifest links instead.', 'synchy'));
 	}
 
-	foreach ($required as $artifact_type) {
-		if (!synchy_is_export_artifact_readable($artifacts[$artifact_type] ?? null)) {
-			return new WP_Error('synchy_bundle_artifact_missing', __('The DDEV download bundle could not be built because one or more export files are missing.', 'synchy'));
+	// The package archive is the only file the bundle genuinely needs. The
+	// installer and manifest are included when present; a missing one no longer
+	// blocks the whole download (use the individual links for those).
+	if (!synchy_is_export_artifact_readable($artifacts['archive'] ?? null)) {
+		$missing = [];
+
+		foreach (['archive' => 'package .zip', 'installer' => 'installer.php', 'manifest' => 'manifest.json'] as $type => $label) {
+			if (!synchy_is_export_artifact_readable($artifacts[$type] ?? null)) {
+				$missing[] = $label;
+			}
 		}
+
+		return new WP_Error(
+			'synchy_bundle_artifact_missing',
+			sprintf(
+				/* translators: %s: comma-separated list of missing file labels */
+				__('These export files are no longer on disk: %s. Nothing to bundle.', 'synchy'),
+				implode(', ', $missing)
+			)
+		);
 	}
 
-	$script_assets = synchy_get_ddev_scaffolding_assets();
+	// Zipping a multi-hundred-MB archive can run well past the default
+	// max_execution_time on shared hosting.
+	@set_time_limit(0);
 
-	if (count($script_assets) < 3) {
-		return new WP_Error('synchy_bundle_scripts_missing', __('The DDEV helper scripts are missing from this Synchy installation.', 'synchy'));
+	if (function_exists('wp_raise_memory_limit')) {
+		wp_raise_memory_limit('admin');
 	}
 
 	if (file_exists($bundle_path)) {
@@ -5761,10 +5778,18 @@ function synchy_build_export_download_bundle(array $entry)
 	$zip = new ZipArchive();
 
 	if ($zip->open($bundle_path, ZipArchive::CREATE | ZipArchive::OVERWRITE) !== true) {
-		return new WP_Error('synchy_bundle_write_failed', __('Synchy could not create the DDEV download bundle.', 'synchy'));
+		return new WP_Error('synchy_bundle_write_failed', sprintf(
+			/* translators: %s: directory path */
+			__('Synchy could not create the download bundle in %s (directory not writable).', 'synchy'),
+			dirname($bundle_path)
+		));
 	}
 
-	foreach ($required as $artifact_type) {
+	foreach (['archive', 'installer', 'manifest'] as $artifact_type) {
+		if (!synchy_is_export_artifact_readable($artifacts[$artifact_type] ?? null)) {
+			continue;
+		}
+
 		$path = wp_normalize_path((string) $artifacts[$artifact_type]['path']);
 		$filename = sanitize_file_name((string) ($artifacts[$artifact_type]['filename'] ?? basename($path)));
 		$entry_name = $filename !== '' ? $filename : basename($path);
@@ -5772,18 +5797,14 @@ function synchy_build_export_download_bundle(array $entry)
 		if (!$zip->addFile($path, $entry_name)) {
 			$zip->close();
 			@unlink($bundle_path);
-			return new WP_Error('synchy_bundle_add_failed', __('Synchy could not add an export file to the DDEV download bundle.', 'synchy'));
+			return new WP_Error('synchy_bundle_add_failed', __('Synchy could not add an export file to the download bundle.', 'synchy'));
 		}
 
 		synchy_maybe_optimize_zip_entry($zip, $entry_name);
 	}
 
-	foreach ($script_assets as $filename => $path) {
-		if (!$zip->addFile($path, $filename)) {
-			$zip->close();
-			@unlink($bundle_path);
-			return new WP_Error('synchy_bundle_script_failed', __('Synchy could not add the DDEV helper scripts to the download bundle.', 'synchy'));
-		}
+	foreach (synchy_get_ddev_scaffolding_assets() as $filename => $path) {
+		$zip->addFile($path, $filename);
 	}
 
 	$zip->addFromString('README-DDEV.txt', synchy_get_export_bundle_readme($entry));
@@ -11063,6 +11084,107 @@ function synchy_render_root_installer(string $installer_source)
 	];
 }
 
+/**
+ * Serve a file for download without buffering it in memory. A plain readfile()
+ * of a 260 MB export archive dies on shared hosting (output buffering / gzip /
+ * memory limit / max_execution_time). Streams in 512 KB chunks with every buffer
+ * layer disabled, honours a Range header so an interrupted download can resume,
+ * and never returns.
+ */
+function synchy_stream_download(string $path, string $filename, string $mime): void
+{
+	$path = wp_normalize_path($path);
+
+	if (!is_file($path) || !is_readable($path)) {
+		status_header(404);
+		wp_die(esc_html(sprintf(__('File not found on disk: %s', 'synchy'), $path)));
+	}
+
+	$size = (int) filesize($path);
+
+	if (function_exists('apache_setenv')) {
+		@apache_setenv('no-gzip', '1');
+	}
+
+	@ini_set('zlib.output_compression', 'Off');
+	@ini_set('output_buffering', 'Off');
+	@ini_set('implicit_flush', '1');
+
+	while (ob_get_level() > 0) {
+		@ob_end_clean();
+	}
+
+	@set_time_limit(0);
+
+	if (function_exists('ignore_user_abort')) {
+		ignore_user_abort(true);
+	}
+
+	$start = 0;
+	$end = $size - 1;
+	$status = 200;
+	$range = isset($_SERVER['HTTP_RANGE']) ? (string) $_SERVER['HTTP_RANGE'] : '';
+
+	if ($range !== '' && preg_match('/bytes=(\d*)-(\d*)/i', $range, $m)) {
+		if ($m[1] !== '') {
+			$start = (int) $m[1];
+		}
+
+		if ($m[2] !== '') {
+			$end = (int) $m[2];
+		}
+
+		if ($start > $end || $start >= $size) {
+			status_header(416);
+			header('Content-Range: bytes */' . $size);
+			exit;
+		}
+
+		$end = min($end, $size - 1);
+		$status = 206;
+	}
+
+	$length = $end - $start + 1;
+
+	nocache_headers();
+	status_header($status);
+	header('Content-Type: ' . $mime);
+	header('Content-Disposition: attachment; filename="' . str_replace('"', '', $filename) . '"');
+	header('Accept-Ranges: bytes');
+	header('Content-Length: ' . $length);
+
+	if ($status === 206) {
+		header('Content-Range: bytes ' . $start . '-' . $end . '/' . $size);
+	}
+
+	$handle = fopen($path, 'rb');
+
+	if ($handle === false) {
+		exit;
+	}
+
+	if ($start > 0) {
+		fseek($handle, $start);
+	}
+
+	$remaining = $length;
+
+	while ($remaining > 0 && !feof($handle) && connection_status() === CONNECTION_NORMAL) {
+		$buffer = fread($handle, (int) min(524288, $remaining));
+
+		if ($buffer === false) {
+			break;
+		}
+
+		echo $buffer;
+		flush();
+		$remaining -= strlen($buffer);
+	}
+
+	fclose($handle);
+	exit;
+}
+
 function synchy_place_installer_in_root(string $installer_source, array $completed_steps = [])
 {
 	$root_path = synchy_get_site_root_path();
@@ -13568,7 +13690,11 @@ add_action('admin_post_synchy_download_export', function (): void {
 	}
 
 	if (!is_array($artifact_meta) || empty($artifact_meta['path']) || !is_readable((string) $artifact_meta['path'])) {
-		wp_die(esc_html__('The requested Synchy export file could not be found.', 'synchy'));
+		wp_die(esc_html(sprintf(
+			/* translators: %s: file path */
+			__('The requested export file could not be found. Expected it at: %s. Re-run the export, or use a different file from the list.', 'synchy'),
+			wp_normalize_path((string) ($artifact_meta['path'] ?? '(unknown)'))
+		)));
 	}
 
 	$file_path = wp_normalize_path((string) $artifact_meta['path']);
@@ -13580,13 +13706,7 @@ add_action('admin_post_synchy_download_export', function (): void {
 		default => 'application/x-httpd-php',
 	};
 
-	nocache_headers();
-	header('Content-Type: ' . $mime);
-	header('Content-Length: ' . (string) filesize($file_path));
-	header('Content-Disposition: attachment; filename="' . $filename . '"');
-
-	readfile($file_path);
-	exit;
+	synchy_stream_download($file_path, $filename, $mime);
 });
 
 add_action('admin_post_synchy_purge_download', function (): void {
@@ -13632,13 +13752,7 @@ add_action('admin_post_synchy_purge_download', function (): void {
 	// One-time link -- delete the token immediately so it can't be reused or shared.
 	delete_transient('synchy_purge_dl_' . $token);
 
-	nocache_headers();
-	header('Content-Type: ' . $mime);
-	header('Content-Length: ' . (string) filesize($file_path));
-	header('Content-Disposition: attachment; filename="' . $filename . '"');
-
-	readfile($file_path);
-	exit;
+	synchy_stream_download($file_path, $filename, $mime);
 });
 
 add_action('admin_post_synchy_delete_export', function (): void {
