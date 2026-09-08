@@ -580,10 +580,10 @@ class Freesiem_Deep_Scanner
 		$state['counters']['bytes_scanned'] += strlen($contents);
 
 		$class = $mode === 'peek' ? 'peek' : Freesiem_Threat_Signatures::classify($basename, $extension);
-		$this->match_signatures($contents, $rel, $class, $state);
+		$this->match_signatures($contents, $rel, $class, $state, '', $size);
 	}
 
-	private function match_signatures(string $contents, string $rel, string $class, array &$state, string $category_override = ''): void
+	private function match_signatures(string $contents, string $rel, string $class, array &$state, string $category_override = '', int $file_size = -1): void
 	{
 		foreach (Freesiem_Threat_Signatures::rules_for_class($class) as $rule) {
 			$pattern = (string) ($rule['pattern'] ?? '');
@@ -610,13 +610,14 @@ class Freesiem_Deep_Scanner
 				'title' => (string) ($rule['label'] ?? 'Suspicious code pattern'),
 				'description' => sprintf('Signature "%s" matched in %s (line %d).', (string) ($rule['label'] ?? $rule['id']), $rel, $line),
 				'recommendation' => (string) ($rule['recommendation'] ?? 'Review this file against a known-good copy and remove any code you cannot account for.'),
-				'evidence' => [
+				'evidence' => array_filter([
 					'path' => $rel,
 					'signature_id' => (string) $rule['id'],
 					'line' => $line,
 					'match_count' => (int) $count,
+					'size' => $file_size >= 0 ? $file_size : null,
 					'snippet' => $this->snippet($contents, $offset),
-				],
+				], static fn ($v): bool => $v !== null),
 				'score' => (int) ($rule['score'] ?? 45),
 			]);
 

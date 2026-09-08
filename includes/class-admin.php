@@ -2396,12 +2396,15 @@ class Freesiem_Admin
 			$path = freesiem_sentinel_safe_string($finding['evidence']['path'] ?? '');
 			$line = freesiem_sentinel_safe_string($finding['evidence']['line'] ?? '');
 			$where = $path !== '' ? $path . ($line !== '' ? ':' . $line : '') : '';
+			$size_label = $this->finding_size_label($finding);
 
 			echo '<tr>';
 			echo '<td><span style="' . esc_attr($this->severity_badge_style($sev)) . '">' . esc_html(strtoupper($sev)) . '</span></td>';
 			echo '<td><strong>' . esc_html(freesiem_sentinel_safe_string($finding['title'] ?? '')) . '</strong><br /><span style="color:#50575e;">' . esc_html(freesiem_sentinel_safe_string($finding['description'] ?? '')) . '</span></td>';
 			echo '<td>' . esc_html(freesiem_sentinel_safe_string($finding['category'] ?? '')) . '</td>';
-			echo '<td><code style="font-size:12px;">' . esc_html($where) . '</code></td>';
+			echo '<td><code style="font-size:12px;">' . esc_html($where) . '</code>'
+				. ($size_label !== '' ? '<br /><small style="color:#646970;">' . esc_html($size_label) . '</small>' : '')
+				. '</td>';
 			echo '<td>' . esc_html(freesiem_sentinel_safe_string($finding['recommendation'] ?? '')) . '</td>';
 			echo '</tr>';
 		}
@@ -3213,7 +3216,8 @@ class Freesiem_Admin
 		if ($findings === []) {
 			$this->render_empty_state(__('No findings match your current filters.', 'freesiem-sentinel'), __('Adjust the search terms or severity filters to widen the results.', 'freesiem-sentinel'));
 		} else {
-			echo '<table class="widefat striped"><thead><tr><th>' . esc_html__('Severity', 'freesiem-sentinel') . '</th><th>' . esc_html__('Title', 'freesiem-sentinel') . '</th><th>' . esc_html__('Category', 'freesiem-sentinel') . '</th><th>' . esc_html__('Recommendation', 'freesiem-sentinel') . '</th><th>' . esc_html__('Path', 'freesiem-sentinel') . '</th></tr></thead><tbody>';
+			$show_actions = Freesiem_File_Actions::can_act();
+			echo '<table class="widefat striped"><thead><tr><th>' . esc_html__('Severity', 'freesiem-sentinel') . '</th><th>' . esc_html__('Title', 'freesiem-sentinel') . '</th><th>' . esc_html__('Category', 'freesiem-sentinel') . '</th><th>' . esc_html__('Recommendation', 'freesiem-sentinel') . '</th><th>' . esc_html__('Path', 'freesiem-sentinel') . '</th>' . ($show_actions ? '<th>' . esc_html__('Remediate', 'freesiem-sentinel') . '</th>' : '') . '</tr></thead><tbody>';
 			foreach ($findings as $index => $finding_row) {
 				if (!is_array($finding_row)) {
 					continue;
@@ -3226,13 +3230,25 @@ class Freesiem_Admin
 				]);
 				$path = freesiem_sentinel_safe_string($finding_row['evidence']['path'] ?? '');
 				$summary_value = $path !== '' ? $path : $this->evidence_summary($finding_row);
+				$size_label = $this->finding_size_label($finding_row);
 
 				echo '<tr>';
 				echo '<td><a href="' . esc_url($detail_url) . '" style="' . esc_attr($this->severity_badge_style((string) ($finding_row['severity'] ?? 'info'))) . '">' . esc_html(strtoupper(freesiem_sentinel_safe_string($finding_row['severity'] ?? 'info'))) . '</a></td>';
 				echo '<td><a href="' . esc_url($detail_url) . '" style="display:block;color:inherit;text-decoration:none;"><strong>' . esc_html(freesiem_sentinel_safe_string($finding_row['title'] ?? '')) . '</strong><br /><span>' . esc_html(freesiem_sentinel_safe_string($finding_row['description'] ?? '')) . '</span></a></td>';
 				echo '<td><a href="' . esc_url($detail_url) . '" style="display:block;color:inherit;text-decoration:none;">' . esc_html(freesiem_sentinel_safe_string($finding_row['category'] ?? '')) . '</a></td>';
 				echo '<td><a href="' . esc_url($detail_url) . '" style="display:block;color:inherit;text-decoration:none;">' . esc_html(freesiem_sentinel_safe_string($finding_row['recommendation'] ?? '')) . '</a></td>';
-				echo '<td><a href="' . esc_url($detail_url) . '" style="display:block;color:inherit;text-decoration:none;"><code>' . esc_html($summary_value) . '</code></a></td>';
+				echo '<td><a href="' . esc_url($detail_url) . '" style="display:block;color:inherit;text-decoration:none;"><code>' . esc_html($summary_value) . '</code>'
+					. ($size_label !== '' ? '<br /><small style="color:#646970;">' . esc_html($size_label) . '</small>' : '')
+					. '</a></td>';
+
+				if ($show_actions) {
+					if ($path !== '' && !is_wp_error(Freesiem_File_Actions::resolve($path))) {
+						echo '<td><a class="button button-small" href="' . esc_url($detail_url . '#freesiem-file-actions') . '">' . esc_html__('View / remove', 'freesiem-sentinel') . '</a></td>';
+					} else {
+						echo '<td><span style="color:#8c8f94;">&mdash;</span></td>';
+					}
+				}
+
 				echo '</tr>';
 			}
 			echo '</tbody></table>';
@@ -3544,6 +3560,33 @@ class Freesiem_Admin
 	}
 
 	/**
+	 * A compact "1.2 KB" label for a finding that points at a file, taken from
+	 * the size recorded at scan time. Empty string when the finding has no size.
+	 */
+	private function finding_size_label(array $finding): string
+	{
+		$evidence = freesiem_sentinel_safe_array($finding['evidence'] ?? []);
+		$size = $evidence['size'] ?? ($evidence['current_size'] ?? ($evidence['file_size'] ?? null));
+
+		if (!is_numeric($size)) {
+			return '';
+		}
+
+		$size = (int) $size;
+
+		if ($size === 0) {
+			return __('empty file', 'freesiem-sentinel');
+		}
+
+		return sprintf(
+			/* translators: 1: human-readable size e.g. "1.2 KB" 2: exact byte count */
+			__('%1$s (%2$s bytes)', 'freesiem-sentinel'),
+			size_format($size),
+			number_format_i18n($size)
+		);
+	}
+
+	/**
 	 * Plain-language background for a finding: what the flagged thing is and why
 	 * a scanner cares, keyed off the signature / category / filename so the admin
 	 * is not left to look it up.
@@ -3627,7 +3670,7 @@ class Freesiem_Admin
 			}
 		}
 
-		echo '<h3>' . esc_html__('File actions', 'freesiem-sentinel') . '</h3>';
+		echo '<h3 id="freesiem-file-actions">' . esc_html__('File actions', 'freesiem-sentinel') . '</h3>';
 
 		if ($quarantined_id !== '') {
 			echo '<p>' . esc_html__('This file is currently in quarantine (moved out of the web root, kept so it can be restored).', 'freesiem-sentinel') . '</p>';
