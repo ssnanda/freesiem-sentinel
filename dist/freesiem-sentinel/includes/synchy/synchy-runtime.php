@@ -5657,22 +5657,36 @@ function synchy_get_export_bundle_filename(array $entry): string
 function synchy_get_export_bundle_path(array $entry): string
 {
 	$artifacts = isset($entry['artifacts']) && is_array($entry['artifacts']) ? $entry['artifacts'] : [];
-	$anchor_path = '';
+	$anchor_dir = '';
 
-	foreach (['manifest', 'archive', 'installer'] as $artifact_type) {
-		$path = (string) (($artifacts[$artifact_type] ?? [])['path'] ?? '');
+	// Prefer the directory of a file that actually exists (the archive first).
+	foreach (['archive', 'manifest', 'installer'] as $artifact_type) {
+		$path = wp_normalize_path((string) (($artifacts[$artifact_type] ?? [])['path'] ?? ''));
 
-		if ($path !== '') {
-			$anchor_path = wp_normalize_path($path);
-			break;
+		if ($path !== '' && is_file($path)) {
+			$dir = wp_normalize_path(dirname($path));
+
+			if (is_dir($dir) && is_writable($dir)) {
+				$anchor_dir = $dir;
+				break;
+			}
 		}
 	}
 
-	if ($anchor_path === '') {
+	// Nothing on disk — fall back to the recorded save directory.
+	if ($anchor_dir === '') {
+		$candidate = synchy_resolve_output_directory_path((string) ($entry['output_directory'] ?? ''));
+
+		if ($candidate !== '' && is_dir($candidate) && is_writable($candidate)) {
+			$anchor_dir = $candidate;
+		}
+	}
+
+	if ($anchor_dir === '') {
 		return '';
 	}
 
-	return wp_normalize_path(trailingslashit(dirname($anchor_path)) . synchy_get_export_bundle_filename($entry));
+	return wp_normalize_path(trailingslashit($anchor_dir) . synchy_get_export_bundle_filename($entry));
 }
 
 function synchy_get_export_bundle_readme(array $entry): string
