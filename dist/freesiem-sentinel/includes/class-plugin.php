@@ -14,6 +14,7 @@ class Freesiem_Plugin
 	private Freesiem_Results $results;
 	private Freesiem_Commands $commands;
 	private Freesiem_Cron $cron;
+	private Freesiem_Cron_Monitor $cron_monitor;
 	private Freesiem_Updater $updater;
 	private Freesiem_Admin $admin;
 	private Freesiem_Cloud_Connect_Client $cloud_connect_client;
@@ -46,6 +47,7 @@ class Freesiem_Plugin
 		$this->updater = new Freesiem_Updater();
 		$this->commands = new Freesiem_Commands($this);
 		$this->cron = new Freesiem_Cron($this);
+		$this->cron_monitor = new Freesiem_Cron_Monitor();
 		$this->tfa_auth = new Freesiem_TFA_Auth($this, $this->tfa_service);
 		$this->tfa_remote = new Freesiem_TFA_Remote($this, $this->tfa_service, $this->pending_tasks);
 		$this->admin = new Freesiem_Admin($this);
@@ -57,6 +59,7 @@ class Freesiem_Plugin
 	{
 		freesiem_sentinel_maybe_upgrade_logs_table();
 		$this->cron->register();
+		$this->cron_monitor->register();
 		$this->updater->register();
 		$this->admin->register();
 		$this->pending_tasks->register();
@@ -733,6 +736,11 @@ class Freesiem_Plugin
 	public function get_deep_scanner(): Freesiem_Deep_Scanner
 	{
 		return $this->deep_scanner;
+	}
+
+	public function get_cron_monitor(): Freesiem_Cron_Monitor
+	{
+		return $this->cron_monitor;
 	}
 
 	public function deep_scan_continue(): void

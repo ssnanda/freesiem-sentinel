@@ -43,6 +43,8 @@ class Freesiem_Admin
 		add_action('admin_post_freesiem_sentinel_email_scan_results', [$this, 'handle_email_scan_results']);
 		add_action('admin_post_freesiem_sentinel_export_results', [$this, 'handle_export_results']);
 		add_action('admin_post_freesiem_sentinel_run_full_scan_now', [$this, 'handle_run_full_scan_now']);
+		add_action('admin_post_freesiem_sentinel_abort_deep_scan', [$this, 'handle_abort_deep_scan']);
+		add_action('admin_post_freesiem_sentinel_clear_cron_history', [$this, 'handle_clear_cron_history']);
 		add_action('admin_post_freesiem_sentinel_start_cloud_connect', [$this, 'handle_start_cloud_connect']);
 		add_action('admin_post_freesiem_sentinel_verify_cloud_connect', [$this, 'handle_verify_cloud_connect']);
 		add_action('admin_post_freesiem_sentinel_save_cloud_preferences', [$this, 'handle_save_cloud_preferences']);
@@ -646,6 +648,24 @@ class Freesiem_Admin
 		wp_send_json_success($deep->progress());
 	}
 
+	public function handle_abort_deep_scan(): void
+	{
+		$this->assert_manage_permissions();
+		freesiem_sentinel_require_admin_post_nonce();
+		$this->plugin->get_deep_scanner()->abort();
+		freesiem_sentinel_set_notice('success', __('The running deep scan and its queued continuation were stopped.', 'freesiem-sentinel'));
+		$this->redirect_to_page('freesiem-scan');
+	}
+
+	public function handle_clear_cron_history(): void
+	{
+		$this->assert_manage_permissions();
+		freesiem_sentinel_require_admin_post_nonce();
+		$this->plugin->get_cron_monitor()->clear_history();
+		freesiem_sentinel_set_notice('success', __('WP-Cron execution history cleared.', 'freesiem-sentinel'));
+		$this->redirect_to_page('freesiem-security', ['section' => 'wp-cron']);
+	}
+
 	public function handle_request_remote_scan(): void
 	{
 		$this->assert_manage_permissions();
@@ -786,6 +806,10 @@ class Freesiem_Admin
 		freesiem_sentinel_require_admin_post_nonce();
 
 		$deep = $this->plugin->get_deep_scanner();
+		if ($deep->is_running()) {
+			freesiem_sentinel_set_notice('warning', __('A deep scan is already running. Stop it before starting another full scan.', 'freesiem-sentinel'));
+			$this->redirect_to_page('freesiem-scan');
+		}
 		$deep->start_full('deep');
 		$pass = $deep->run_foreground_pass();
 
@@ -1862,6 +1886,9 @@ class Freesiem_Admin
 			case 'stealth-mode':
 				$this->render_stealth_mode_page();
 				break;
+			case 'wp-cron':
+				$this->render_wp_cron_page();
+				break;
 			default:
 				$this->render_ssl_page();
 				break;
@@ -1875,6 +1902,7 @@ class Freesiem_Admin
 			'tfa' => ['label' => __('TFA (2FA)', 'freesiem-sentinel')],
 			'login-protection' => ['label' => __('Login Protection', 'freesiem-sentinel')],
 			'stealth-mode' => ['label' => __('Stealth Mode', 'freesiem-sentinel')],
+			'wp-cron' => ['label' => __('WP-Cron', 'freesiem-sentinel')],
 		];
 	}
 
@@ -1884,6 +1912,69 @@ class Freesiem_Admin
 		$tabs = $this->get_security_tabs();
 
 		return isset($tabs[$section]) ? $section : 'ssl';
+	}
+
+	public function render_wp_cron_page(): void
+	{
+		$this->assert_manage_permissions();
+		$monitor = $this->plugin->get_cron_monitor();
+		$events = $monitor->get_events();
+		$history = $monitor->get_history();
+		$disabled = defined('DISABLE_WP_CRON') && DISABLE_WP_CRON;
+		$overdue = count(array_filter($events, static fn (array $event): bool => !empty($event['overdue'])));
+
+		echo '<div class="wrap">';
+		echo '<h1>' . esc_html__('WP-Cron Monitor', 'freesiem-sentinel') . '</h1>';
+		echo '<p>' . esc_html__('View every scheduled WordPress event and recent executions. History starts when this Sentinel version is installed and retains the latest 250 runs.', 'freesiem-sentinel') . '</p>';
+		echo '<div style="display:flex;gap:12px;flex-wrap:wrap;margin:16px 0;">';
+		echo '<div style="background:#fff;border:1px solid #dcdcde;border-radius:10px;padding:14px 18px;"><strong>' . esc_html(number_format_i18n(count($events))) . '</strong><br><span>' . esc_html__('Scheduled events', 'freesiem-sentinel') . '</span></div>';
+		echo '<div style="background:#fff;border:1px solid ' . esc_attr($overdue > 0 ? '#d63638' : '#dcdcde') . ';border-radius:10px;padding:14px 18px;"><strong>' . esc_html(number_format_i18n($overdue)) . '</strong><br><span>' . esc_html__('Overdue events', 'freesiem-sentinel') . '</span></div>';
+		echo '<div style="background:#fff;border:1px solid ' . esc_attr($disabled ? '#d63638' : '#00a32a') . ';border-radius:10px;padding:14px 18px;"><strong>' . esc_html($disabled ? __('Disabled', 'freesiem-sentinel') : __('Enabled', 'freesiem-sentinel')) . '</strong><br><span>' . esc_html__('Traffic-triggered WP-Cron', 'freesiem-sentinel') . '</span></div>';
+		echo '</div>';
+
+		if ($disabled) {
+			echo '<div class="notice notice-warning inline"><p>' . esc_html__('DISABLE_WP_CRON is enabled. Confirm that Hostinger or another system scheduler calls wp-cron.php; otherwise overdue work will accumulate.', 'freesiem-sentinel') . '</p></div>';
+		}
+
+		echo '<h2>' . esc_html__('Scheduled Events', 'freesiem-sentinel') . '</h2>';
+		echo '<div style="overflow:auto;background:#fff;border:1px solid #dcdcde;border-radius:10px;"><table class="widefat striped"><thead><tr><th>' . esc_html__('Hook', 'freesiem-sentinel') . '</th><th>' . esc_html__('Next run', 'freesiem-sentinel') . '</th><th>' . esc_html__('Schedule', 'freesiem-sentinel') . '</th><th>' . esc_html__('Arguments', 'freesiem-sentinel') . '</th></tr></thead><tbody>';
+		if ($events === []) {
+			echo '<tr><td colspan="4">' . esc_html__('No WP-Cron events are scheduled.', 'freesiem-sentinel') . '</td></tr>';
+		} else {
+			foreach ($events as $event) {
+				$args = wp_json_encode($event['args'], JSON_UNESCAPED_SLASHES);
+				$args = is_string($args) ? $args : '[]';
+				echo '<tr><td><code>' . esc_html((string) $event['hook']) . '</code></td>';
+				echo '<td>' . (!empty($event['overdue']) ? '<strong style="color:#b32d2e;">' . esc_html__('Overdue: ', 'freesiem-sentinel') . '</strong>' : '') . esc_html(freesiem_sentinel_format_datetime(gmdate('c', (int) $event['next_run']))) . '</td>';
+				echo '<td>' . esc_html((string) $event['schedule']) . '</td><td><code title="' . esc_attr($args) . '">' . esc_html(strlen($args) > 160 ? substr($args, 0, 157) . '...' : $args) . '</code></td></tr>';
+			}
+		}
+		echo '</tbody></table></div>';
+
+		echo '<div style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:24px;"><h2 style="margin:0;">' . esc_html__('Execution History', 'freesiem-sentinel') . '</h2>';
+		if ($history !== []) {
+			echo '<form method="post" action="' . esc_url(admin_url('admin-post.php')) . '"><input type="hidden" name="action" value="freesiem_sentinel_clear_cron_history">';
+			wp_nonce_field(FREESIEM_SENTINEL_NONCE_ACTION);
+			echo '<button class="button button-secondary" type="submit">' . esc_html__('Clear History', 'freesiem-sentinel') . '</button></form>';
+		}
+		echo '</div>';
+		echo '<div style="overflow:auto;background:#fff;border:1px solid #dcdcde;border-radius:10px;margin-top:12px;"><table class="widefat striped"><thead><tr><th>' . esc_html__('Hook', 'freesiem-sentinel') . '</th><th>' . esc_html__('Started', 'freesiem-sentinel') . '</th><th>' . esc_html__('Status', 'freesiem-sentinel') . '</th><th>' . esc_html__('Duration', 'freesiem-sentinel') . '</th><th>' . esc_html__('Peak memory increase', 'freesiem-sentinel') . '</th></tr></thead><tbody>';
+		if ($history === []) {
+			echo '<tr><td colspan="5">' . esc_html__('No executions have been observed yet.', 'freesiem-sentinel') . '</td></tr>';
+		} else {
+			foreach ($history as $row) {
+				$status = sanitize_key((string) ($row['status'] ?? 'unknown'));
+				$started = (string) ($row['started_at'] ?? '');
+				if ($status === 'running' && (strtotime($started) ?: time()) < time() - 600) {
+					$status = 'stale';
+				}
+				$color = $status === 'completed' ? '#008a20' : ($status === 'running' ? '#996800' : '#b32d2e');
+				echo '<tr><td><code>' . esc_html((string) ($row['hook'] ?? '')) . '</code></td><td>' . esc_html($started !== '' ? freesiem_sentinel_format_datetime($started) : '—') . '</td>';
+				echo '<td><strong style="color:' . esc_attr($color) . ';">' . esc_html(ucfirst($status)) . '</strong>' . (!empty($row['error']) ? '<br><small>' . esc_html((string) $row['error']) . '</small>' : '') . '</td>';
+				echo '<td>' . esc_html(number_format_i18n((int) ($row['duration_ms'] ?? 0))) . ' ms</td><td>' . esc_html(size_format((int) ($row['memory_delta'] ?? 0))) . '</td></tr>';
+			}
+		}
+		echo '</tbody></table></div></div>';
 	}
 
 	public function render_activity_page(): void
@@ -3099,7 +3190,10 @@ class Freesiem_Admin
 		echo '<div id="fs-deep-bar" style="background:#2271b1;height:100%;width:' . esc_attr((string) $percent) . '%;transition:width .5s ease;"></div>';
 		echo '</div>';
 		echo '<p id="fs-deep-status" style="margin:8px 0 0;color:#50575e;font-size:13px;">' . esc_html(sprintf($status_tmpl, $percent, $files, $hits)) . '</p>';
-		echo '<p style="margin:8px 0 0;color:#50575e;font-size:13px;">' . esc_html__('Keep this tab open to run the scan from your browser; it also continues in the background if you leave.', 'freesiem-sentinel') . '</p>';
+		echo '<div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-top:8px;"><p style="margin:0;color:#50575e;font-size:13px;">' . esc_html__('Keep this tab open to run the scan from your browser; background slices are spaced out to protect shared-host resources.', 'freesiem-sentinel') . '</p>';
+		echo '<form method="post" action="' . esc_url(admin_url('admin-post.php')) . '" style="margin:0;"><input type="hidden" name="action" value="freesiem_sentinel_abort_deep_scan">';
+		wp_nonce_field(FREESIEM_SENTINEL_NONCE_ACTION);
+		echo '<button type="submit" class="button button-secondary">' . esc_html__('Stop Scan', 'freesiem-sentinel') . '</button></form></div>';
 
 		$cfg = wp_json_encode([
 			'url' => $ajax_url,
@@ -3124,7 +3218,7 @@ class Freesiem_Admin
 			. 'if(st){st.textContent=fmt(pct,d.files_scanned||0,d.malware_hits||0);}'
 			. 'if(d.running===false){window.location.reload();}'
 			. '}).catch(function(){busy=false;if(++misses>8){clearInterval(iv);}});}'
-			. 'var iv=setInterval(tick,2500);setTimeout(tick,400);'
+			. 'var iv=setInterval(tick,15000);setTimeout(tick,800);'
 			. '})();</script>';
 
 		echo '</div>';

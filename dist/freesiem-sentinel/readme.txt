@@ -3,7 +3,7 @@ Contributors: freesiem
 Requires at least: 6.4
 Tested up to: 6.8
 Requires PHP: 8.1
-Stable tag: 1.0.124
+Stable tag: 1.0.126
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -70,6 +70,11 @@ Version bumps should always have matching git tags.
 GitHub Actions publishes the ZIP automatically when a `v*` tag is pushed.
 
 == Changelog ==
+
+= 1.0.125 =
+
+* Improve deep-scan coverage, resource throttling, stalled-run recovery, and signature error reporting.
+* Add WP-Cron schedule monitoring and execution history under Security.
 
 = 1.0.51 =
 

@@ -27,11 +27,12 @@ class Freesiem_Deep_Scanner
 
 	private const MAX_FINDINGS = 500;
 	private const MAX_FINDINGS_FULL = 1500;
-	private const DIR_FILE_CAP = 20000;
-	private const DIR_FILE_CAP_FULL = 120000;
+	private const DIR_QUEUE_PAGE = 2000;
 	private const MAX_READ_BYTES = 5242880; // 5 MB content read cap
 	private const PEEK_BYTES = 8192;
-	private const STALE_LOCK_SECONDS = 3600; // a slice that hasn't advanced in an hour is treated as crashed
+	private const STALE_LOCK_SECONDS = 300; // no saved progress for five minutes means the continuation chain is stalled
+	private const SLICE_LOCK_SECONDS = 90;
+	private const CONTINUE_DELAY_SECONDS = 60;
 	private const RESCAN_AFTER_SECONDS = 43200; // 12h — scheduled deep scan cadence
 	private const CORE_CHECK_BATCH = 40;
 	private const PLUGIN_CHECK_BATCH = 30;
@@ -96,6 +97,7 @@ class Freesiem_Deep_Scanner
 	{
 		delete_option(self::STATE_OPTION);
 		delete_transient(self::LOCK_TRANSIENT);
+		wp_clear_scheduled_hook(self::CONTINUE_HOOK);
 	}
 
 	/**
@@ -147,6 +149,7 @@ class Freesiem_Deep_Scanner
 				'malware_hits' => 0,
 				'database_issues' => 0,
 				'vendor_verified' => 0,
+				'signature_errors' => 0,
 			],
 			'findings' => [],
 			'partial' => false,
@@ -190,8 +193,12 @@ class Freesiem_Deep_Scanner
 			return;
 		}
 
-		if ($this->is_running() && !$this->is_stalled()) {
-			$this->schedule_continue(10);
+		if ($this->is_running()) {
+			if ($this->is_stalled()) {
+				delete_transient(self::LOCK_TRANSIENT);
+				wp_clear_scheduled_hook(self::CONTINUE_HOOK);
+			}
+			$this->schedule_continue(self::CONTINUE_DELAY_SECONDS);
 
 			return;
 		}
@@ -205,7 +212,7 @@ class Freesiem_Deep_Scanner
 			// A scan is in progress (possibly with a broken continuation chain, or
 			// simply slow between cron ticks). Resume it from its saved position
 			// rather than restarting and losing coverage.
-			$this->schedule_continue(10);
+			$this->schedule_continue(self::CONTINUE_DELAY_SECONDS);
 
 			return;
 		}
@@ -239,7 +246,7 @@ class Freesiem_Deep_Scanner
 		$result = $this->run_slice($this->resolve_budget('background'));
 
 		if (empty($result['done'])) {
-			$this->schedule_continue(20);
+			$this->schedule_continue(self::CONTINUE_DELAY_SECONDS);
 
 			return;
 		}
@@ -265,7 +272,7 @@ class Freesiem_Deep_Scanner
 		} else {
 			// Belt and suspenders: keep a cron continuation queued in case the
 			// user navigates away mid-scan.
-			$this->schedule_continue(20);
+			$this->schedule_continue(self::CONTINUE_DELAY_SECONDS);
 		}
 
 		return $this->progress();
@@ -273,14 +280,17 @@ class Freesiem_Deep_Scanner
 
 	private function schedule_continue(int $delay): void
 	{
-		if (function_exists('wp_next_scheduled') && wp_next_scheduled(self::CONTINUE_HOOK)) {
-			return;
+		$next = function_exists('wp_next_scheduled') ? wp_next_scheduled(self::CONTINUE_HOOK) : false;
+
+		// An overdue single event can remain in the cron option after a killed
+		// request. Replace it so a scan cannot wait forever behind a dead chain.
+		if ($next && (int) $next < time() - 300) {
+			wp_clear_scheduled_hook(self::CONTINUE_HOOK);
+			$next = false;
 		}
 
-		wp_schedule_single_event(time() + max(1, $delay), self::CONTINUE_HOOK);
-
-		if (function_exists('spawn_cron')) {
-			spawn_cron();
+		if (!$next) {
+			wp_schedule_single_event(time() + max(1, $delay), self::CONTINUE_HOOK);
 		}
 	}
 
@@ -304,11 +314,16 @@ class Freesiem_Deep_Scanner
 
 		// Prevent a cron event and a browser tick (or two tabs) from running
 		// slices concurrently and racing on the state option.
-		if (get_transient(self::LOCK_TRANSIENT)) {
+		$lock = get_transient(self::LOCK_TRANSIENT);
+		$lock_started = is_array($lock) ? (int) ($lock['started'] ?? 0) : 0;
+		if ($lock && $lock_started > time() - self::SLICE_LOCK_SECONDS) {
 			return ['done' => false, 'progress' => $this->progress()];
 		}
 
-		set_transient(self::LOCK_TRANSIENT, 1, 120);
+		set_transient(self::LOCK_TRANSIENT, [
+			'started' => time(),
+			'run_token' => (string) ($state['run_token'] ?? ''),
+		], self::SLICE_LOCK_SECONDS);
 
 		if (function_exists('ignore_user_abort')) {
 			ignore_user_abort(true);
@@ -320,7 +335,7 @@ class Freesiem_Deep_Scanner
 			wp_raise_memory_limit('admin');
 		}
 
-		@set_time_limit(max(60, (int) $budget['seconds'] + 45));
+		@set_time_limit(max(30, (int) $budget['seconds'] + 20));
 
 		$deadline = microtime(true) + max(3.0, (float) $budget['seconds']);
 		$file_cap = max(25, (int) $budget['files']);
@@ -410,7 +425,10 @@ class Freesiem_Deep_Scanner
 	private function step_filesystem(array &$state): void
 	{
 		if (!empty($state['file_queue'])) {
-			$file = array_shift($state['file_queue']);
+			// Queue order does not affect coverage. array_pop() is constant-time;
+			// array_shift() reindexed the entire queue for every file and made large
+			// full scans progressively consume a shared-hosting CPU allocation.
+			$file = array_pop($state['file_queue']);
 			$this->scan_file((string) $file, $state);
 			$this->self_file_context = null;
 
@@ -432,6 +450,7 @@ class Freesiem_Deep_Scanner
 		$path = (string) ($dir['path'] ?? '');
 		$label = (string) ($dir['label'] ?? '');
 		$depth = (int) ($dir['depth'] ?? 0);
+		$offset = max(0, (int) ($dir['offset'] ?? 0));
 		$max_depth = max(self::MIN_TRAVERSAL_DEPTH, (int) ($state['prefs']['max_depth'] ?? self::MIN_TRAVERSAL_DEPTH));
 		$excludes = is_array($state['prefs']['exclude_paths'] ?? null) ? $state['prefs']['exclude_paths'] : [];
 
@@ -452,7 +471,11 @@ class Freesiem_Deep_Scanner
 		$state['counters']['dirs_visited']++;
 		$queued = [];
 
-		foreach ($items as $item) {
+		foreach ($items as $item_index => $item) {
+			if ((int) $item_index < $offset) {
+				continue;
+			}
+
 			if ($item === '.' || $item === '..') {
 				continue;
 			}
@@ -475,9 +498,9 @@ class Freesiem_Deep_Scanner
 
 				if ($this->is_secondary_wp_root($child)) {
 					$this->flag_secondary_wp_root($child, $state);
-					$state['counters']['skipped_paths']++;
-
-					continue;
+					// Continue into it for malware coverage. Integrity verification still
+					// uses the main site's WordPress version and reports the nested root
+					// separately, but a dormant old/staging install must not be a blind spot.
 				}
 
 				$state['dir_stack'][] = ['path' => $child, 'label' => $label, 'depth' => $depth + 1];
@@ -487,17 +510,20 @@ class Freesiem_Deep_Scanner
 
 			if (is_file($child)) {
 				$queued[] = $child;
+
+				// Keep the serialized scan-state option small. Resume this same
+				// directory from the next entry instead of storing tens of thousands
+				// of absolute paths in one option value.
+				if (count($queued) >= self::DIR_QUEUE_PAGE) {
+					$state['dir_stack'][] = [
+						'path' => $path,
+						'label' => $label,
+						'depth' => $depth,
+						'offset' => (int) $item_index + 1,
+					];
+					break;
+				}
 			}
-		}
-
-		// Guard against a single directory with an enormous file count blowing up
-		// the serialized state option.
-		$dir_cap = empty($state['full']) ? self::DIR_FILE_CAP : self::DIR_FILE_CAP_FULL;
-
-		if (count($queued) > $dir_cap) {
-			$queued = array_slice($queued, 0, $dir_cap);
-			$state['partial'] = true;
-			$state['partial_reason'] = $state['partial_reason'] ?: 'dir_file_cap';
 		}
 
 		if ($queued !== []) {
@@ -884,7 +910,39 @@ class Freesiem_Deep_Scanner
 				continue;
 			}
 
-			if (@preg_match($pattern, $contents, $match, PREG_OFFSET_CAPTURE) !== 1) {
+			if (($rule['id'] ?? '') === 'php_request_proxy') {
+				// Three bounded checks avoid a whole-file lookahead that can exhaust
+				// PCRE's backtracking limit on large generated or bundled files.
+				$has_exec = preg_match('/\bcurl_exec\s*\(/i', $contents) === 1;
+				$has_input = preg_match('/\$_(?:GET|REQUEST|POST)\s*\[/i', $contents) === 1;
+				$result = preg_match('/curl_setopt\s*\(\s*\$\w+\s*,\s*CURLOPT_SSL_VERIFY(?:PEER|HOST)\s*,\s*(?:0|false|null)\b/i', $contents, $match, PREG_OFFSET_CAPTURE);
+				$result = ($has_exec && $has_input && $result === 1) ? 1 : 0;
+			} else {
+				$result = @preg_match($pattern, $contents, $match, PREG_OFFSET_CAPTURE);
+			}
+
+			if ($result === false) {
+				$state['counters']['signature_errors'] = (int) ($state['counters']['signature_errors'] ?? 0) + 1;
+				$rule_id = sanitize_key((string) ($rule['id'] ?? 'unknown'));
+				$this->add_finding($state, [
+					'finding_key' => 'deep_signature_error_' . md5($rule_id . '|' . $rel),
+					'category' => 'malware',
+					'severity' => 'medium',
+					'title' => 'A malware signature could not inspect a file',
+					'description' => sprintf('Signature %s failed while inspecting %s. This file was not fully cleared by the scan.', $rule_id, $rel),
+					'recommendation' => 'Review the file manually and update the affected signature. A matching error must never be interpreted as a clean result.',
+					'evidence' => [
+						'path' => $rel,
+						'signature_id' => $rule_id,
+						'preg_error' => function_exists('preg_last_error_msg') ? preg_last_error_msg() : (string) preg_last_error(),
+						'size' => $file_size,
+					],
+					'score' => 58,
+				]);
+				continue;
+			}
+
+			if ($result !== 1) {
 				continue;
 			}
 
@@ -892,7 +950,9 @@ class Freesiem_Deep_Scanner
 			$line = substr_count($contents, "\n", 0, min($offset, strlen($contents))) + 1;
 			// preg_match_all builds a full match array; only run it on modestly
 			// sized files so a pathological input cannot balloon memory.
-			$count = strlen($contents) <= 524288 ? (@preg_match_all($pattern, $contents) ?: 1) : 1;
+			$count = (($rule['id'] ?? '') !== 'php_request_proxy' && strlen($contents) <= 524288)
+				? (@preg_match_all($pattern, $contents) ?: 1)
+				: 1;
 			$category = $category_override !== '' ? $category_override : (string) ($rule['category'] ?? 'malware');
 
 			$added = $this->add_finding($state, [
@@ -1624,7 +1684,7 @@ class Freesiem_Deep_Scanner
 		}
 
 		$url = sprintf('https://api.wordpress.org/plugin-checksums/1.0/%s/%s.json', rawurlencode($slug), rawurlencode($version));
-		$response = wp_remote_get($url, ['timeout' => 12]);
+		$response = wp_remote_get($url, ['timeout' => 4]);
 
 		if (is_wp_error($response) || (int) wp_remote_retrieve_response_code($response) !== 200) {
 			set_transient($key, 'none', DAY_IN_SECONDS);
@@ -2753,10 +2813,32 @@ class Freesiem_Deep_Scanner
 		$cap = empty($state['full']) ? self::MAX_FINDINGS : self::MAX_FINDINGS_FULL;
 
 		if (count($state['findings']) >= $cap) {
+			// Keep urgent discoveries even if earlier low-value findings filled the
+			// result cap. Replace the least severe stored item and preserve the fact
+			// that the overall result set is partial.
+			$incoming = freesiem_sentinel_normalize_severity((string) ($finding['severity'] ?? 'info'));
+			$rank = ['info' => 0, 'low' => 1, 'medium' => 2, 'high' => 3, 'critical' => 4];
+			$victim_key = '';
+			$victim_rank = 5;
+
+			foreach ($state['findings'] as $stored_key => $stored) {
+				$stored_rank = $rank[freesiem_sentinel_normalize_severity((string) ($stored['severity'] ?? 'info'))] ?? 0;
+				if ($stored_rank < $victim_rank) {
+					$victim_rank = $stored_rank;
+					$victim_key = (string) $stored_key;
+				}
+			}
+
+			if (($rank[$incoming] ?? 0) > $victim_rank && $victim_key !== '') {
+				unset($state['findings'][$victim_key]);
+			} else {
+				$state['partial'] = true;
+				$state['partial_reason'] = $state['partial_reason'] ?: 'finding_cap';
+				return false;
+			}
+
 			$state['partial'] = true;
 			$state['partial_reason'] = $state['partial_reason'] ?: 'finding_cap';
-
-			return false;
 		}
 
 		$finding['severity'] = freesiem_sentinel_normalize_severity((string) ($finding['severity'] ?? 'info'));
@@ -2973,15 +3055,10 @@ class Freesiem_Deep_Scanner
 		$prefs = is_array($state['prefs'] ?? null) ? $state['prefs'] : $this->resolve_preferences([]);
 		$intensity = (string) ($prefs['scan_intensity'] ?? 'balanced');
 
-		// A full sweep should not crawl at the slowest pace.
-		if (!empty($state['full']) && $intensity === 'gentle') {
-			$intensity = 'balanced';
-		}
-
 		$base = match ($intensity) {
-			'gentle' => ['files' => 400, 'seconds' => 8.0, 'throttle_us' => 20000, 'batch' => 10],
-			'thorough' => ['files' => 3000, 'seconds' => 25.0, 'throttle_us' => 2000, 'batch' => 50],
-			default => ['files' => 1200, 'seconds' => 12.0, 'throttle_us' => 8000, 'batch' => 20],
+			'gentle' => ['files' => 200, 'seconds' => 4.0, 'throttle_us' => 30000, 'batch' => 10],
+			'thorough' => ['files' => 800, 'seconds' => 8.0, 'throttle_us' => 8000, 'batch' => 25],
+			default => ['files' => 400, 'seconds' => 6.0, 'throttle_us' => 16000, 'batch' => 20],
 		};
 
 		if (isset($prefs['throttle_us']) && (int) $prefs['throttle_us'] >= 0) {
@@ -2991,8 +3068,8 @@ class Freesiem_Deep_Scanner
 		if ($context === 'foreground') {
 			// Just enough to show immediate progress; the Scan screen's poller and
 			// WP-Cron carry the rest so the button returns quickly.
-			$base['files'] *= 2;
-			$base['seconds'] = min(max($base['seconds'], 12.0), 15.0);
+			$base['files'] = min(600, $base['files'] * 2);
+			$base['seconds'] = min(max($base['seconds'], 6.0), 8.0);
 		}
 
 		return $base;
@@ -3070,18 +3147,6 @@ class Freesiem_Deep_Scanner
 			if ($here === $self || str_starts_with($here . '/', $self . '/')) {
 				return true;
 			}
-		}
-
-		$normalized = $this->relative_path($path);
-		$is_backup_dir = str_contains($normalized, 'synchy-backups')
-			|| str_contains($normalized, '/backups/')
-			|| str_ends_with($normalized, '/backups');
-
-		// A backup folder is only safe to walk past if it is actually sealed off
-		// (deny-all .htaccess). An unsealed "backups" directory in a web-reachable
-		// spot is a fine place to hide a shell — descend and scan it.
-		if ($is_backup_dir) {
-			return $this->directory_denies_web_access($path);
 		}
 
 		return false;

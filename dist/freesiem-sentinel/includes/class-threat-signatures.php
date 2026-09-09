@@ -896,6 +896,23 @@ class Freesiem_Threat_Signatures
 				'recommendation' => 'User-agent / referer gated redirects are used for SEO spam and malvertising. Remove the rules.',
 			],
 
+			[
+				'id' => 'htaccess_php_whitelist_dropzone',
+				'label' => 'Directory denies all PHP except one whitelisted entry point',
+				'severity' => 'critical',
+				'score' => 20,
+				'category' => 'malware',
+				'classes' => ['htaccess'],
+				// The inverse of normal hardening. Legitimate rules deny PHP outright
+				// (uploads, cache). This denies every PHP spelling — including case
+				// permutations like pHp / PhP and the .suspected extension scanners
+				// rename shells to — and then re-allows exactly one file. That combination
+				// only makes sense to someone protecting their own shell from rivals
+				// and from a cleanup pass. Seen 20x across one site in the 2026-05 incident.
+				'pattern' => '/<FilesMatch[^>]{0,120}(?:phtml|suspected|[pP][hH][pP]7?)[^>]{0,120}>\s*(?:[^<]{0,200})Deny\s+from\s+all[\s\S]{0,200}?<FilesMatch[^>]{0,80}index\\?\.php[^>]{0,40}>\s*(?:[^<]{0,200})Allow\s+from\s+all/i',
+				'recommendation' => 'This directory is configured to run exactly one PHP file and block every other. Unless you created it, the allowed file is a web shell and the directory is an attacker dropzone. Remove the whole directory.',
+			],
+
 			// ---- Self-modification / anti-forensics / off-the-shelf file managers ----
 			[
 				'id' => 'php_self_rewrite',
@@ -957,6 +974,74 @@ class Freesiem_Threat_Signatures
 				'classes' => ['php'],
 				'pattern' => '/PHP File manager ver|danielyzx123\/btex|Den1xxx|\bfilemanager\b.{0,20}\bphpfm\b|\$auth\s*=\s*json_decode\s*\(\s*\$authorization|Simple\s+PHP\s+Web\s*[- ]?Shell|b374k|WSO\s+\d\.\d|IndoXploit/i',
 				'recommendation' => 'This file is a recognised web shell / drop-in file manager. Remove it and investigate how it was uploaded.',
+			],
+
+			[
+				'id' => 'php_xor_chr_decoder',
+				'label' => 'Payload decoded byte-by-byte with XOR',
+				'severity' => 'critical',
+				'score' => 19,
+				'category' => 'malware',
+				'classes' => ['php'],
+				// chr($x ^ 165) inside a rebuild loop. Packers that split a payload on a
+				// nonsense delimiter and XOR each byte defeat every base64/gzinflate rule,
+				// because the blob is decimal digits and never decodes as base64.
+				'pattern' => '/\bforeach\s*\([^)]{1,180}\bas\s+\$\w+\s*\)[\s\S]{0,600}?\bchr\s*\(\s*\(?\s*(?:\(\s*int\s*\)\s*)?\$\w+\s*\)?\s*\^\s*\d{1,3}\s*\)/i',
+				'recommendation' => 'A byte-level XOR decoder is used to hide a payload from signature scanners. Reconstruct what it decodes to before deciding, but treat the file as a backdoor.',
+			],
+			[
+				'id' => 'php_write_include_unlink',
+				'label' => 'Writes a PHP file, includes it, then deletes it',
+				'severity' => 'critical',
+				'score' => 17,
+				'category' => 'malware',
+				'classes' => ['php'],
+				// The staging trio: materialise the decoded payload, execute it, remove
+				// the evidence. After the request there is nothing on disk to find, so
+				// file-based scanning and diffing both come up empty. No legitimate
+				// plugin round-trips code through a temp file it immediately unlinks.
+				'pattern' => '/\b(?:include|require)(?:_once)?\s*\(?\s*\$\w+\s*\)?\s*;\s*@?\s*unlink\s*\(\s*\$\w+/i',
+				'recommendation' => 'This runs code from a temporary file and deletes it in the same request — an anti-forensics loader. Treat the file as a backdoor and review access logs for when it was hit.',
+			],
+			[
+				'id' => 'php_split_string_callable',
+				'label' => 'Function name assembled from split string literals, then called',
+				'severity' => 'high',
+				'score' => 38,
+				'category' => 'malware',
+				'classes' => ['php'],
+				// $w = 'fil'.'e_p'.'ut_c'.'ont'.'ents'; $w($f, $data);
+				// Splitting a sensitive function name across literals exists only to keep
+				// it out of a grep. Require the variable to then be invoked, so ordinary
+				// string building does not match.
+				'pattern' => '/\$(\w+)\s*=\s*[\'"][a-z_]{1,6}[\'"]\s*(?:\.\s*[\'"][a-z_]{1,6}[\'"]\s*){2,};[\s\S]{0,200}?\$\1\s*\(/i',
+				'recommendation' => 'A function name broken across concatenated literals is deliberate obfuscation. Resolve what it builds and why.',
+			],
+			[
+				'id' => 'php_memory_corruption_exploit',
+				'label' => 'PHP memory-corruption / disable_functions bypass exploit',
+				'severity' => 'critical',
+				'score' => 15,
+				'category' => 'malware',
+				'classes' => ['php'],
+				// Heap-layout exploits that reach the CGI/CLI module struct to regain
+				// command execution where disable_functions blocks system()/exec().
+				// These carry no eval, no base64 and no superglobals, so every
+				// content-obfuscation rule slides straight off them.
+				'pattern' => '/(?:new\s+Pwn\s*\([^)]{1,120}\)[\s\S]{0,4000}?CHUNK_DATA_SIZE|ZEND_DEBUG_BUILD[\s\S]{0,8000}?\bstr2ptr\s*\(|\bHT_(?:SIZE|STRING_SIZE)\b[\s\S]{0,8000}?\bstr2ptr\s*\()/i',
+				'recommendation' => 'This is an exploit for the PHP interpreter itself, used to bypass disable_functions and run shell commands. There is no legitimate reason for it on a site. Remove it and treat the host as compromised.',
+			],
+			[
+				'id' => 'php_file_without_php_tag',
+				'label' => 'Credential-like data stored in a PHP-named file',
+				'severity' => 'medium',
+				'score' => 60,
+				'category' => 'malware',
+				'classes' => ['php'],
+				// Plain HTML in a .php file is valid and common. Only flag the compact
+				// two-field token shape observed in attacker scratch/state files.
+				'pattern' => '/\A(?![\s\S]*<\?)\s*\([A-Za-z0-9_-]{20,80}:[A-Za-z0-9_-]{6,80}\)\s*\z/',
+				'recommendation' => 'Inspect this short data record and confirm which component created it. Outside PHP tags it may be served as plain text, so remove or protect it if it contains a credential or access token.',
 			],
 
 			// ---- Polyglot payloads inside otherwise-binary files ----
