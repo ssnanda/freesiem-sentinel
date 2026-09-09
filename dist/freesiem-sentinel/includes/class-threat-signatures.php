@@ -836,7 +836,12 @@ class Freesiem_Threat_Signatures
 				'score' => 34,
 				'category' => 'malware',
 				'classes' => ['htaccess'],
-				'pattern' => '/(?:php_value|php_admin_value)\s+auto_(?:prepend|append)_file|auto_(?:prepend|append)_file\s*=/i',
+				// Only fire when the directive points at an actual file. The empty
+				// form (`auto_prepend_file =` in a .user.ini, `... none` in Apache)
+				// is the DISABLE form and is normal hardening — SureMails, Wordfence
+				// and several hosts drop a `.user.ini` in uploads that blanks these
+				// directives on purpose. A blank value can't force any PHP to run.
+				'pattern' => '/(?:php_value|php_admin_value)\s+auto_(?:prepend|append)_file\s+(?!none\b)[\'"]?[^\s\'";]|auto_(?:prepend|append)_file\s*=[^\S\r\n]*(?!none\b)[\'"]?[^\s\'";]/i',
 				'recommendation' => 'This forces a PHP file to run on every request and is a common persistence mechanism. Confirm the referenced file is trusted.',
 			],
 			[
