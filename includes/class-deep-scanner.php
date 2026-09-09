@@ -558,19 +558,72 @@ class Freesiem_Deep_Scanner
 		}
 
 		$this->check_filename_heuristics($path, $rel, $basename, $extension, $size, $state);
+		$this->check_marker_file($path, $rel, $basename, $extension, $size, $state);
 
 		$mode = Freesiem_Threat_Signatures::scan_mode($basename, $extension);
+
+		// A file whose name / extension says "not code" may still be executable
+		// PHP — a shell renamed shell.php.bak, avatar.png, license.old, or with no
+		// extension at all. Peek the head; if it opens a PHP tag, pull it into the
+		// scan as PHP and record why it looked wrong.
+		$disguised_php = false;
+
+		if ($mode === 'skip' || $mode === 'peek') {
+			$head = (string) @file_get_contents($path, false, null, 0, self::PEEK_BYTES);
+
+			if ($head !== '' && $this->looks_like_php_source($head)) {
+				$disguised_php = true;
+
+				// Images already get the polyglot signatures via 'peek'; the
+				// extra "not named as PHP" finding is for everything else.
+				if (!in_array($extension, ['jpg', 'jpeg', 'png', 'gif', 'bmp', 'ico', 'webp', 'svg'], true)) {
+					$this->flag_disguised_php($rel, $basename, $extension, $size, $state);
+				}
+
+				if ($mode === 'skip') {
+					$mode = 'full';
+				}
+			}
+		}
 
 		if ($mode === 'skip') {
 			return;
 		}
 
-		if ($mode === 'full' && $size > self::MAX_READ_BYTES) {
-			return;
-		}
+		$native_class = $mode === 'peek' ? 'peek' : Freesiem_Threat_Signatures::classify($basename, $extension);
+		$is_code_class = $disguised_php || in_array($native_class, ['php', 'js', 'html', 'htaccess'], true);
 
-		$length = $mode === 'peek' ? self::PEEK_BYTES : self::MAX_READ_BYTES;
-		$contents = @file_get_contents($path, false, null, 0, $length);
+		if ($mode === 'full' && $size > self::MAX_READ_BYTES) {
+			// A giant .sql / .xml / .txt is covered by the filename heuristics and
+			// describe_data_file(); skipping the content scan is fine. A giant
+			// CODE file is a red flag on its own — an attacker pads a shell so the
+			// scanner walks past it. Read a head + tail window and scan that.
+			if (!$is_code_class) {
+				return;
+			}
+
+			$contents = $this->read_head_and_tail($path, $size);
+			$this->add_finding($state, [
+				'finding_key' => 'deep_oversized_code_' . md5($rel),
+				'category' => 'malware',
+				'severity' => 'low',
+				'title' => 'Unusually large code file',
+				'description' => sprintf('%s is %s — far larger than hand-written source. Large code files are used to bury a payload past a scanner\'s read limit. Only the first and last portions were signature-scanned.', $rel, size_format($size)),
+				'recommendation' => 'Open the file and confirm it is a legitimate generated/minified asset. If you cannot account for its size, treat it as suspicious.',
+				'evidence' => ['path' => $rel, 'size' => $size, 'class' => $native_class],
+				'score' => 80,
+			]);
+		} else {
+			$length = $mode === 'peek' ? self::PEEK_BYTES : self::MAX_READ_BYTES;
+
+			// A disguised shell hides behind a non-PHP name precisely so it is
+			// only peeked; read it in full so the PHP signatures see all of it.
+			if ($disguised_php && $mode === 'peek') {
+				$length = self::MAX_READ_BYTES;
+			}
+
+			$contents = @file_get_contents($path, false, null, 0, $length);
+		}
 
 		if (!is_string($contents) || $contents === '') {
 			return;
@@ -579,8 +632,247 @@ class Freesiem_Deep_Scanner
 		$state['counters']['files_scanned']++;
 		$state['counters']['bytes_scanned'] += strlen($contents);
 
-		$class = $mode === 'peek' ? 'peek' : Freesiem_Threat_Signatures::classify($basename, $extension);
-		$this->match_signatures($contents, $rel, $class, $state, '', $size);
+		// Signature classes to run: the file's native class, plus 'php' whenever
+		// the bytes contain a PHP open tag in a file not already classed as PHP.
+		$classes = [$native_class];
+
+		if ($native_class !== 'php' && ($disguised_php || str_contains($contents, '<?php') || str_contains($contents, '<?='))) {
+			$classes[] = 'php';
+		}
+
+		if (in_array('php', $classes, true)) {
+			$this->score_obfuscation($contents, $rel, $size, $disguised_php, $state);
+		}
+
+		foreach (array_unique($classes) as $class) {
+			$this->match_signatures($contents, $rel, $class, $state, '', $size);
+		}
+	}
+
+	/**
+	 * Does this file's head look like PHP source (not just an incidental "<?"
+	 * in XML/SVG)? Used to catch a shell hiding behind a non-PHP name.
+	 */
+	private function looks_like_php_source(string $head): bool
+	{
+		return (bool) preg_match('~<\?php[\s\r\n(]|<\?=|<\?php$|<script\s+language\s*=\s*[\'"]?php~i', $head);
+	}
+
+	/**
+	 * Read up to MAX_READ_BYTES from the start of a file plus the last ~512 KB,
+	 * joined, so an oversized file is still partly signature-scanned.
+	 */
+	private function read_head_and_tail(string $path, int $size): string
+	{
+		$tail_len = 524288;
+		$head_len = max(0, self::MAX_READ_BYTES - $tail_len);
+		$head = (string) @file_get_contents($path, false, null, 0, $head_len);
+		$tail = '';
+
+		if ($size > $head_len + $tail_len) {
+			$tail = (string) @file_get_contents($path, false, null, $size - $tail_len, $tail_len);
+		}
+
+		return $tail === '' ? $head : $head . "\n/* …freeSIEM: oversized-file gap… */\n" . $tail;
+	}
+
+	/**
+	 * Executable PHP living in a file that is NOT named as PHP. Severity scales
+	 * with how web-reachable and how disguised it is.
+	 */
+	private function flag_disguised_php(string $rel, string $basename, string $extension, int $size, array &$state): void
+	{
+		$in_uploads = str_starts_with($rel, $this->relative_path(WP_CONTENT_DIR . '/uploads'));
+		$in_public_root = !str_contains(trim($rel, '/'), '/');
+		$doc_ext = in_array($extension, ['txt', 'md', 'markdown', 'rst', 'log', 'json', 'xml', 'csv', 'html', 'htm', 'po', 'pot'], true);
+		$backupish = in_array($extension, ['bak', 'old', 'orig', 'save', 'sav', 'tmp', 'temp', 'swp', 'suspected', 'disabled', 'off', '_', '1', '2', 'txt2', 'bkp', 'copy'], true)
+			|| (bool) preg_match('#\.(?:php\d?|phtml|phar)[._~-]#i', $basename);
+
+		// A doc / data file that merely contains a PHP open tag (a code sample in
+		// a changelog, an example in a readme) is common and benign. Don't raise
+		// a name-based finding for those — the PHP signature + obfuscation scan
+		// still runs on the contents and will flag a real payload with high
+		// confidence. Only the disguises that have no innocent explanation get a
+		// finding here.
+		if ($doc_ext) {
+			return;
+		}
+
+		if ($backupish || $extension === '') {
+			$severity = ($in_uploads || $in_public_root) ? 'critical' : 'high';
+			$score = ($in_uploads || $in_public_root) ? 22 : 40;
+			$why = $extension === ''
+				? 'It has no file extension but its contents are executable PHP.'
+				: 'Its extension marks it as a backup / disabled copy, but its contents are executable PHP — a common way to park a shell where a scanner will not look.';
+		} else {
+			$severity = ($in_uploads || $in_public_root) ? 'high' : 'medium';
+			$score = ($in_uploads || $in_public_root) ? 44 : 60;
+			$why = sprintf('Its extension (.%s) does not indicate PHP, but its contents are executable PHP.', $extension);
+		}
+
+		$this->add_finding($state, [
+			'finding_key' => 'deep_disguised_php_' . md5($rel),
+			'category' => 'malware',
+			'severity' => $severity,
+			'title' => 'Executable PHP in a file that is not named as PHP',
+			'description' => sprintf('%s: %s', $rel, $why),
+			'recommendation' => 'Download and inspect the file offline. If it is not a deliberate, documented code sample, treat it as a planted payload: quarantine it and review access logs.',
+			'evidence' => ['path' => $rel, 'extension' => $extension, 'size' => $size],
+			'score' => $score,
+		]);
+	}
+
+	/**
+	 * Signature-independent obfuscation scoring. Catches a novel or heavily
+	 * disguised shell that trips no specific pattern, by looking at structural
+	 * tells: a payload appended after the "real" file, code after
+	 * __halt_compiler(), enormous single lines, high non-printable density, and a
+	 * concentration of dynamic-dispatch / decoder / superglobal-callable tokens.
+	 */
+	private function score_obfuscation(string $contents, string $rel, int $size, bool $disguised, array &$state): void
+	{
+		$len = strlen($contents);
+
+		if ($len < 24) {
+			return;
+		}
+
+		$reasons = [];
+
+		// --- Execution signals: the code actually runs something hidden. ---
+		$exec = 0;
+
+		// A payload appended after the file's final PHP closing tag: the close
+		// tag, then only whitespace, then a PHP open tag beginning a single
+		// dense line that runs a decoder / eval and nothing else. A normal
+		// template's tag transitions carry HTML between the tags, so they do
+		// not match this.
+		if (preg_match('~\?>[ \t\r\n]{0,40}<\?php[ \t]{0,4}(@?\s*(?:eval|assert|error_reporting|ini_set|@?(?:base64_decode|gzinflate|create_function))\b[^\r\n]{0,4000}?)\s*(?:\?>\s*)?$~i', $contents, $m)) {
+			$reasons[] = 'a one-line PHP block appended after the file\'s closing tag';
+			$exec += 60;
+		}
+
+		// Code after __halt_compiler() — "the data section is really a payload".
+		if (preg_match('~__halt_compiler\s*\(\s*\)\s*;(.{200,})~s', $contents, $m)
+			&& preg_match('~[A-Za-z0-9+/=]{200,}|\\\\x[0-9a-f]{2}|eval|base64_decode|gzinflate~i', $m[1])) {
+			$reasons[] = 'executable-looking data after __halt_compiler()';
+			$exec += 60;
+		}
+
+		// Token concentration: decoders, dynamic dispatch, superglobal-as-callable,
+		// variable-variables, char builders — relative to file size.
+		$dyn = preg_match_all('~\b(?:base64_decode|gzinflate|gzuncompress|gzdecode|str_rot13|convert_uudecode|hex2bin)\s*\(~i', $contents)
+			+ preg_match_all('~\b(?:eval|assert|create_function|preg_replace_callback)\s*\(~i', $contents)
+			+ preg_match_all('~\$\{\s*[\'"]|\$\$[a-z_]|\bGLOBALS\s*\[[^\]]*\]\s*\(~i', $contents)
+			+ preg_match_all('~\$_(?:GET|POST|REQUEST|COOKIE|SERVER)\s*\[[^\]]{1,40}\]\s*[({]~', $contents);
+		$per_kb = $dyn / max(1, $len / 1024);
+		if ($dyn >= 6 && $per_kb > 1.2) {
+			$reasons[] = sprintf('%d dynamic-execution / decoder tokens (%.1f per KB)', $dyn, $per_kb);
+			$exec += $per_kb > 4 ? 55 : 30;
+		}
+
+		// --- Structure signals: it LOOKS packed. Alone, these are just how a
+		//     minified asset or a Unicode data table looks — they only count
+		//     alongside an execution signal. ---
+		$struct = 0;
+
+		$longest = 0;
+		foreach (explode("\n", substr($contents, 0, 262144)) as $line) {
+			$longest = max($longest, strlen($line));
+		}
+		if ($longest > 8000) {
+			$reasons[] = sprintf('a %s-character line', number_format_i18n($longest));
+			$struct += $longest > 40000 ? 30 : 18;
+		}
+
+		$sample = substr($contents, 0, 131072);
+		$nonprint = strlen((string) preg_replace('~[\x09\x0A\x0D\x20-\x7E]~', '', $sample));
+		if (strlen($sample) > 512 && $nonprint / strlen($sample) > 0.15) {
+			$reasons[] = sprintf('%d%% non-text bytes', (int) round(100 * $nonprint / strlen($sample)));
+			$struct += 30;
+		}
+
+		if (preg_match('~\'[^\'\r\n]{6000,}\'|"[^"\r\n]{6000,}"~', $contents)) {
+			$reasons[] = 'a multi-kilobyte inline string literal';
+			$struct += 15;
+		}
+
+		if ($disguised) {
+			$exec += 15;
+		}
+
+		// Fire on a strong execution signal on its own, or a moderate one that is
+		// also structurally packed. Never on structure alone.
+		if ($exec < 40 && !($exec >= 25 && $struct >= 25)) {
+			return;
+		}
+
+		$score = $exec + $struct;
+		$severity = $score >= 110 ? 'critical' : ($score >= 75 ? 'high' : 'medium');
+
+		$this->add_finding($state, [
+			'finding_key' => 'deep_obfuscated_php_' . md5($rel),
+			'category' => 'malware',
+			'severity' => $severity,
+			'title' => 'Heavily obfuscated PHP',
+			'description' => sprintf('%s shows the structure of obfuscated / packed code (%s) without matching a specific known signature. Legitimate source is rarely built this way.', $rel, implode('; ', $reasons)),
+			'recommendation' => 'Reconstruct what the file does (de-obfuscate the payload in a sandbox). If you cannot attribute it to a plugin you trust, treat it as a backdoor.',
+			'evidence' => ['path' => $rel, 'size' => $size, 'reasons' => $reasons, 'obfuscation_score' => $score],
+			'score' => max(10, 70 - (int) ($score / 3)),
+		]);
+	}
+
+	/**
+	 * A tiny file whose entire body is a digit, an absolute filesystem path, a
+	 * bare domain / hostname, or nothing — dropped in the web root or a random
+	 * top-level directory. This is what an attacker or a mass-exploit scanner
+	 * leaves behind to confirm write access and fingerprint the box.
+	 */
+	private function check_marker_file(string $path, string $rel, string $basename, string $extension, int $size, array &$state): void
+	{
+		if ($size > 512 || $size < 0) {
+			return;
+		}
+
+		$depth = substr_count(trim($rel, '/'), '/');
+		$top = strtok(trim($rel, '/'), '/');
+		$random_top_dir = $depth === 1 && (bool) preg_match('~^(?:[0-9]{3,}|[a-f0-9]{8,}|[a-z0-9]{1,4})$~i', (string) $top)
+			&& !in_array(strtolower((string) $top), ['wp-admin', 'wp-includes', 'wp-content', 'cgi-bin'], true);
+		$in_public_root = $depth === 0;
+
+		if (!$in_public_root && !$random_top_dir) {
+			return;
+		}
+
+		if (in_array($extension, ['php', 'phtml', 'phar', 'js', 'css', 'html', 'htm', 'json', 'xml', 'map', 'lock', 'md'], true)) {
+			return; // handled by other checks / normal project files
+		}
+
+		if (in_array($basename, ['index.php', 'index.html', '.htaccess', 'robots.txt', 'favicon.ico', 'ads.txt', 'security.txt', 'llms.txt', 'sitemap.xml', '.well-known'], true)) {
+			return;
+		}
+
+		$body = trim((string) @file_get_contents($path, false, null, 0, 512));
+		$looks_marker = $body === ''
+			|| preg_match('~^[0-9]{1,4}$~', $body)
+			|| preg_match('~^(?:/[A-Za-z0-9._-]+){2,}/?$~', $body)                       // absolute unix path
+			|| preg_match('~^[a-z0-9-]+\.[a-z0-9-]+(?:\.[a-z]{2,})+$~i', $body)          // bare domain
+			|| preg_match('~^[A-Za-z0-9+/=]{6,32}$~', $body) && !str_contains($body, ' '); // short token
+
+		if (!$looks_marker) {
+			return;
+		}
+
+		$this->add_finding($state, [
+			'finding_key' => 'deep_recon_marker_' . md5($rel),
+			'category' => 'malware',
+			'severity' => 'high',
+			'title' => 'Attacker reconnaissance marker file',
+			'description' => sprintf('%s is a tiny file (%d byte(s)) %s whose content is %s. Automated exploit tools and attackers drop files like this to confirm they can write to the server and to fingerprint it.', $rel, $size, $in_public_root ? 'in the web root' : 'in a random-named directory', $body === '' ? 'empty' : '"' . mb_substr($body, 0, 80) . '"'),
+			'recommendation' => 'If you did not create this file, delete it and the directory it sits in, and check access logs for the request that wrote it — it marks a successful write from an exploit attempt.',
+			'evidence' => ['path' => $rel, 'size' => $size, 'body' => mb_substr($body, 0, 120)],
+			'score' => 46,
+		]);
 	}
 
 	private function match_signatures(string $contents, string $rel, string $class, array &$state, string $category_override = '', int $file_size = -1): void
@@ -848,7 +1140,11 @@ class Freesiem_Deep_Scanner
 			$cursor['stage'] = 'self';
 		} elseif ($stage === 'self') {
 			$this->integrity_self_step($state);
-			$cursor['stage'] = 'done';
+			$cursor = ['stage' => 'extcode', 'index' => 0, 'plugin_index' => 0];
+		} elseif ($stage === 'extcode') {
+			if (empty($prefs['scan_plugin_integrity']) || $this->integrity_extcode_step($state, $cursor)) {
+				$cursor['stage'] = 'done';
+			}
 		} else {
 			$state['phase'] = empty($prefs['scan_database']) ? 'done' : 'database';
 
@@ -1077,64 +1373,128 @@ class Freesiem_Deep_Scanner
 		return $cursor['index'] >= count($files);
 	}
 
+	/**
+	 * The only .php files WordPress core places directly in the web root. Used to
+	 * flag a stray root-level PHP file (a loader / backdoor mimicking a core
+	 * name, e.g. wp-header.php) even when no checksum manifest is available.
+	 */
+	private const CORE_ROOT_PHP = [
+		'index.php', 'wp-activate.php', 'wp-blog-header.php', 'wp-comments-post.php',
+		'wp-config.php', 'wp-config-sample.php', 'wp-cron.php', 'wp-links-opml.php',
+		'wp-load.php', 'wp-login.php', 'wp-mail.php', 'wp-settings.php', 'wp-signup.php',
+		'wp-trackback.php', 'xmlrpc.php',
+	];
+
 	private function integrity_core_extra_step(array &$state): void
 	{
-		if (!$this->is_released_version()) {
+		$checksums = $this->is_released_version() ? $this->core_checksums() : [];
+		$have_manifest = $checksums !== [];
+
+		// --- Web root: a stray top-level .php file (no checksum manifest needed) ---
+		$root = untrailingslashit(ABSPATH);
+		$root_items = @scandir($root);
+
+		if (is_array($root_items)) {
+			foreach ($root_items as $item) {
+				if (!str_ends_with(strtolower($item), '.php')) {
+					continue;
+				}
+
+				$lower = strtolower($item);
+
+				if (in_array($lower, self::CORE_ROOT_PHP, true)) {
+					continue;
+				}
+
+				$full = wp_normalize_path($root . '/' . $item);
+
+				if (!is_file($full) || is_link($full)) {
+					continue;
+				}
+
+				// A few hosts / installers legitimately drop one loader in the root.
+				// Keep the severity a notch below wp-admin/wp-includes but still loud.
+				$rel = $this->relative_path($full);
+				$mimics_core = (bool) preg_match('~^wp[-_].*\.php$~i', $item);
+
+				$this->add_finding($state, [
+					'finding_key' => 'deep_core_unknown_' . md5($rel),
+					'category' => 'core_integrity',
+					'severity' => $mimics_core ? 'high' : 'medium',
+					'title' => 'Unrecognized PHP file in the WordPress web root',
+					'description' => sprintf('%s sits in the site root but is not one of the files WordPress core places there.%s Loader files with core-looking names (wp-*.php) are a common backdoor / staging pattern.', $rel, $mimics_core ? ' Its name mimics a core file.' : ''),
+					'recommendation' => 'Open the file. If it is not something your host or a deliberate customization added, remove it and review access logs.',
+					'evidence' => ['path' => $rel, 'size' => (int) @filesize($full), 'mimics_core_name' => $mimics_core],
+					'score' => $mimics_core ? 44 : 62,
+				]);
+			}
+		}
+
+		if (!$have_manifest) {
 			return;
 		}
 
-		$checksums = $this->core_checksums();
-
-		if ($checksums === []) {
-			return;
-		}
-
+		// --- wp-admin/** and wp-includes/**: anything not in the manifest ---
 		$known = [];
 
 		foreach (array_keys($checksums) as $file) {
 			$known[wp_normalize_path(ABSPATH . $file)] = 1;
 		}
 
-		$dirs = [
-			untrailingslashit(ABSPATH) . '/wp-admin',
-			untrailingslashit(ABSPATH) . '/wp-admin/includes',
-			untrailingslashit(ABSPATH) . '/wp-includes',
-		];
+		foreach (['wp-admin', 'wp-includes'] as $top) {
+			$this->scan_core_tree_for_unknowns(untrailingslashit(ABSPATH) . '/' . $top, $known, 0, $state);
+		}
+	}
 
-		foreach ($dirs as $dir) {
-			if (!is_dir($dir) || !is_readable($dir)) {
+	/**
+	 * Recursively flag every .php file under a core directory that the checksum
+	 * manifest does not list. Bounded depth; no plugin/theme code lives here, so
+	 * an unknown .php is a strong compromise signal wherever in the tree it is.
+	 */
+	private function scan_core_tree_for_unknowns(string $dir, array $known, int $depth, array &$state): void
+	{
+		if ($depth > 8 || !is_dir($dir) || !is_readable($dir) || is_link($dir)) {
+			return;
+		}
+
+		$items = @scandir($dir);
+
+		if (!is_array($items)) {
+			return;
+		}
+
+		foreach ($items as $item) {
+			if ($item === '.' || $item === '..') {
 				continue;
 			}
 
-			$items = @scandir($dir);
+			$full = wp_normalize_path($dir . '/' . $item);
 
-			if (!is_array($items)) {
+			if (is_link($full)) {
 				continue;
 			}
 
-			foreach ($items as $item) {
-				if (!str_ends_with(strtolower($item), '.php')) {
-					continue;
-				}
+			if (is_dir($full)) {
+				$this->scan_core_tree_for_unknowns($full, $known, $depth + 1, $state);
 
-				$full = wp_normalize_path($dir . '/' . $item);
-
-				if (isset($known[$full]) || !is_file($full)) {
-					continue;
-				}
-
-				$rel = $this->relative_path($full);
-				$this->add_finding($state, [
-					'finding_key' => 'deep_core_unknown_' . md5($rel),
-					'category' => 'core_integrity',
-					'severity' => 'critical',
-					'title' => 'Unrecognized PHP file in a WordPress core directory',
-					'description' => sprintf('%s is not part of the official WordPress distribution. Extra PHP files in wp-admin / wp-includes are a very common backdoor location.', $rel),
-					'recommendation' => 'Inspect the file. Legitimate plugins never add files here — if you cannot attribute it, remove it and treat the site as compromised.',
-					'evidence' => ['path' => $rel, 'size' => (int) @filesize($full)],
-					'score' => 24,
-				]);
+				continue;
 			}
+
+			if (!str_ends_with(strtolower($item), '.php') || isset($known[$full]) || !is_file($full)) {
+				continue;
+			}
+
+			$rel = $this->relative_path($full);
+			$this->add_finding($state, [
+				'finding_key' => 'deep_core_unknown_' . md5($rel),
+				'category' => 'core_integrity',
+				'severity' => 'critical',
+				'title' => 'Unrecognized PHP file in a WordPress core directory',
+				'description' => sprintf('%s is not part of the official WordPress distribution. Extra PHP files anywhere under wp-admin / wp-includes are a very common backdoor location.', $rel),
+				'recommendation' => 'Inspect the file. Legitimate plugins never add files here — if you cannot attribute it, remove it and treat the site as compromised.',
+				'evidence' => ['path' => $rel, 'size' => (int) @filesize($full)],
+				'score' => 24,
+			]);
 		}
 	}
 
@@ -1513,6 +1873,327 @@ class Freesiem_Deep_Scanner
 		sort($extra);
 
 		return $extra;
+	}
+
+	// ---------------------------------------------------------------------
+	// Phase: integrity — external (premium / custom) plugin & theme baseline
+	// ---------------------------------------------------------------------
+
+	public const EXTCODE_BASELINE_OPTION = 'freesiem_sentinel_extcode_baseline';
+	private const EXTCODE_MAX_FILES = 30000;
+	private const EXTCODE_BATCH = 250;
+
+	/**
+	 * WordPress.org checksums only cover core and wp.org-hosted plugins/themes.
+	 * A backdoor injected into an existing file of a PREMIUM or CUSTOM plugin
+	 * (Hostinger's, a page builder's pro add-on, a bespoke plugin) matches no
+	 * checksum and only trips a content signature if it is written carelessly.
+	 *
+	 * This step keeps its own hash baseline of every .php / .js file under
+	 * plugins, themes and mu-plugins that is not already wp.org-verified. On the
+	 * first run it just records the baseline; on later runs it flags any file
+	 * whose bytes changed while its component's version stayed the same, and any
+	 * brand-new file appearing in a component that was not updated — regardless
+	 * of whether the change looks malicious.
+	 *
+	 * @return bool true when the step is complete for this run
+	 */
+	private function integrity_extcode_step(array &$state, array &$cursor): bool
+	{
+		// --- Phase 1: build the candidate file list (once) ---
+		if (!isset($cursor['files'])) {
+			$roots = array_values(array_filter([
+				untrailingslashit(WP_PLUGIN_DIR),
+				untrailingslashit((string) get_theme_root()),
+				defined('WPMU_PLUGIN_DIR') ? untrailingslashit(WPMU_PLUGIN_DIR) : '',
+			]));
+
+			$files = [];
+
+			foreach ($roots as $root) {
+				if ($root === '' || !is_dir($root)) {
+					continue;
+				}
+
+				$this->collect_extcode_files($root, 0, $files);
+
+				if (count($files) >= self::EXTCODE_MAX_FILES) {
+					break;
+				}
+			}
+
+			sort($files);
+			$cursor['files'] = array_slice($files, 0, self::EXTCODE_MAX_FILES);
+			$cursor['index'] = 0;
+			$cursor['map'] = [];
+			$cursor['truncated'] = count($files) > self::EXTCODE_MAX_FILES ? count($files) : 0;
+
+			return false;
+		}
+
+		// --- Phase 2: hash a batch ---
+		$files = $cursor['files'];
+		$index = (int) $cursor['index'];
+		$end = min($index + self::EXTCODE_BATCH, count($files));
+
+		for (; $index < $end; $index++) {
+			$abs = (string) $files[$index];
+
+			if (!is_file($abs) || is_link($abs)) {
+				continue;
+			}
+
+			$rel = $this->relative_path($abs);
+
+			if ($this->is_vendor_verified($abs, $rel) || $this->self_relative_path($abs) !== null) {
+				continue; // core / wp.org checksums and our own integrity step own these
+			}
+
+			$md5 = (string) @md5_file($abs);
+
+			if ($md5 !== '') {
+				$cursor['map'][$rel] = $md5 . '|' . (int) @filesize($abs);
+			}
+		}
+
+		$cursor['index'] = $index;
+
+		if ($index < count($files)) {
+			return false;
+		}
+
+		// --- Phase 3: diff against the stored baseline and persist ---
+		$this->finalize_extcode_baseline($cursor['map'], (int) ($cursor['truncated'] ?? 0), $state);
+		unset($cursor['files'], $cursor['map']);
+
+		return true;
+	}
+
+	private function collect_extcode_files(string $dir, int $depth, array &$out): void
+	{
+		if ($depth > 12 || count($out) >= self::EXTCODE_MAX_FILES || !is_dir($dir) || !is_readable($dir) || is_link($dir)) {
+			return;
+		}
+
+		$items = @scandir($dir);
+
+		if (!is_array($items)) {
+			return;
+		}
+
+		foreach ($items as $item) {
+			if ($item === '.' || $item === '..') {
+				continue;
+			}
+
+			$lc = strtolower($item);
+
+			if (in_array($lc, ['.git', '.svn', '.hg', 'node_modules'], true)) {
+				continue;
+			}
+
+			$full = $dir . '/' . $item;
+
+			if (is_link($full)) {
+				continue;
+			}
+
+			if (is_dir($full)) {
+				$this->collect_extcode_files($full, $depth + 1, $out);
+
+				continue;
+			}
+
+			if (preg_match('~\.(php|phtml|php\d|inc|js|mjs|cjs)$~i', $lc)) {
+				$out[] = wp_normalize_path($full);
+
+				if (count($out) >= self::EXTCODE_MAX_FILES) {
+					return;
+				}
+			}
+		}
+	}
+
+	private function finalize_extcode_baseline(array $map, int $truncated, array &$state): void
+	{
+		$now = freesiem_sentinel_get_iso8601_time();
+		$versions = $this->extcode_component_versions();
+
+		$stored = get_option(self::EXTCODE_BASELINE_OPTION, []);
+		$stored = is_array($stored) ? $stored : [];
+		$base_map = is_array($stored['map'] ?? null) ? $stored['map'] : [];
+		$base_versions = is_array($stored['versions'] ?? null) ? $stored['versions'] : [];
+
+		$save = [
+			'built_at' => $now,
+			'versions' => $versions,
+			'map' => $map,
+			'truncated' => $truncated,
+		];
+
+		if ($base_map === []) {
+			update_option(self::EXTCODE_BASELINE_OPTION, $save, false);
+			$this->add_finding($state, [
+				'finding_key' => 'deep_extcode_baseline_new',
+				'category' => 'plugin_integrity',
+				'severity' => 'info',
+				'title' => 'Plugin / theme file baseline established',
+				'description' => sprintf('freeSIEM Sentinel recorded a hash of %s plugin, theme and mu-plugin file(s) that WordPress.org cannot verify. From the next scan on, any change to one of these files that is not explained by a version update will be reported.', number_format_i18n(count($map))),
+				'recommendation' => 'No action needed. Re-run the scan after you update plugins or themes so the baseline follows the new versions.',
+				'evidence' => ['files' => count($map), 'truncated' => $truncated],
+				'score' => 95,
+			]);
+
+			return;
+		}
+
+		$modified_by_component = [];
+		$new_by_component = [];
+
+		foreach ($map as $rel => $sig) {
+			$component = $this->extcode_component_for($rel);
+			$ver_now = (string) ($versions[$component] ?? '');
+			$ver_was = (string) ($base_versions[$component] ?? '');
+			$version_changed = $ver_was !== '' && $ver_now !== '' && $ver_was !== $ver_now;
+
+			if (isset($base_map[$rel])) {
+				if ($base_map[$rel] !== $sig && !$version_changed) {
+					$modified_by_component[$component][] = $rel;
+				}
+			} elseif (!$version_changed && $ver_was !== '') {
+				// A file that did not exist at baseline, in a component whose
+				// version did not move — i.e. something added a file without a
+				// legitimate update.
+				$new_by_component[$component][] = $rel;
+			}
+		}
+
+		update_option(self::EXTCODE_BASELINE_OPTION, $save, false);
+
+		foreach ($modified_by_component as $component => $rels) {
+			$this->emit_extcode_finding($state, 'modified', $component, $rels);
+		}
+
+		foreach ($new_by_component as $component => $rels) {
+			$this->emit_extcode_finding($state, 'new', $component, $rels);
+		}
+	}
+
+	private function emit_extcode_finding(array &$state, string $kind, string $component, array $rels): void
+	{
+		$rels = array_values(array_unique($rels));
+		$php = array_values(array_filter($rels, static fn (string $r): bool => (bool) preg_match('~\.(php|phtml|php\d|inc)$~i', $r)));
+		$count = count($rels);
+		$label = str_replace(['plugin:', 'theme:', 'mu:'], ['plugin ', 'theme ', 'mu-plugin '], $component);
+
+		$modified = $kind === 'modified';
+		$severe = $php !== [] || $count > 8;
+
+		$this->add_finding($state, [
+			'finding_key' => 'deep_extcode_' . $kind . '_' . md5($component),
+			'category' => 'plugin_integrity',
+			'severity' => $severe ? 'high' : 'medium',
+			'title' => $modified
+				? sprintf('%s: %d file(s) changed with no version update', ucfirst($label), $count)
+				: sprintf('%s: %d file(s) appeared with no version update', ucfirst($label), $count),
+			'description' => sprintf(
+				'%s in %s %s since the last scan, but the component\'s version did not change. A legitimate update bumps the version; a change without one points at a manual edit, a failed deploy, or injected code. WordPress.org cannot verify this component, so this is the only integrity signal for it.',
+				$modified ? sprintf('%d file(s) had their contents change', $count) : sprintf('%d new file(s) appeared', $count),
+				$label,
+				$php !== [] ? '(including PHP)' : ''
+			),
+			'recommendation' => 'Compare the listed files against a clean copy of this exact plugin/theme version. If you did not edit them, treat them as injected: restore the component from a trusted source and review access logs.',
+			'evidence' => [
+				'path' => $this->extcode_component_path($component),
+				'component' => $component,
+				'change_type' => $modified ? 'modified' : 'new',
+				'changed_count' => $count,
+				'modified_files' => array_slice($rels, 0, 20),
+			],
+			'score' => $severe ? 44 : 60,
+		]);
+	}
+
+	/**
+	 * plugin:<slug> / theme:<slug> / mu:<file> for a wp-content-relative path.
+	 */
+	private function extcode_component_for(string $rel): string
+	{
+		$rel = ltrim($rel, '/');
+		$plugins = trim($this->relative_path(WP_PLUGIN_DIR), '/');
+		$themes = trim($this->relative_path((string) get_theme_root()), '/');
+		$mu = defined('WPMU_PLUGIN_DIR') ? trim($this->relative_path(WPMU_PLUGIN_DIR), '/') : '';
+
+		if ($plugins !== '' && str_starts_with($rel, $plugins . '/')) {
+			$after = substr($rel, strlen($plugins) + 1);
+
+			return 'plugin:' . (strtok($after, '/') ?: $after);
+		}
+
+		if ($themes !== '' && str_starts_with($rel, $themes . '/')) {
+			$after = substr($rel, strlen($themes) + 1);
+
+			return 'theme:' . (strtok($after, '/') ?: $after);
+		}
+
+		if ($mu !== '' && str_starts_with($rel, $mu . '/')) {
+			return 'mu:' . basename($rel);
+		}
+
+		return 'other:' . dirname($rel);
+	}
+
+	private function extcode_component_path(string $component): string
+	{
+		[$type, $name] = array_pad(explode(':', $component, 2), 2, '');
+
+		if ($type === 'plugin') {
+			return 'wp-content/plugins/' . $name;
+		}
+
+		if ($type === 'theme') {
+			return 'wp-content/themes/' . $name;
+		}
+
+		if ($type === 'mu') {
+			return 'wp-content/mu-plugins/' . $name;
+		}
+
+		return (string) $name;
+	}
+
+	/**
+	 * Current version string for every plugin / theme, keyed the same way as
+	 * extcode_component_for(). mu-plugins have no version and are omitted (any
+	 * change to one is always worth surfacing).
+	 *
+	 * @return array<string,string>
+	 */
+	private function extcode_component_versions(): array
+	{
+		$versions = [];
+
+		if (!function_exists('get_plugins') && is_readable(ABSPATH . 'wp-admin/includes/plugin.php')) {
+			require_once ABSPATH . 'wp-admin/includes/plugin.php';
+		}
+
+		if (function_exists('get_plugins')) {
+			foreach (get_plugins() as $file => $data) {
+				$slug = strtok((string) $file, '/');
+
+				if (is_string($slug) && $slug !== '') {
+					$versions['plugin:' . $slug] = (string) ($data['Version'] ?? '');
+				}
+			}
+		}
+
+		if (function_exists('wp_get_themes')) {
+			foreach (wp_get_themes() as $slug => $theme) {
+				$versions['theme:' . $slug] = (string) $theme->get('Version');
+			}
+		}
+
+		return $versions;
 	}
 
 	// ---------------------------------------------------------------------
@@ -2372,10 +3053,18 @@ class Freesiem_Deep_Scanner
 		}
 
 		$normalized = $this->relative_path($path);
-
-		return str_contains($normalized, 'synchy-backups')
+		$is_backup_dir = str_contains($normalized, 'synchy-backups')
 			|| str_contains($normalized, '/backups/')
 			|| str_ends_with($normalized, '/backups');
+
+		// A backup folder is only safe to walk past if it is actually sealed off
+		// (deny-all .htaccess). An unsealed "backups" directory in a web-reachable
+		// spot is a fine place to hide a shell — descend and scan it.
+		if ($is_backup_dir) {
+			return $this->directory_denies_web_access($path);
+		}
+
+		return false;
 	}
 
 	/**

@@ -596,13 +596,20 @@ class Freesiem_Threat_Signatures
 			],
 			[
 				'id' => 'php_char_concat_chain',
-				'label' => 'Long chr()/ord() concatenation chain',
+				'label' => 'chr() concatenation chain feeding an execution sink',
 				'severity' => 'high',
 				'score' => 42,
 				'category' => 'malware',
 				'classes' => ['php'],
-				'pattern' => '/chr\s*\(\s*\d{1,3}\s*\)(?:\s*\.\s*chr\s*\(\s*\d{1,3}\s*\)){7,}/i',
-				'recommendation' => 'Building strings from many chr() calls is an obfuscation technique. Reconstruct the string to see what it does, then remove.',
+				// A bare `chr(a).chr(b)...` run on its own is almost always a
+				// legitimate charset / control-character table (Doctrine
+				// Inflector, PHPMailer line endings, Windows-1252 maps). Only
+				// flag one that is actually being executed: passed straight to
+				// eval / a callable / a command function, invoked as
+				// `(chr()...)(…)`, used as a variable-variable, or assigned and
+				// then called.
+				'pattern' => '/(?:\b(?:eval|assert|create_function|call_user_func(?:_array)?|preg_replace|array_map|array_filter|usort|uasort|array_walk|register_shutdown_function|register_tick_function|ob_start|set_error_handler|set_exception_handler|mb_ereg_replace|system|exec|passthru|shell_exec|proc_open|popen|pcntl_exec)\s*\(\s*(?:@?\w+\s*\(\s*)?(?:[^;\n{}]{0,16}?\.\s*)?(?:chr\s*\(\s*\d{1,3}\s*\)\s*\.\s*){4,}|(?:chr\s*\(\s*\d{1,3}\s*\)\s*\.\s*){4,}chr\s*\(\s*\d{1,3}\s*\)\s*\)\s*\(|\$(?:\$|\{)[^;\n]{0,40}?(?:chr\s*\(\s*\d{1,3}\s*\)\s*\.?\s*){3,}|\$(\w+)\s*=\s*(?:[^;\n{}]{0,16}?\.\s*)?(?:chr\s*\(\s*\d{1,3}\s*\)\s*\.\s*){4,}chr\s*\(\s*\d{1,3}\s*\)\s*;[\s\S]{0,200}?(?:\beval\s*\(\s*\$\1\b|\$\1\s*\())/i',
+				'recommendation' => 'A string built from many chr() calls and then executed is an obfuscated payload. Reconstruct it to see what it runs, then remove the file.',
 			],
 			[
 				'id' => 'php_hex_escape_blob',
@@ -713,6 +720,20 @@ class Freesiem_Threat_Signatures
 				'classes' => ['php'],
 				'pattern' => '/[\'"][A-Za-z0-9+\/]{320,}={0,2}[\'"]/',
 				'recommendation' => 'Large embedded base64 blobs can be fonts or images, but are also how payloads are shipped. Decode it to confirm what it contains.',
+			],
+			[
+				'id' => 'php_auth_weakening',
+				'label' => 'Code that weakens authentication controls',
+				'severity' => 'medium',
+				'score' => 64,
+				'category' => 'malware',
+				'classes' => ['php'],
+				// Forcing application passwords on regardless of HTTPS, or globally
+				// disabling TLS verification for WP HTTP, or re-enabling XML-RPC
+				// pingback after a security plugin killed it — small snippets that
+				// quietly reopen a door. Common as a planted mu-plugin / drop-in.
+				'pattern' => '/wp_is_application_passwords_available[\'"]?\s*,\s*[\'"]?__return_true|add_filter\s*\(\s*[\'"]https_(?:local_)?ssl_verify[\'"]\s*,\s*[\'"]?__return_false|[\'"]sslverify[\'"]\s*=>\s*false\s*[,)][\s\S]{0,200}\$_(?:GET|POST|REQUEST)|define\s*\(\s*[\'"]DISALLOW_FILE_EDIT[\'"]\s*,\s*false/i',
+				'recommendation' => 'Confirm you added this deliberately. A drop-in or mu-plugin that relaxes auth / TLS / file-editing protections is a common post-compromise foothold. On a production (HTTPS) site it should not be needed.',
 			],
 			[
 				'id' => 'php_suspicious_ini_set',
@@ -873,6 +894,69 @@ class Freesiem_Threat_Signatures
 				'classes' => ['htaccess'],
 				'pattern' => '/RewriteCond\s+%\{HTTP_(?:USER_AGENT|REFERER)\}[^\n]{0,120}\n\s*RewriteRule\s+[^\n]{0,120}https?:\/\//i',
 				'recommendation' => 'User-agent / referer gated redirects are used for SEO spam and malvertising. Remove the rules.',
+			],
+
+			// ---- Self-modification / anti-forensics / off-the-shelf file managers ----
+			[
+				'id' => 'php_self_rewrite',
+				'label' => 'PHP file that rewrites its own source',
+				'severity' => 'critical',
+				'score' => 22,
+				'category' => 'malware',
+				'classes' => ['php'],
+				// A file writing to __FILE__ is how droppers persist a changing
+				// config / credential block and how "file manager" shells save
+				// their own settings. Legitimate code never does this.
+				'pattern' => '/\b(?:file_put_contents|fwrite|fputs|file_put_contents)\s*\(\s*[^;)]{0,60}__FILE__/i',
+				'recommendation' => 'A PHP file that overwrites its own source is a persistence / self-updating-payload mechanism. Treat it as a backdoor: quarantine it and review access logs.',
+			],
+			[
+				'id' => 'php_mtime_reset',
+				'label' => 'Script resets its own file modification time (anti-forensics)',
+				'severity' => 'high',
+				'score' => 40,
+				'category' => 'malware',
+				'classes' => ['php'],
+				// touch(__FILE__, …) — a file restoring its OWN timestamp after
+				// rewriting itself, to stay out of "recently modified" sweeps. The
+				// btex file manager does exactly this. touch($otherfile, $t) is a
+				// normal filesystem operation and is deliberately NOT matched.
+				'pattern' => '/\btouch\s*\(\s*__FILE__\s*,/i',
+				'recommendation' => 'A script that rewrites itself and then resets its own timestamp is hiding the change. Treat it as a backdoor.',
+			],
+			[
+				'id' => 'php_eval_request_console',
+				'label' => 'eval() fed directly from request input',
+				'severity' => 'critical',
+				'score' => 18,
+				'category' => 'malware',
+				'classes' => ['php'],
+				'pattern' => '/\b(?:eval|assert)\s*\(\s*(?:@?\s*(?:stripslashes|trim|rtrim|ltrim|urldecode|rawurldecode|base64_decode|gzinflate|gzuncompress|str_rot13)\s*\(\s*)*\$_(?:POST|GET|REQUEST|COOKIE|SERVER|FILES)\b/i',
+				'recommendation' => 'This runs attacker-supplied PHP on every request — a remote code execution backdoor. Remove the file and treat the site as compromised.',
+			],
+			[
+				'id' => 'php_request_proxy',
+				'label' => 'Server-side request built from user input with TLS checks disabled',
+				'severity' => 'high',
+				'score' => 48,
+				'category' => 'malware',
+				'classes' => ['php'],
+				// The "mini proxy" in file-manager shells: it forwards to a URL taken
+				// from request input AND turns off TLS verification. Require both
+				// halves (order-independent, anywhere in the file) so a normal
+				// webhook client that only does one of them does not match.
+				'pattern' => '/(?=[\s\S]*?curl_exec\s*\()(?=[\s\S]*?\$_(?:GET|REQUEST|POST)\s*\[)curl_setopt\s*\(\s*\$\w+\s*,\s*CURLOPT_SSL_VERIFY(?:PEER|HOST)\s*,\s*(?:0|false|null)\b/i',
+				'recommendation' => 'A request proxy that forwards to a user-supplied URL with TLS verification disabled is used for SSRF and as an open relay. Confirm why it is here.',
+			],
+			[
+				'id' => 'php_offtheshelf_filemanager',
+				'label' => 'Known off-the-shelf PHP file-manager / shell fingerprint',
+				'severity' => 'critical',
+				'score' => 16,
+				'category' => 'malware',
+				'classes' => ['php'],
+				'pattern' => '/PHP File manager ver|danielyzx123\/btex|Den1xxx|\bfilemanager\b.{0,20}\bphpfm\b|\$auth\s*=\s*json_decode\s*\(\s*\$authorization|Simple\s+PHP\s+Web\s*[- ]?Shell|b374k|WSO\s+\d\.\d|IndoXploit/i',
+				'recommendation' => 'This file is a recognised web shell / drop-in file manager. Remove it and investigate how it was uploaded.',
 			],
 
 			// ---- Polyglot payloads inside otherwise-binary files ----

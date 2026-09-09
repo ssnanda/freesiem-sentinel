@@ -75,6 +75,9 @@ class Freesiem_Admin
 		add_action('admin_post_freesiem_sentinel_quarantine_file', [$this, 'handle_quarantine_file']);
 		add_action('admin_post_freesiem_sentinel_delete_file', [$this, 'handle_delete_file']);
 		add_action('admin_post_freesiem_sentinel_restore_file', [$this, 'handle_restore_file']);
+		add_action('admin_post_freesiem_sentinel_mark_finding_safe', [$this, 'handle_mark_finding_safe']);
+		add_action('admin_post_freesiem_sentinel_unmark_finding_safe', [$this, 'handle_unmark_finding_safe']);
+		add_action('admin_post_freesiem_sentinel_clear_safe_marks', [$this, 'handle_clear_safe_marks']);
 		add_action('wp_ajax_freesiem_sentinel_deep_scan_tick', [$this, 'handle_deep_scan_tick']);
 		add_action('wp_login_failed', [$this, 'handle_login_failed_event'], 10, 2);
 		add_action('wp_login', [$this, 'handle_login_success_event'], 10, 2);
@@ -912,6 +915,94 @@ class Freesiem_Admin
 		$this->redirect_to_page('freesiem-scan', ['show_results' => '1']);
 	}
 
+	public function handle_mark_finding_safe(): void
+	{
+		$this->assert_manage_permissions();
+		freesiem_sentinel_require_admin_post_nonce();
+
+		if (!Freesiem_Acknowledgements::can_manage()) {
+			freesiem_sentinel_set_notice('error', __('Marking findings as safe is disabled on this site.', 'freesiem-sentinel'));
+			$this->redirect_to_page('freesiem-scan', ['show_results' => '1']);
+		}
+
+		['reference' => $reference, 'finding' => $finding] = $this->posted_finding();
+		$note = isset($_POST['ack_note']) ? sanitize_textarea_field(wp_unslash((string) $_POST['ack_note'])) : '';
+
+		if (!is_array($finding)) {
+			freesiem_sentinel_set_notice('error', __('That finding is no longer available.', 'freesiem-sentinel'));
+			$this->redirect_to_page('freesiem-scan', ['show_results' => '1']);
+		}
+
+		$user = wp_get_current_user();
+		$result = Freesiem_Acknowledgements::add($finding, $note, (string) ($user->user_login ?? ''), (int) ($user->ID ?? 0));
+
+		if (is_wp_error($result)) {
+			freesiem_sentinel_set_notice('error', $result->get_error_message());
+			$this->redirect_after_file_action($reference);
+		}
+
+		$this->plugin->get_results()->reapply_acknowledgements();
+		freesiem_sentinel_set_notice('success', __('Finding marked as safe. It is excluded from the score and counts, and will return automatically if the file changes.', 'freesiem-sentinel'));
+		$this->redirect_after_file_action($reference);
+	}
+
+	public function handle_unmark_finding_safe(): void
+	{
+		$this->assert_manage_permissions();
+		freesiem_sentinel_require_admin_post_nonce();
+
+		$user = wp_get_current_user();
+		$finding_key = isset($_POST['finding_key']) ? sanitize_text_field(wp_unslash((string) $_POST['finding_key'])) : '';
+		['reference' => $reference, 'finding' => $finding] = $this->posted_finding();
+
+		if ($finding_key === '' && is_array($finding)) {
+			$finding_key = freesiem_sentinel_safe_string($finding['finding_key'] ?? '');
+		}
+
+		if ($finding_key === '') {
+			freesiem_sentinel_set_notice('error', __('That safe mark is no longer available.', 'freesiem-sentinel'));
+			$this->redirect_to_page('freesiem-scan', ['show_results' => '1']);
+		}
+
+		Freesiem_Acknowledgements::remove($finding_key, (string) ($user->user_login ?? ''));
+		$this->plugin->get_results()->reapply_acknowledgements();
+		freesiem_sentinel_set_notice('success', __('Safe mark removed. The finding is active again.', 'freesiem-sentinel'));
+		$this->redirect_after_file_action($reference);
+	}
+
+	public function handle_clear_safe_marks(): void
+	{
+		$this->assert_manage_permissions();
+		freesiem_sentinel_require_admin_post_nonce();
+
+		$user = wp_get_current_user();
+		$removed = Freesiem_Acknowledgements::clear_all((string) ($user->user_login ?? ''));
+		$this->plugin->get_results()->reapply_acknowledgements();
+		freesiem_sentinel_set_notice(
+			'success',
+			$removed > 0
+				? sprintf(_n('Cleared %d safe mark.', 'Cleared %d safe marks.', $removed, 'freesiem-sentinel'), $removed)
+				: __('There were no safe marks to clear.', 'freesiem-sentinel')
+		);
+		$this->redirect_to_page('freesiem-scan', ['show_results' => '1']);
+	}
+
+	/**
+	 * Resolve the POSTed finding reference to the finding it names, searching
+	 * the full stored set (acknowledged findings included).
+	 *
+	 * @return array{reference:string,finding:?array}
+	 */
+	private function posted_finding(): array
+	{
+		$reference = isset($_POST['finding']) ? sanitize_text_field(wp_unslash((string) $_POST['finding'])) : '';
+		$cache = $this->plugin->get_results()->get_cache();
+		$findings = array_values(freesiem_sentinel_safe_array($cache['local_findings'] ?? []));
+		$finding = $reference !== '' ? $this->find_finding_by_reference($findings, $reference) : null;
+
+		return ['reference' => $reference, 'finding' => is_array($finding) ? $finding : null];
+	}
+
 	public function handle_start_cloud_connect(): void
 	{
 		$_POST['phone'] = $_POST['phone_number'] ?? '';
@@ -1555,7 +1646,7 @@ class Freesiem_Admin
 				}
 				$url = $this->build_scan_url([
 					'show_results' => '1',
-					'finding' => $this->build_finding_reference($issue, $index),
+					'finding' => $this->build_finding_reference($issue),
 				]);
 				echo '<li style="margin-bottom:10px;"><a href="' . esc_url($url) . '" style="text-decoration:none;"><strong>' . esc_html(freesiem_sentinel_safe_string($issue['title'] ?? '')) . '</strong></a><br /><span>' . esc_html(freesiem_sentinel_safe_string($issue['recommendation'] ?? '')) . '</span></li>';
 			}
@@ -2029,6 +2120,18 @@ class Freesiem_Admin
 
 		$this->render_scan_action_bar($results_url);
 		$this->render_scan_summary_card($settings, $summary, $scan_metrics, $filesystem, $scan_profile, $severity_counts, $has_scan, $results_url);
+
+		$acknowledged_count = (int) ($cache['acknowledged_count'] ?? 0);
+		if ($acknowledged_count > 0) {
+			echo '<p style="margin:-8px 0 20px;color:#047857;font-size:13px;">'
+				. esc_html(sprintf(
+					/* translators: %d: count */
+					_n('%d finding is marked as safe and excluded from the score.', '%d findings are marked as safe and excluded from the score.', $acknowledged_count, 'freesiem-sentinel'),
+					$acknowledged_count
+				))
+				. ' <a href="' . esc_url($results_url) . '">' . esc_html__('Review', 'freesiem-sentinel') . '</a></p>';
+		}
+
 		$this->render_scan_history_card();
 
 		$requested_run = isset($_GET['scan_run']) ? sanitize_text_field(wp_unslash((string) $_GET['scan_run'])) : '';
@@ -2398,9 +2501,13 @@ class Freesiem_Admin
 			$where = $path !== '' ? $path . ($line !== '' ? ':' . $line : '') : '';
 			$size_label = $this->finding_size_label($finding);
 
+			$safe_tag = !empty($finding['acknowledged'])
+				? ' <span style="display:inline-block;padding:1px 7px;border-radius:999px;background:#d1fae5;color:#065f46;font-size:11px;font-weight:600;">' . esc_html__('marked safe', 'freesiem-sentinel') . '</span>'
+				: '';
+
 			echo '<tr>';
 			echo '<td><span style="' . esc_attr($this->severity_badge_style($sev)) . '">' . esc_html(strtoupper($sev)) . '</span></td>';
-			echo '<td><strong>' . esc_html(freesiem_sentinel_safe_string($finding['title'] ?? '')) . '</strong><br /><span style="color:#50575e;">' . esc_html(freesiem_sentinel_safe_string($finding['description'] ?? '')) . '</span></td>';
+			echo '<td><strong>' . esc_html(freesiem_sentinel_safe_string($finding['title'] ?? '')) . '</strong>' . $safe_tag . '<br /><span style="color:#50575e;">' . esc_html(freesiem_sentinel_safe_string($finding['description'] ?? '')) . '</span></td>';
 			echo '<td>' . esc_html(freesiem_sentinel_safe_string($finding['category'] ?? '')) . '</td>';
 			echo '<td><code style="font-size:12px;">' . esc_html($where) . '</code>'
 				. ($size_label !== '' ? '<br /><small style="color:#646970;">' . esc_html($size_label) . '</small>' : '')
@@ -3218,12 +3325,12 @@ class Freesiem_Admin
 		} else {
 			$show_actions = Freesiem_File_Actions::can_act();
 			echo '<table class="widefat striped"><thead><tr><th>' . esc_html__('Severity', 'freesiem-sentinel') . '</th><th>' . esc_html__('Title', 'freesiem-sentinel') . '</th><th>' . esc_html__('Category', 'freesiem-sentinel') . '</th><th>' . esc_html__('Recommendation', 'freesiem-sentinel') . '</th><th>' . esc_html__('Path', 'freesiem-sentinel') . '</th>' . ($show_actions ? '<th>' . esc_html__('Remediate', 'freesiem-sentinel') . '</th>' : '') . '</tr></thead><tbody>';
-			foreach ($findings as $index => $finding_row) {
+			foreach ($findings as $finding_row) {
 				if (!is_array($finding_row)) {
 					continue;
 				}
 
-				$reference = $this->build_finding_reference($finding_row, $index);
+				$reference = $this->build_finding_reference($finding_row);
 				$detail_url = $this->build_scan_url([
 					'show_results' => '1',
 					'finding' => $reference,
@@ -3254,9 +3361,91 @@ class Freesiem_Admin
 			echo '</tbody></table>';
 		}
 		echo '</div>';
+
+		$this->render_acknowledged_findings_section(freesiem_sentinel_safe_array($view['acknowledged_findings'] ?? []));
+
 		echo '</div>';
 
 		$this->render_export_copy_script();
+	}
+
+	/**
+	 * The collapsed "Marked as safe" list under the Findings table. These are
+	 * excluded from the score, the severity counts and the report email; they
+	 * survive Clear Results and stay here until an admin removes the mark (or,
+	 * for a file-backed mark, until the file changes).
+	 */
+	private function render_acknowledged_findings_section(array $acknowledged): void
+	{
+		$acknowledged = array_values(array_filter($acknowledged, 'is_array'));
+
+		if ($acknowledged === []) {
+			return;
+		}
+
+		$can_manage = Freesiem_Acknowledgements::can_manage();
+
+		echo '<details style="margin-top:20px;border:1px solid #a7f3d0;border-radius:12px;background:#f0fdf4;">';
+		echo '<summary style="cursor:pointer;padding:12px 16px;font-weight:600;color:#065f46;">'
+			. esc_html(sprintf(
+				/* translators: %d: count */
+				_n('%d finding marked as safe', '%d findings marked as safe', count($acknowledged), 'freesiem-sentinel'),
+				count($acknowledged)
+			))
+			. '<span style="font-weight:400;color:#047857;"> — ' . esc_html__('excluded from the score and counts', 'freesiem-sentinel') . '</span></summary>';
+		echo '<div style="padding:0 16px 16px;overflow-x:auto;">';
+
+		echo '<table class="widefat striped"><thead><tr>'
+			. '<th>' . esc_html__('Severity', 'freesiem-sentinel') . '</th>'
+			. '<th>' . esc_html__('Title', 'freesiem-sentinel') . '</th>'
+			. '<th>' . esc_html__('Path', 'freesiem-sentinel') . '</th>'
+			. '<th>' . esc_html__('Note', 'freesiem-sentinel') . '</th>'
+			. '<th>' . esc_html__('Marked by', 'freesiem-sentinel') . '</th>'
+			. '<th></th>'
+			. '</tr></thead><tbody>';
+
+		foreach ($acknowledged as $finding_row) {
+			$ack = freesiem_sentinel_safe_array($finding_row['acknowledged'] ?? []);
+			$reference = $this->build_finding_reference($finding_row);
+			$detail_url = $this->build_scan_url(['show_results' => '1', 'finding' => $reference]);
+			$path = freesiem_sentinel_safe_string($finding_row['evidence']['path'] ?? '');
+
+			echo '<tr>';
+			echo '<td><a href="' . esc_url($detail_url) . '" style="' . esc_attr($this->severity_badge_style((string) ($finding_row['severity'] ?? 'info'))) . '">' . esc_html(strtoupper(freesiem_sentinel_safe_string($finding_row['severity'] ?? 'info'))) . '</a></td>';
+			echo '<td><a href="' . esc_url($detail_url) . '" style="color:inherit;text-decoration:none;"><strong>' . esc_html(freesiem_sentinel_safe_string($finding_row['title'] ?? '')) . '</strong></a></td>';
+			echo '<td><code>' . esc_html($path !== '' ? $path : '—') . '</code></td>';
+			echo '<td>' . esc_html(freesiem_sentinel_safe_string($ack['note'] ?? '')) . '</td>';
+			echo '<td>' . esc_html(sprintf(
+				/* translators: 1: user login 2: date */
+				__('%1$s, %2$s', 'freesiem-sentinel'),
+				freesiem_sentinel_safe_string($ack['user_login'] ?? '') ?: __('admin', 'freesiem-sentinel'),
+				freesiem_sentinel_format_datetime((string) ($ack['at'] ?? ''))
+			)) . '</td>';
+			echo '<td>';
+			if ($can_manage) {
+				echo '<form method="post" action="' . esc_url(admin_url('admin-post.php')) . '" style="margin:0;">';
+				echo '<input type="hidden" name="action" value="freesiem_sentinel_unmark_finding_safe" />';
+				echo '<input type="hidden" name="finding" value="' . esc_attr($reference) . '" />';
+				echo '<input type="hidden" name="finding_key" value="' . esc_attr(freesiem_sentinel_safe_string($finding_row['finding_key'] ?? '')) . '" />';
+				wp_nonce_field(FREESIEM_SENTINEL_NONCE_ACTION);
+				echo '<button type="submit" class="button button-small">' . esc_html__('Restore to active', 'freesiem-sentinel') . '</button>';
+				echo '</form>';
+			}
+			echo '</td>';
+			echo '</tr>';
+		}
+
+		echo '</tbody></table>';
+
+		if ($can_manage) {
+			echo '<form method="post" action="' . esc_url(admin_url('admin-post.php')) . '" style="margin-top:12px;" onsubmit="return confirm(\'' . esc_js(__('Remove every safe mark on this site?', 'freesiem-sentinel')) . '\');">';
+			echo '<input type="hidden" name="action" value="freesiem_sentinel_clear_safe_marks" />';
+			wp_nonce_field(FREESIEM_SENTINEL_NONCE_ACTION);
+			echo '<button type="submit" class="button button-link-delete" style="color:#b32d2e;">' . esc_html__('Clear all safe marks', 'freesiem-sentinel') . '</button>';
+			echo '</form>';
+		}
+
+		echo '</div></details>';
 	}
 
 	private function get_scan_results_view(): array
@@ -3268,9 +3457,13 @@ class Freesiem_Admin
 		$filesystem = freesiem_sentinel_safe_array($inventory['filesystem'] ?? []);
 		$integrity = freesiem_sentinel_safe_array($inventory['file_integrity'] ?? []);
 		$all_findings = array_values(freesiem_sentinel_safe_array($cache['local_findings'] ?? []));
+		$acknowledged_findings = array_values(array_filter($all_findings, static function ($f): bool {
+			return is_array($f) && !empty($f['acknowledged']);
+		}));
+		$active_findings = freesiem_sentinel_active_findings($all_findings);
 		$search = isset($_GET['s']) ? sanitize_text_field(wp_unslash((string) $_GET['s'])) : '';
 		$selected_severities = $this->get_results_severity_filters();
-		$findings = $this->filter_findings($all_findings, $search, $selected_severities);
+		$findings = $this->filter_findings($active_findings, $search, $selected_severities);
 		$finding_ref = isset($_GET['finding']) ? sanitize_text_field(wp_unslash((string) $_GET['finding'])) : '';
 		$finding = $finding_ref !== '' ? $this->find_finding_by_reference($all_findings, $finding_ref) : null;
 		$fim_diff_cache = freesiem_sentinel_safe_array($settings['fim_diff_cache'] ?? []);
@@ -3289,6 +3482,7 @@ class Freesiem_Admin
 			'filesystem' => $filesystem,
 			'integrity' => $integrity,
 			'all_findings' => $all_findings,
+			'acknowledged_findings' => $acknowledged_findings,
 			'findings' => $findings,
 			'search' => $search,
 			'selected_severities' => $selected_severities,
@@ -3420,13 +3614,22 @@ class Freesiem_Admin
 		}));
 	}
 
-	private function build_finding_reference(array $finding, int $index): string
+	/**
+	 * A stable per-finding token used in URLs and file-action forms. Derived
+	 * only from the finding's own identity (not its position in a list) so a
+	 * reference built from the filtered table still resolves against the full
+	 * stored set — including findings that have been marked safe.
+	 */
+	private function build_finding_reference(array $finding): string
 	{
+		$evidence = freesiem_sentinel_safe_array($finding['evidence'] ?? []);
 		$seed = implode('|', [
-			(string) $index,
 			freesiem_sentinel_safe_string($finding['finding_key'] ?? ''),
 			freesiem_sentinel_safe_string($finding['detected_at'] ?? ''),
 			freesiem_sentinel_safe_string($finding['title'] ?? ''),
+			freesiem_sentinel_safe_string($evidence['path'] ?? ''),
+			freesiem_sentinel_safe_string($evidence['line'] ?? ''),
+			freesiem_sentinel_safe_string($evidence['signature_id'] ?? ''),
 		]);
 
 		return substr(sha1($seed), 0, 16);
@@ -3434,12 +3637,12 @@ class Freesiem_Admin
 
 	private function find_finding_by_reference(array $findings, string $reference): ?array
 	{
-		foreach (array_values($findings) as $index => $finding) {
+		foreach (array_values($findings) as $finding) {
 			if (!is_array($finding)) {
 				continue;
 			}
 
-			if ($this->build_finding_reference($finding, $index) === $reference) {
+			if ($this->build_finding_reference($finding) === $reference) {
 				$finding['_reference'] = $reference;
 				return $finding;
 			}
@@ -3537,6 +3740,8 @@ class Freesiem_Admin
 		}
 		echo '</table>';
 
+		$this->render_finding_safe_mark($finding);
+
 		if ($path !== '') {
 			$this->render_finding_file_actions($finding, $path);
 		}
@@ -3557,6 +3762,82 @@ class Freesiem_Admin
 	private function render_detail_row(string $label, string $value): void
 	{
 		echo '<tr><th scope="row">' . esc_html(freesiem_sentinel_safe_string($label)) . '</th><td>' . esc_html(freesiem_sentinel_safe_string($value)) . '</td></tr>';
+	}
+
+	/**
+	 * "Mark as safe" / "Remove safe mark" controls for a finding. A mark is
+	 * local to this site, survives Clear Results, is excluded from the score and
+	 * counts, and — for a finding that points at a file — auto-voids if that
+	 * file's bytes ever change.
+	 */
+	private function render_finding_safe_mark(array $finding): void
+	{
+		if (!Freesiem_Acknowledgements::can_manage()) {
+			return;
+		}
+
+		$reference = freesiem_sentinel_safe_string($finding['_reference'] ?? '');
+		$finding_key = freesiem_sentinel_safe_string($finding['finding_key'] ?? '');
+		$ack = is_array($finding['acknowledged'] ?? null) ? $finding['acknowledged'] : null;
+		$post_url = esc_url(admin_url('admin-post.php'));
+
+		echo '<h3 id="freesiem-safe-mark" style="margin-top:24px;">' . esc_html__('Reviewed &amp; safe', 'freesiem-sentinel') . '</h3>';
+
+		if (!empty($finding['acknowledgement_voided'])) {
+			echo '<div style="margin:0 0 12px;padding:12px 14px;background:#fef3c7;border:1px solid #fcd34d;border-left:4px solid #d97706;border-radius:8px;">'
+				. esc_html__('This finding was previously marked safe, but the file has changed since then, so the mark was voided and the finding is active again. Review it before marking it safe once more.', 'freesiem-sentinel')
+				. '</div>';
+		}
+
+		if ($ack !== null) {
+			$when = freesiem_sentinel_format_datetime((string) ($ack['at'] ?? ''));
+			$who = freesiem_sentinel_safe_string($ack['user_login'] ?? '');
+			$note = freesiem_sentinel_safe_string($ack['note'] ?? '');
+
+			echo '<div style="margin:0 0 12px;padding:12px 14px;background:#ecfdf5;border:1px solid #a7f3d0;border-left:4px solid #059669;border-radius:8px;">';
+			echo '<strong style="display:block;margin-bottom:4px;">' . esc_html__('Marked as safe', 'freesiem-sentinel') . '</strong>';
+			echo '<span style="display:block;color:#065f46;">' . esc_html(sprintf(
+				/* translators: 1: user login 2: date */
+				__('By %1$s on %2$s', 'freesiem-sentinel'),
+				$who !== '' ? $who : __('an administrator', 'freesiem-sentinel'),
+				$when
+			)) . '</span>';
+			if ($note !== '') {
+				echo '<span style="display:block;margin-top:6px;color:#1d2327;"><em>' . esc_html($note) . '</em></span>';
+			}
+			if (!empty($ack['sha256'])) {
+				echo '<span style="display:block;margin-top:6px;font-size:12px;color:#4b5563;">' . esc_html(sprintf(__('Bound to file hash %s… — the mark voids automatically if the file changes.', 'freesiem-sentinel'), substr((string) $ack['sha256'], 0, 12))) . '</span>';
+			}
+			echo '</div>';
+
+			echo '<form method="post" action="' . $post_url . '" onsubmit="return confirm(\'' . esc_js(__('Remove the safe mark? The finding will count again.', 'freesiem-sentinel')) . '\');">';
+			echo '<input type="hidden" name="action" value="freesiem_sentinel_unmark_finding_safe" />';
+			echo '<input type="hidden" name="finding" value="' . esc_attr($reference) . '" />';
+			echo '<input type="hidden" name="finding_key" value="' . esc_attr($finding_key) . '" />';
+			wp_nonce_field(FREESIEM_SENTINEL_NONCE_ACTION);
+			echo '<button type="submit" class="button button-secondary">' . esc_html__('Remove safe mark', 'freesiem-sentinel') . '</button>';
+			echo '</form>';
+
+			return;
+		}
+
+		$severity = freesiem_sentinel_normalize_severity((string) ($finding['severity'] ?? 'info'));
+		$loud = in_array($severity, ['critical', 'high'], true);
+
+		echo '<p style="color:#50575e;max-width:640px;">' . esc_html__('If you have checked this finding and it is a legitimate file or an expected condition, mark it safe. It stays out of the score and severity counts on this site until you remove the mark — and, for a file, until the file changes.', 'freesiem-sentinel') . '</p>';
+
+		if ($loud) {
+			echo '<p style="color:#b32d2e;max-width:640px;"><strong>' . esc_html__('This is a high-severity finding.', 'freesiem-sentinel') . '</strong> ' . esc_html__('Only mark it safe if you are certain — view the file contents first.', 'freesiem-sentinel') . '</p>';
+		}
+
+		echo '<form method="post" action="' . $post_url . '" onsubmit="return confirm(\'' . esc_js(__('Mark this finding as safe on this site?', 'freesiem-sentinel')) . '\');">';
+		echo '<input type="hidden" name="action" value="freesiem_sentinel_mark_finding_safe" />';
+		echo '<input type="hidden" name="finding" value="' . esc_attr($reference) . '" />';
+		wp_nonce_field(FREESIEM_SENTINEL_NONCE_ACTION);
+		echo '<p><label for="freesiem-ack-note" style="display:block;font-weight:600;margin-bottom:4px;">' . esc_html__('Why is this safe? (required)', 'freesiem-sentinel') . '</label>';
+		echo '<textarea id="freesiem-ack-note" name="ack_note" rows="2" class="large-text" maxlength="500" required placeholder="' . esc_attr__('e.g. UI kit I uploaded to the media library on 2026-05-01', 'freesiem-sentinel') . '"></textarea></p>';
+		echo '<button type="submit" class="button button-secondary">' . esc_html__('Mark as safe', 'freesiem-sentinel') . '</button>';
+		echo '</form>';
 	}
 
 	/**

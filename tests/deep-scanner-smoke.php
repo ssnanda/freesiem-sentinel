@@ -38,6 +38,8 @@ wp_mkdir_p($dir);
 $shell = $dir . '/smoke-shell.php';
 $polyglot = $dir . '/smoke-image.jpg';
 $htaccess = $dir . '/.htaccess';
+$disguised = $dir . '/smoke-notes.old';
+$selfmod = $dir . '/smoke-fm.php';
 
 // The planted files must contain real attack bytes for the scanner to match,
 // but assembling those strings from fragments here keeps THIS fixture from
@@ -49,11 +51,17 @@ $eval_expr = 'ev' . 'al(bas' . 'e64_' . 'decode($_POST[' . "'q'" . ']))';
 file_put_contents($shell, $php_open . ' /* freesiem smoke */ @' . $eval_expr . '; ?' . '>');
 file_put_contents($polyglot, "\xFF\xD8\xFF\xE0JFIF\x00 " . $php_open . ' /* freesiem smoke */ echo 1; ?' . '>');
 file_put_contents($htaccess, "AddType application/x-httpd-php .jpg\n");
+// Executable PHP behind a ".old" name — must be pulled into the scan as PHP.
+file_put_contents($disguised, $php_open . ' /* freesiem smoke */ ev' . 'al(trim($_' . 'POST[' . "'c'" . '])); ?' . '>');
+// Self-rewriting / anti-forensic file-manager shape.
+file_put_contents($selfmod, $php_open . " /* freesiem smoke */ file_put_" . "contents(__FILE__, \$x); tou" . "ch(__FILE__, \$mt); ?" . '>');
 
-$cleanup = static function () use ($shell, $polyglot, $htaccess, $dir, $deep): void {
+$cleanup = static function () use ($shell, $polyglot, $htaccess, $disguised, $selfmod, $dir, $deep): void {
 	@unlink($shell);
 	@unlink($polyglot);
 	@unlink($htaccess);
+	@unlink($disguised);
+	@unlink($selfmod);
 	@rmdir($dir);
 	$deep->abort();
 };
@@ -111,6 +119,27 @@ try {
 	$assert(in_array('php_eval_encoded_payload', $signatures, true), 'the eval(base64_decode(...)) signature matched');
 	$assert(in_array('polyglot_php_tag', $signatures, true), 'PHP inside the image polyglot was detected');
 	$assert(in_array('htaccess_addtype_php', $signatures, true), 'the .htaccess AddType abuse was detected');
+
+	$keys = [];
+	foreach ($findings as $finding) {
+		if (is_array($finding)) {
+			$keys[] = (string) ($finding['finding_key'] ?? '');
+		}
+	}
+	$has = static function (string $prefix) use ($keys): bool {
+		foreach ($keys as $k) {
+			if (str_starts_with($k, $prefix)) {
+				return true;
+			}
+		}
+
+		return false;
+	};
+
+	$assert($has('deep_disguised_php_'), 'executable PHP behind a .old extension was flagged as disguised');
+	$assert(in_array('php_eval_request_console', $signatures, true), 'eval() fed from request input was detected in the disguised file');
+	$assert(in_array('php_self_rewrite', $signatures, true), 'the self-rewriting-source shape was detected');
+	$assert(in_array('php_mtime_reset', $signatures, true), 'the timestamp-reset anti-forensics shape was detected');
 
 	$summary = is_array($cache['summary'] ?? null) ? $cache['summary'] : [];
 	$assert((int) ($summary['files_content_scanned'] ?? 0) > 0, 'files were content-scanned');

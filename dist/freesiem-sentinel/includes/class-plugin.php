@@ -756,6 +756,9 @@ class Freesiem_Plugin
 		}
 
 		$cache = $this->results->get_cache();
+		// The full set goes up, acknowledged findings included and still tagged
+		// with their `acknowledged` record, so Core sees the real posture rather
+		// than a locally-hidden blind spot.
 		$findings = array_values(freesiem_sentinel_safe_array($cache['local_findings'] ?? []));
 		$inventory = freesiem_sentinel_safe_array($cache['local_inventory'] ?? []);
 
@@ -765,6 +768,7 @@ class Freesiem_Plugin
 				'site_url' => site_url('/'),
 				'wp_version' => get_bloginfo('version'),
 				'plugin_version' => FREESIEM_SENTINEL_VERSION,
+				'acknowledged_count' => (int) ($cache['acknowledged_count'] ?? 0),
 			],
 			'findings' => $findings,
 			'inventory' => $inventory,

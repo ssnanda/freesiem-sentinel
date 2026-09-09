@@ -89,6 +89,7 @@ function freesiem_sentinel_get_default_settings(): array
 			'local_findings' => [],
 			'local_inventory' => [],
 			'severity_counts' => [],
+			'acknowledged_count' => 0,
 			'top_issues' => [],
 			'recommendations' => [],
 			'notices' => [],
@@ -4942,6 +4943,21 @@ function freesiem_sentinel_get_severity_weight(string $severity): int
 	};
 }
 
+/**
+ * Drop findings an admin has marked as safe (annotated with `acknowledged` by
+ * Freesiem_Acknowledgements::partition()) — for scoring, counts, emails and
+ * exports, which should all reflect the un-acknowledged posture.
+ *
+ * @param array<int,mixed> $findings
+ * @return array<int,array>
+ */
+function freesiem_sentinel_active_findings(array $findings): array
+{
+	return array_values(array_filter($findings, static function ($finding): bool {
+		return is_array($finding) && empty($finding['acknowledged']);
+	}));
+}
+
 function freesiem_sentinel_score_from_findings(array $findings): int
 {
 	$penalty = 0;
@@ -5068,7 +5084,8 @@ function freesiem_sentinel_send_scan_report_email(array $extra_recipients = [], 
 
 	$plugin = Freesiem_Plugin::instance();
 	$cache = $plugin->get_results()->get_cache();
-	$findings = array_values(array_filter(freesiem_sentinel_safe_array($cache['local_findings'] ?? []), 'is_array'));
+	$findings = freesiem_sentinel_active_findings(freesiem_sentinel_safe_array($cache['local_findings'] ?? []));
+	$acknowledged_count = (int) ($cache['acknowledged_count'] ?? 0);
 	$summary = freesiem_sentinel_safe_array($cache['summary'] ?? []);
 	$counts = freesiem_sentinel_safe_array($cache['severity_counts'] ?? []);
 
@@ -5122,6 +5139,14 @@ function freesiem_sentinel_send_scan_report_email(array $extra_recipients = [], 
 		? '<p style="color:#475569;font-size:12px;">' . esc_html(sprintf(__('%d more findings not shown — open the Scan screen for the full list.', 'freesiem-sentinel'), count($findings) - count($shown))) . '</p>'
 		: '';
 
+	if ($acknowledged_count > 0) {
+		$more .= '<p style="color:#047857;font-size:12px;">' . esc_html(sprintf(
+			/* translators: %d: count */
+			_n('%d finding is marked as safe on this site and excluded from this report.', '%d findings are marked as safe on this site and excluded from this report.', $acknowledged_count, 'freesiem-sentinel'),
+			$acknowledged_count
+		)) . '</p>';
+	}
+
 	$body = '<div style="font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#111;max-width:820px;">'
 		. '<h2 style="margin:0 0 4px;">' . esc_html__('freeSIEM Sentinel scan report', 'freesiem-sentinel') . '</h2>'
 		. '<p style="margin:0 0 16px;color:#475569;">' . esc_html($site) . ' &middot; ' . esc_html($scanned_at)
@@ -5168,7 +5193,13 @@ function freesiem_sentinel_send_scan_report_email(array $extra_recipients = [], 
  */
 function freesiem_sentinel_build_scan_export(string $format, array $data): array
 {
-	$findings = array_values(array_filter((array) ($data['findings'] ?? []), 'is_array'));
+	$all = array_values(array_filter((array) ($data['findings'] ?? []), 'is_array'));
+	// Findings an admin has marked safe are reported separately, not in the
+	// main list or the counts.
+	$findings = freesiem_sentinel_active_findings($all);
+	$acknowledged = array_values(array_filter($all, static function ($f): bool {
+		return is_array($f) && !empty($f['acknowledged']);
+	}));
 	$host = wp_parse_url(home_url(), PHP_URL_HOST) ?: 'site';
 	$slug = sanitize_file_name(str_replace('.', '-', (string) $host));
 	$label = sanitize_file_name((string) ($data['label'] ?? 'current'));
@@ -5244,6 +5275,19 @@ function freesiem_sentinel_build_scan_export(string $format, array $data): array
 		'findings_count' => count($findings),
 		'findings' => array_map($row, $findings),
 	];
+
+	if ($acknowledged !== []) {
+		$payload['acknowledged_count'] = count($acknowledged);
+		$payload['acknowledged'] = array_map(static function (array $f) use ($row): array {
+			$ack = is_array($f['acknowledged'] ?? null) ? $f['acknowledged'] : [];
+
+			return $row($f) + [
+				'acknowledged_note' => (string) ($ack['note'] ?? ''),
+				'acknowledged_by' => (string) ($ack['user_login'] ?? ''),
+				'acknowledged_at' => (string) ($ack['at'] ?? ''),
+			];
+		}, $acknowledged);
+	}
 
 	if (($scan['status'] ?? '') === 'in_progress') {
 		$payload['note'] = 'The deep scan was still running when this export was taken — file/malware counts and findings are incomplete. Re-export once the scan finishes.';

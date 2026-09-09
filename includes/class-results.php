@@ -19,6 +19,7 @@ class Freesiem_Results
 				'local_findings' => [],
 				'local_inventory' => [],
 				'severity_counts' => [],
+				'acknowledged_count' => 0,
 				'top_issues' => [],
 				'recommendations' => [],
 				'notices' => [],
@@ -31,13 +32,20 @@ class Freesiem_Results
 		$cache = $this->get_cache();
 		$scan_summary = is_array($scan['summary'] ?? null) ? $scan['summary'] : [];
 		$cache['fetched_at'] = freesiem_sentinel_get_iso8601_time();
-		$cache['local_findings'] = $this->sort_findings(array_values($scan['findings'] ?? []));
+
+		$split = $this->split_acknowledged($this->sort_findings(array_values($scan['findings'] ?? [])));
+		$active = $split['active'];
+
+		$cache['local_findings'] = $split['all'];
+		$cache['acknowledged_count'] = $split['acknowledged_count'];
 		$cache['local_inventory'] = $scan['inventory'] ?? [];
-		$cache['severity_counts'] = $this->count_severities($cache['local_findings']);
+		$cache['severity_counts'] = $this->count_severities($active);
 		$cache['summary'] = array_merge(
 			is_array($cache['summary']) ? $cache['summary'] : [],
 			[
-				'local_score' => (int) ($scan['score'] ?? freesiem_sentinel_score_from_findings($cache['local_findings'])),
+				'local_score' => $split['acknowledged_count'] > 0
+					? freesiem_sentinel_score_from_findings($active)
+					: (int) ($scan['score'] ?? freesiem_sentinel_score_from_findings($active)),
 				'last_local_scan_at' => freesiem_sentinel_get_iso8601_time(),
 				'files_discovered' => (int) ($scan_summary['files_discovered'] ?? 0),
 				'files_analyzed' => (int) ($scan_summary['files_analyzed'] ?? 0),
@@ -46,10 +54,10 @@ class Freesiem_Results
 				'scan_modules' => array_values(is_array($scan_summary['scan_modules'] ?? null) ? $scan_summary['scan_modules'] : []),
 			]
 		);
-		$cache['top_issues'] = array_slice($cache['local_findings'], 0, 5);
+		$cache['top_issues'] = array_slice($active, 0, 5);
 		$cache['recommendations'] = array_values(array_unique(array_map(static function (array $finding): string {
 			return (string) ($finding['recommendation'] ?? '');
-		}, $cache['local_findings'])));
+		}, $active)));
 
 		freesiem_sentinel_update_settings([
 			'last_local_scan_at' => freesiem_sentinel_get_iso8601_time(),
@@ -130,18 +138,22 @@ class Freesiem_Results
 		$total_findings = count($merged);
 		$merged = array_slice($merged, 0, 2000);
 
+		$split = $this->split_acknowledged($merged);
+		$active = $split['active'];
+
 		$cache['fetched_at'] = $now;
-		$cache['local_findings'] = $merged;
-		$cache['local_findings_truncated'] = $total_findings > count($merged) ? $total_findings : 0;
-		$cache['severity_counts'] = $this->count_severities($merged);
-		$cache['top_issues'] = array_slice($merged, 0, 5);
+		$cache['local_findings'] = $split['all'];
+		$cache['local_findings_truncated'] = $total_findings > count($split['all']) ? $total_findings : 0;
+		$cache['acknowledged_count'] = $split['acknowledged_count'];
+		$cache['severity_counts'] = $this->count_severities($active);
+		$cache['top_issues'] = array_slice($active, 0, 5);
 		$cache['recommendations'] = array_values(array_unique(array_map(static function (array $finding): string {
 			return (string) ($finding['recommendation'] ?? '');
-		}, $merged)));
+		}, $active)));
 		$cache['summary'] = array_merge(
 			is_array($cache['summary'] ?? null) ? $cache['summary'] : [],
 			[
-				'local_score' => freesiem_sentinel_score_from_findings($merged),
+				'local_score' => freesiem_sentinel_score_from_findings($active),
 				'last_local_scan_at' => $now,
 				'last_deep_scan_at' => (string) ($metrics['finished_at'] ?? $now),
 				'files_content_scanned' => (int) ($metrics['files_scanned'] ?? 0),
@@ -159,6 +171,66 @@ class Freesiem_Results
 		$settings = freesiem_sentinel_get_settings();
 		$settings['summary_cache'] = $cache;
 		$settings['last_local_scan_at'] = $now;
+		update_option(FREESIEM_SENTINEL_OPTION, freesiem_sentinel_sanitize_settings($settings), false);
+
+		return $cache;
+	}
+
+	/**
+	 * Apply "marked safe" records to a freshly-built, sorted, size-capped
+	 * findings list.
+	 *
+	 * `all` keeps every finding (acknowledged ones annotated with an
+	 * `acknowledged` sub-array) so the finding-detail screen and any cloud
+	 * snapshot still see the full picture; `active` is what the score, the
+	 * severity counts, the top issues and the report email are built from.
+	 *
+	 * @param array<int,array> $findings
+	 * @return array{all: array<int,array>, active: array<int,array>, acknowledged_count: int}
+	 */
+	private function split_acknowledged(array $findings): array
+	{
+		$partition = Freesiem_Acknowledgements::partition($findings);
+		// Every caller is a write context (a scan finishing, or an admin toggling
+		// a mark), so this is a safe place to drop records whose file changed.
+		Freesiem_Acknowledgements::prune_stale();
+		$all = $this->sort_findings(array_merge($partition['active'], $partition['acknowledged']));
+
+		return [
+			'all' => $all,
+			'active' => $partition['active'],
+			'acknowledged_count' => count($partition['acknowledged']),
+		];
+	}
+
+	/**
+	 * Re-run the acknowledgement split over the already-stored findings and
+	 * rewrite the derived cache values (score, counts, top issues,
+	 * recommendations) — so marking a finding safe, or removing that mark,
+	 * updates the screen without waiting for the next scan.
+	 */
+	public function reapply_acknowledgements(): array
+	{
+		$cache = $this->get_cache();
+		$findings = array_values(freesiem_sentinel_safe_array($cache['local_findings'] ?? []));
+
+		$split = $this->split_acknowledged($findings);
+		$active = $split['active'];
+
+		$cache['local_findings'] = $split['all'];
+		$cache['acknowledged_count'] = $split['acknowledged_count'];
+		$cache['severity_counts'] = $this->count_severities($active);
+		$cache['top_issues'] = array_slice($active, 0, 5);
+		$cache['recommendations'] = array_values(array_unique(array_map(static function (array $finding): string {
+			return (string) ($finding['recommendation'] ?? '');
+		}, $active)));
+
+		$summary = is_array($cache['summary'] ?? null) ? $cache['summary'] : [];
+		$summary['local_score'] = freesiem_sentinel_score_from_findings($active);
+		$cache['summary'] = $summary;
+
+		$settings = freesiem_sentinel_get_settings();
+		$settings['summary_cache'] = $cache;
 		update_option(FREESIEM_SENTINEL_OPTION, freesiem_sentinel_sanitize_settings($settings), false);
 
 		return $cache;
@@ -203,6 +275,10 @@ class Freesiem_Results
 	{
 		$type = in_array($type, ['quick', 'deep', 'weekly', 'combined'], true) ? $type : 'deep';
 		$findings = array_values(array_filter($findings, 'is_array'));
+		// The run's headline numbers exclude findings an admin has marked safe;
+		// the stored detail list keeps them (annotated) so the run drill-in still
+		// shows what was acknowledged at the time.
+		$active = freesiem_sentinel_active_findings($findings);
 		$id = gmdate('Ymd-His') . '-' . substr(md5(uniqid('', true)), 0, 6);
 
 		$row = [
@@ -210,9 +286,10 @@ class Freesiem_Results
 			'type' => $type,
 			'started_at' => (string) ($metrics['started_at'] ?? ''),
 			'finished_at' => (string) ($metrics['finished_at'] ?? freesiem_sentinel_get_iso8601_time()),
-			'score' => freesiem_sentinel_score_from_findings($findings),
-			'severity_counts' => $this->count_severities($findings),
-			'findings_count' => count($findings),
+			'score' => freesiem_sentinel_score_from_findings($active),
+			'severity_counts' => $this->count_severities($active),
+			'findings_count' => count($active),
+			'acknowledged_count' => count($findings) - count($active),
 			'files_scanned' => (int) ($metrics['files_scanned'] ?? 0),
 			'malware_hits' => (int) ($metrics['malware_hits'] ?? 0),
 			'core_files_modified' => (int) ($metrics['core_files_modified'] ?? 0),

@@ -3,7 +3,7 @@
  * Plugin Name: freeSIEM Sentinel
  * Plugin URI: https://github.com/ssnanda/freesiem-sentinel
  * Description: Connects a WordPress site to freeSIEM Core for verification, local scanning, secure result uploads, command handling, and summary reporting.
- * Version: 1.0.122
+ * Version: 1.0.123
  * Update URI: https://github.com/ssnanda/freesiem-sentinel
  * Author: freesiem.com
  * Text Domain: freesiem-sentinel
@@ -13,7 +13,7 @@ if (!defined('ABSPATH')) {
 	exit;
 }
 
-define('FREESIEM_SENTINEL_VERSION', '1.0.122');
+define('FREESIEM_SENTINEL_VERSION', '1.0.123');
 define('FREESIEM_SENTINEL_SLUG', 'freesiem-sentinel');
 define('FREESIEM_SENTINEL_SYNCHY_PAGE', 'freesiem-synchy');
 define('FREESIEM_SENTINEL_OPTION', 'freesiem_sentinel_settings');
@@ -65,6 +65,7 @@ require_once FREESIEM_SENTINEL_PLUGIN_DIR . 'includes/class-threat-signatures.ph
 require_once FREESIEM_SENTINEL_PLUGIN_DIR . 'includes/class-deep-scanner.php';
 require_once FREESIEM_SENTINEL_PLUGIN_DIR . 'includes/class-results.php';
 require_once FREESIEM_SENTINEL_PLUGIN_DIR . 'includes/class-file-actions.php';
+require_once FREESIEM_SENTINEL_PLUGIN_DIR . 'includes/class-acknowledgements.php';
 require_once FREESIEM_SENTINEL_PLUGIN_DIR . 'includes/class-commands.php';
 require_once FREESIEM_SENTINEL_PLUGIN_DIR . 'includes/class-cron.php';
 require_once FREESIEM_SENTINEL_PLUGIN_DIR . 'includes/class-acme-client.php';
