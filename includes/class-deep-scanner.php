@@ -1197,6 +1197,9 @@ class Freesiem_Deep_Scanner
 			$cursor['stage'] = 'wpconfig';
 		} elseif ($stage === 'wpconfig') {
 			$this->integrity_wpconfig_step($state);
+			$cursor['stage'] = 'abandoned';
+		} elseif ($stage === 'abandoned') {
+			$this->integrity_abandoned_data_step($state);
 			$cursor['stage'] = 'self';
 		} elseif ($stage === 'self') {
 			$this->integrity_self_step($state);
@@ -1774,6 +1777,276 @@ class Freesiem_Deep_Scanner
 
 			return;
 		}
+	}
+
+	/**
+	 * Backup / migration directories that outlived the plugin that made them.
+	 *
+	 * Uninstalling a backup plugin in WordPress does not remove the folder it
+	 * wrote archives into, so a full site export — database included — is left
+	 * sitting under the web root with nothing maintaining, rotating or securing
+	 * it. The archive filename is usually unguessable, which is the only thing
+	 * standing between it and anyone who asks for it; several of these tools ship
+	 * an .htaccess that sets a MIME type and disables directory listing but never
+	 * denies access, and nginx / LiteSpeed ignore .htaccess entirely.
+	 *
+	 * Keyed by directory basename, or by a "prefix*" glob for tools that append a
+	 * site-specific suffix (backup-bolt-f385292653). Value is the plugin slug(s)
+	 * that own the folder — used to tell "abandoned" from "in active use".
+	 */
+	private const BACKUP_DIR_OWNERS = [
+		'ai1wm-backups' => ['all-in-one-wp-migration', 'all-in-one-wp-migration-unlimited-extension'],
+		'backups-dup-lite' => ['duplicator'],
+		'backups-dup-pro' => ['duplicator-pro'],
+		'duplicator-backups' => ['duplicator', 'duplicator-pro'],
+		'backup-bolt-*' => ['backup-bolt'],
+		'updraft' => ['updraftplus'],
+		'backwpup' => ['backwpup'],
+		'wpvivid' => ['wpvivid-backuprestore'],
+		'wp-staging' => ['wp-staging', 'wp-staging-pro'],
+		'backupbuddy' => ['backupbuddy'],
+		'wpbackitup_backups' => ['wp-backitup'],
+		'aiowps_backups' => ['all-in-one-wp-security-and-firewall'],
+	];
+
+	/** Archive / dump extensions that make an abandoned folder worth reporting. */
+	private const BACKUP_ARCHIVE_EXTENSIONS = [
+		'wpress', 'daf', 'zip', 'sql', 'gz', 'tgz', 'tar', 'bz2', 'xz', '7z', 'rar', 'bak',
+	];
+
+	private const BACKUP_DIR_MAX_FILES = 400;
+
+	/**
+	 * Find backup / migration folders under the web root and report the ones that
+	 * still hold archives — loudest when the plugin that owns them is gone and
+	 * nothing denies web access to the folder.
+	 */
+	private function integrity_abandoned_data_step(array &$state): void
+	{
+		$roots = [untrailingslashit(WP_CONTENT_DIR), untrailingslashit(ABSPATH)];
+		$uploads = wp_get_upload_dir();
+
+		if (!empty($uploads['basedir'])) {
+			$roots[] = untrailingslashit(wp_normalize_path($uploads['basedir']));
+		}
+
+		$seen = [];
+		$installed = $this->installed_plugin_slugs();
+
+		foreach (array_unique($roots) as $root) {
+			if ($root === '' || !is_dir($root)) {
+				continue;
+			}
+
+			foreach ((array) @scandir($root) as $entry) {
+				if ($entry === '.' || $entry === '..') {
+					continue;
+				}
+
+				$dir = $root . '/' . $entry;
+
+				if (!is_dir($dir) || is_link($dir)) {
+					continue;
+				}
+
+				$key = wp_normalize_path($dir);
+
+				if (isset($seen[$key])) {
+					continue;
+				}
+
+				$owners = $this->backup_dir_owners($entry);
+
+				if ($owners === null) {
+					continue;
+				}
+
+				$seen[$key] = true;
+				$this->report_backup_dir($dir, $entry, $owners, $installed, $state);
+			}
+		}
+	}
+
+	/**
+	 * Slugs of every plugin present on disk (active or not) — an inactive plugin
+	 * still owns its backup folder, so only a plugin that is actually gone makes
+	 * its leftovers "abandoned".
+	 */
+	private function installed_plugin_slugs(): array
+	{
+		$slugs = [];
+
+		foreach ((array) @glob(WP_PLUGIN_DIR . '/*', GLOB_ONLYDIR) as $dir) {
+			$slugs[strtolower(basename($dir))] = true;
+		}
+
+		return $slugs;
+	}
+
+	/**
+	 * Owning plugin slugs for a directory name, or null when the name is not a
+	 * backup folder at all. Falls back to a name-shaped match so a tool we have
+	 * no entry for is still noticed (owners unknown, reported more cautiously).
+	 */
+	private function backup_dir_owners(string $basename): ?array
+	{
+		$name = strtolower($basename);
+
+		foreach (self::BACKUP_DIR_OWNERS as $pattern => $owners) {
+			if ($pattern === $name) {
+				return $owners;
+			}
+
+			// fnmatch() is absent from some non-POSIX PHP builds, and every
+			// pattern here is a literal prefix plus a trailing "*".
+			if (str_ends_with($pattern, '*') && str_starts_with($name, rtrim($pattern, '*'))) {
+				return $owners;
+			}
+		}
+
+		// Unknown tool: "…-backups", "backup-…", "site-backup". Deliberately does
+		// not match uploads/ media folders or wp-content/upgrade-temp-backup,
+		// which core manages itself.
+		if ($name !== 'upgrade-temp-backup' && preg_match('~(?:^|[-_])backups?(?:$|[-_])~', $name)) {
+			return [];
+		}
+
+		return null;
+	}
+
+	/**
+	 * Measure one backup folder and, when it still holds archives, raise a finding
+	 * scaled by whether the owner is gone and whether the folder is web-readable.
+	 */
+	private function report_backup_dir(string $dir, string $basename, array $owners, array $installed, array &$state): void
+	{
+		$rel = $this->relative_path($dir);
+		$archives = [];
+		$total = 0;
+		$files = 0;
+		$truncated = false;
+		$has_dump = false;
+
+		try {
+			$iterator = new RecursiveIteratorIterator(
+				new RecursiveDirectoryIterator($dir, FilesystemIterator::SKIP_DOTS | FilesystemIterator::UNIX_PATHS),
+				RecursiveIteratorIterator::LEAVES_ONLY
+			);
+
+			foreach ($iterator as $file) {
+				if (++$files > self::BACKUP_DIR_MAX_FILES) {
+					$truncated = true;
+					break;
+				}
+
+				if (!$file->isFile() || $file->isLink()) {
+					continue;
+				}
+
+				$size = (int) $file->getSize();
+				$total += $size;
+				$ext = strtolower((string) $file->getExtension());
+
+				if (!in_array($ext, self::BACKUP_ARCHIVE_EXTENSIONS, true)) {
+					continue;
+				}
+
+				// A .wpress / .daf is always a full site export; a .sql is a
+				// database dump outright. Both mean credentials and user data.
+				if (in_array($ext, ['wpress', 'daf', 'sql'], true)) {
+					$has_dump = true;
+				}
+
+				$archives[] = ['name' => $file->getFilename(), 'size' => $size, 'extension' => $ext];
+			}
+		} catch (Exception $e) {
+			$truncated = true;
+		}
+
+		$owner_gone = $owners !== [] && array_intersect(array_map('strtolower', $owners), array_keys($installed)) === [];
+		$denied = $this->directory_denies_web_access($dir);
+
+		if ($archives === []) {
+			// Empty shell left behind by an uninstalled tool. Worth removing, but
+			// it exposes nothing — never dressed up as a security problem.
+			if (!$owner_gone) {
+				return;
+			}
+
+			$this->add_finding($state, [
+				'finding_key' => 'deep_backup_dir_empty_' . md5($rel),
+				'category' => 'filesystem',
+				'severity' => 'low',
+				'title' => sprintf('Empty backup folder left by an uninstalled plugin: %s', $basename),
+				'description' => sprintf('%s holds no archives, and %s is no longer installed. WordPress does not remove a backup plugin\'s data folder when the plugin is deleted.', $rel, implode(' / ', $owners)),
+				'recommendation' => 'Nothing is exposed here. Delete the folder to keep the web root tidy.',
+				'evidence' => ['path' => $rel, 'owners' => $owners, 'files' => $files],
+				'score' => 90,
+			]);
+
+			return;
+		}
+
+		usort($archives, static fn (array $a, array $b): int => $b['size'] <=> $a['size']);
+		$largest = $archives[0];
+
+		if ($has_dump || $largest['size'] >= 1048576) {
+			$severity = $denied ? 'medium' : 'high';
+			$score = $denied ? 52 : 34;
+		} else {
+			$severity = $denied ? 'low' : 'medium';
+			$score = $denied ? 86 : 68;
+		}
+
+		$reasons = [];
+
+		if ($owner_gone) {
+			$reasons[] = sprintf('%s is no longer installed, so nothing rotates or removes these files', implode(' / ', $owners));
+		} elseif ($owners === []) {
+			$reasons[] = 'no plugin on this site is known to own this folder';
+		}
+
+		$reasons[] = $denied
+			? 'the folder carries a deny-all .htaccess (Apache only — confirm nginx / LiteSpeed block it too)'
+			: 'no .htaccess denies web access to it, so the files are reachable by anyone who knows the URL';
+
+		if ($has_dump) {
+			$reasons[] = 'it contains a full export or database dump, which carries user accounts, password hashes and credentials';
+		}
+
+		$this->add_finding($state, [
+			'finding_key' => 'deep_backup_dir_' . md5($rel),
+			'category' => 'filesystem',
+			'severity' => $severity,
+			'title' => sprintf('Site backup archives exposed under the web root: %s', $basename),
+			'description' => sprintf(
+				'%s holds %d archive file(s) totalling %s (largest: %s, %s)%s. %s.',
+				$rel,
+				count($archives),
+				size_format($total),
+				$largest['name'],
+				size_format($largest['size']),
+				$truncated ? ', and the folder was too large to inventory fully' : '',
+				ucfirst(implode('; ', $reasons))
+			),
+			'recommendation' => sprintf(
+				'Download anything you still need, then delete %s. Backups belong outside the web root or in off-site storage — never in a folder a browser can reach.',
+				$rel
+			),
+			'evidence' => [
+				'path' => $rel,
+				'owners' => $owners,
+				'owner_installed' => !$owner_gone,
+				'denies_web_access' => $denied,
+				'archive_count' => count($archives),
+				'total_bytes' => $total,
+				'contains_dump' => $has_dump,
+				'largest' => $largest,
+				'archives' => array_slice($archives, 0, 10),
+				'truncated' => $truncated,
+			],
+			'score' => $score,
+		]);
 	}
 
 	/**
@@ -2756,6 +3029,11 @@ class Freesiem_Deep_Scanner
 			'label' => $labels[$phase] ?? $phase,
 			'files_scanned' => (int) ($counters['files_scanned'] ?? 0),
 			'files_seen' => (int) ($counters['files_seen'] ?? 0),
+			// What is still queued. There is no honest grand total mid-walk — the
+			// tree is discovered as it is walked — so the Scan screen reports work
+			// remaining rather than inventing a denominator that keeps moving.
+			'files_pending' => is_array($state['file_queue'] ?? null) ? count($state['file_queue']) : 0,
+			'dirs_pending' => is_array($state['dir_stack'] ?? null) ? count($state['dir_stack']) : 0,
 			'malware_hits' => (int) ($counters['malware_hits'] ?? 0),
 			'started_at' => (string) ($state['started_at'] ?? ''),
 			'updated_at' => (string) ($state['updated_at'] ?? ''),
@@ -2783,7 +3061,7 @@ class Freesiem_Deep_Scanner
 		if ($phase === 'integrity') {
 			$stage = (string) ($state['integrity_cursor']['stage'] ?? 'core');
 
-			return ['core' => 62, 'core_extra' => 72, 'plugins' => 76, 'dropins' => 82, 'wpconfig' => 84, 'self' => 85, 'done' => 86][$stage] ?? 70;
+			return ['core' => 62, 'core_extra' => 72, 'plugins' => 76, 'dropins' => 82, 'wpconfig' => 84, 'abandoned' => 85, 'self' => 86, 'done' => 86][$stage] ?? 70;
 		}
 
 		$stage = (string) ($state['database_cursor']['stage'] ?? 'users');

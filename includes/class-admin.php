@@ -662,6 +662,9 @@ class Freesiem_Admin
 		$this->assert_manage_permissions();
 		freesiem_sentinel_require_admin_post_nonce();
 		$this->plugin->get_cron_monitor()->clear_history();
+		// Re-baseline the source detection too, so the badge is not left asserting
+		// a verdict drawn from runs the admin just cleared away.
+		$this->plugin->get_cron_monitor()->reset_source_state();
 		freesiem_sentinel_set_notice('success', __('WP-Cron execution history cleared.', 'freesiem-sentinel'));
 		$this->redirect_to_page('freesiem-security', ['section' => 'wp-cron']);
 	}
@@ -813,9 +816,12 @@ class Freesiem_Admin
 		$deep->start_full('deep');
 		$pass = $deep->run_foreground_pass();
 
+		// No percentage here: this notice is written once and then sits frozen at
+		// whatever the first foreground pass reached, while the progress box below
+		// keeps polling. Two different numbers on one screen read as a bug.
 		freesiem_sentinel_set_notice('success', !empty($pass['done'])
 			? __('Full scan complete. See findings below.', 'freesiem-sentinel')
-			: sprintf(__('Full scan started (%s%% complete) and is continuing — keep this tab open or let WP-Cron finish it.', 'freesiem-sentinel'), number_format_i18n((int) ($pass['progress']['percent'] ?? 0))));
+			: __('Full scan started and is continuing — keep this tab open or let WP-Cron finish it. Live progress is shown below.', 'freesiem-sentinel'));
 		$this->redirect_to_page('freesiem-scan', ['show_results' => '1']);
 	}
 
@@ -1930,9 +1936,28 @@ class Freesiem_Admin
 		echo '<div style="background:#fff;border:1px solid #dcdcde;border-radius:10px;padding:14px 18px;"><strong>' . esc_html(number_format_i18n(count($events))) . '</strong><br><span>' . esc_html__('Scheduled events', 'freesiem-sentinel') . '</span></div>';
 		echo '<div style="background:#fff;border:1px solid ' . esc_attr($overdue > 0 ? '#d63638' : '#dcdcde') . ';border-radius:10px;padding:14px 18px;"><strong>' . esc_html(number_format_i18n($overdue)) . '</strong><br><span>' . esc_html__('Overdue events', 'freesiem-sentinel') . '</span></div>';
 		echo '<div style="background:#fff;border:1px solid ' . esc_attr($disabled ? '#d63638' : '#00a32a') . ';border-radius:10px;padding:14px 18px;"><strong>' . esc_html($disabled ? __('Disabled', 'freesiem-sentinel') : __('Enabled', 'freesiem-sentinel')) . '</strong><br><span>' . esc_html__('Traffic-triggered WP-Cron', 'freesiem-sentinel') . '</span></div>';
+
+		// Observed reality, not configuration. The constant above says what this
+		// site is set to; this says what is actually calling wp-cron.php.
+		$source = $monitor->analyze_source();
+		$source_border = ['system' => '#00a32a', 'traffic' => '#dba617'][$source['mode']] ?? '#dcdcde';
+		echo '<div style="background:#fff;border:1px solid ' . esc_attr($source_border) . ';border-radius:10px;padding:14px 18px;"><strong>' . esc_html($source['label']) . '</strong><br><span>' . esc_html__('Observed cron source', 'freesiem-sentinel') . '</span></div>';
 		echo '</div>';
 
-		if ($disabled) {
+		echo '<div class="notice notice-' . esc_attr($source['mode'] === 'system' ? 'success' : 'info') . ' inline"><p>' . esc_html($source['detail']) . '</p>';
+
+		if ($source['mode'] !== 'system') {
+			$cron_cmd = 'curl -s "' . home_url('/wp-cron.php?doing_wp_cron') . '" >/dev/null 2>&1';
+			echo '<p style="margin:8px 0 4px;">' . esc_html__('To run scheduled work unattended, add a system cron job on this interval — every minute — in your host control panel:', 'freesiem-sentinel') . '</p>';
+			echo '<p><code style="display:inline-block;padding:6px 10px;background:#f6f7f7;border:1px solid #dcdcde;border-radius:6px;">' . esc_html($cron_cmd) . '</code></p>';
+			echo '<p style="margin:4px 0 0;">' . esc_html__('Once real cron runs are observed here, DISABLE_WP_CRON can safely be turned on to stop visitor page loads from also firing cron. Setting it before that would stop scheduled work entirely.', 'freesiem-sentinel') . '</p>';
+		}
+
+		echo '</div>';
+
+		if ($disabled && $source['mode'] !== 'system') {
+			echo '<div class="notice notice-error inline"><p>' . esc_html__('DISABLE_WP_CRON is enabled but no external scheduler has been observed calling wp-cron.php. Scheduled work is very likely not running at all. Add the cron job above, or remove the constant.', 'freesiem-sentinel') . '</p></div>';
+		} elseif ($disabled) {
 			echo '<div class="notice notice-warning inline"><p>' . esc_html__('DISABLE_WP_CRON is enabled. Confirm that Hostinger or another system scheduler calls wp-cron.php; otherwise overdue work will accumulate.', 'freesiem-sentinel') . '</p></div>';
 		}
 
@@ -3171,11 +3196,18 @@ class Freesiem_Admin
 		}
 
 		$percent = (int) max(2, min(100, (int) ($progress['percent'] ?? 0)));
-		$files = number_format_i18n((int) ($progress['files_scanned'] ?? 0));
+		// Report files WALKED, not files content-scanned. The progress bar is
+		// driven by the walk, and most files are cleared without being read
+		// (checksum-verified vendor code, non-code extensions), so showing the
+		// content-scan counter next to the bar made the two look unrelated —
+		// the bar climbing while "files inspected" sat still for minutes.
+		$files = number_format_i18n((int) ($progress['files_seen'] ?? 0));
+		$pending = (int) ($progress['files_pending'] ?? 0) + (int) ($progress['dirs_pending'] ?? 0);
+		$queued = number_format_i18n($pending);
 		$hits = number_format_i18n((int) ($progress['malware_hits'] ?? 0));
 		$label = freesiem_sentinel_safe_string($progress['label'] ?? '');
-		/* translators: 1: percent 2: file count 3: signature hit count */
-		$status_tmpl = __('%1$s%% · %2$s files inspected · %3$s signature hit(s) so far', 'freesiem-sentinel');
+		/* translators: 1: percent 2: files checked 3: items still queued 4: signature hit count */
+		$status_tmpl = __('%1$s%% · %2$s files checked · %3$s queued · %4$s signature hit(s) so far', 'freesiem-sentinel');
 		// The JS builds the string with plain replace(), so hand it a template
 		// with a single literal % rather than sprintf's doubled %%.
 		$js_tmpl = str_replace('%%', '%', $status_tmpl);
@@ -3189,7 +3221,7 @@ class Freesiem_Admin
 		echo '<div style="background:#f0f0f1;border-radius:999px;height:12px;overflow:hidden;max-width:520px;">';
 		echo '<div id="fs-deep-bar" style="background:#2271b1;height:100%;width:' . esc_attr((string) $percent) . '%;transition:width .5s ease;"></div>';
 		echo '</div>';
-		echo '<p id="fs-deep-status" style="margin:8px 0 0;color:#50575e;font-size:13px;">' . esc_html(sprintf($status_tmpl, $percent, $files, $hits)) . '</p>';
+		echo '<p id="fs-deep-status" style="margin:8px 0 0;color:#50575e;font-size:13px;">' . esc_html(sprintf($status_tmpl, $percent, $files, $queued, $hits)) . '</p>';
 		echo '<div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-top:8px;"><p style="margin:0;color:#50575e;font-size:13px;">' . esc_html__('Keep this tab open to run the scan from your browser; background slices are spaced out to protect shared-host resources.', 'freesiem-sentinel') . '</p>';
 		echo '<form method="post" action="' . esc_url(admin_url('admin-post.php')) . '" style="margin:0;"><input type="hidden" name="action" value="freesiem_sentinel_abort_deep_scan">';
 		wp_nonce_field(FREESIEM_SENTINEL_NONCE_ACTION);
@@ -3207,7 +3239,7 @@ class Freesiem_Admin
 			. 'var st=document.getElementById("fs-deep-status");'
 			. 'var lb=document.getElementById("fs-deep-label");'
 			. 'var busy=false,misses=0;'
-			. 'function fmt(p,f,h){return c.tmpl.replace("%1$s",p).replace("%2$s",Number(f).toLocaleString()).replace("%3$s",Number(h).toLocaleString());}'
+			. 'function fmt(p,f,q,h){return c.tmpl.replace("%1$s",p).replace("%2$s",Number(f).toLocaleString()).replace("%3$s",Number(q).toLocaleString()).replace("%4$s",Number(h).toLocaleString());}'
 			. 'function tick(){if(busy){return;}busy=true;'
 			. 'fetch(c.url,{method:"POST",credentials:"same-origin",headers:{"Content-Type":"application/x-www-form-urlencoded"},body:"action=freesiem_sentinel_deep_scan_tick&nonce="+encodeURIComponent(c.nonce)})'
 			. '.then(function(r){return r.json();}).then(function(res){busy=false;misses=0;'
@@ -3215,7 +3247,7 @@ class Freesiem_Admin
 			. 'var pct=Math.max(2,Math.min(100,parseInt(d.percent,10)||0));'
 			. 'if(bar){bar.style.width=pct+"%";}'
 			. 'if(lb&&d.label){lb.textContent=d.label;}'
-			. 'if(st){st.textContent=fmt(pct,d.files_scanned||0,d.malware_hits||0);}'
+			. 'if(st){st.textContent=fmt(pct,d.files_seen||0,(d.files_pending||0)+(d.dirs_pending||0),d.malware_hits||0);}'
 			. 'if(d.running===false){window.location.reload();}'
 			. '}).catch(function(){busy=false;if(++misses>8){clearInterval(iv);}});}'
 			. 'var iv=setInterval(tick,15000);setTimeout(tick,800);'

@@ -56,13 +56,29 @@ file_put_contents($disguised, $php_open . ' /* freesiem smoke */ ev' . 'al(trim(
 // Self-rewriting / anti-forensic file-manager shape.
 file_put_contents($selfmod, $php_open . " /* freesiem smoke */ file_put_" . "contents(__FILE__, \$x); tou" . "ch(__FILE__, \$mt); ?" . '>');
 
-$cleanup = static function () use ($shell, $polyglot, $htaccess, $disguised, $selfmod, $dir, $deep): void {
+// Abandoned backup folders. These sit at the top level of uploads/ because that
+// is where a backup plugin writes them, and the check only walks one level down
+// from wp-content / uploads / ABSPATH. The "archive" only has to carry a backup
+// extension — the check reports on names and sizes, it never opens the file.
+$backup_dir = trailingslashit($uploads['basedir']) . 'ai1wm-backups';
+$backup_file = $backup_dir . '/freesiem-smoke-20250602-000000-abcdef.wpress';
+$empty_backup_dir = trailingslashit($uploads['basedir']) . 'backups-dup-lite';
+wp_mkdir_p($backup_dir);
+wp_mkdir_p($empty_backup_dir);
+file_put_contents($backup_file, str_repeat("\0", 2097152));
+file_put_contents($empty_backup_dir . '/smoke.log', "freesiem smoke\n");
+
+$cleanup = static function () use ($shell, $polyglot, $htaccess, $disguised, $selfmod, $dir, $backup_dir, $backup_file, $empty_backup_dir, $deep): void {
 	@unlink($shell);
 	@unlink($polyglot);
 	@unlink($htaccess);
 	@unlink($disguised);
 	@unlink($selfmod);
 	@rmdir($dir);
+	@unlink($backup_file);
+	@rmdir($backup_dir);
+	@unlink($empty_backup_dir . '/smoke.log');
+	@rmdir($empty_backup_dir);
 	$deep->abort();
 };
 
@@ -140,6 +156,33 @@ try {
 	$assert(in_array('php_eval_request_console', $signatures, true), 'eval() fed from request input was detected in the disguised file');
 	$assert(in_array('php_self_rewrite', $signatures, true), 'the self-rewriting-source shape was detected');
 	$assert(in_array('php_mtime_reset', $signatures, true), 'the timestamp-reset anti-forensics shape was detected');
+
+	$assert($has('deep_backup_dir_'), 'the abandoned backup folder holding a .wpress export was flagged');
+	$assert($has('deep_backup_dir_empty_'), 'the empty leftover backup folder was reported separately');
+
+	// The archive-bearing folder must outrank the empty one: an exposed export is
+	// a disclosure risk, an empty leftover is only clutter.
+	$backup_severity = '';
+	$empty_severity = '';
+
+	foreach ($findings as $finding) {
+		if (!is_array($finding)) {
+			continue;
+		}
+
+		$key = (string) ($finding['finding_key'] ?? '');
+
+		if (str_starts_with($key, 'deep_backup_dir_empty_')) {
+			$empty_severity = (string) ($finding['severity'] ?? '');
+		} elseif (str_starts_with($key, 'deep_backup_dir_')) {
+			$backup_severity = (string) ($finding['severity'] ?? '');
+			$assert(!empty($finding['evidence']['contains_dump']), 'the .wpress export was recognised as a full site dump');
+			$assert(empty($finding['evidence']['denies_web_access']), 'the folder was correctly reported as web-reachable');
+		}
+	}
+
+	$assert($backup_severity === 'high', 'an exposed export folder is reported as high severity, got: ' . $backup_severity);
+	$assert($empty_severity === 'low', 'an empty leftover folder is reported as low severity, got: ' . $empty_severity);
 
 	$summary = is_array($cache['summary'] ?? null) ? $cache['summary'] : [];
 	$assert((int) ($summary['files_content_scanned'] ?? 0) > 0, 'files were content-scanned');
