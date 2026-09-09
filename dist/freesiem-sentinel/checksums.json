@@ -1,5 +1,5 @@
 {
-    "freesiem-sentinel.php": "c7998b7b98357d1ece0604c127f415a0",
+    "freesiem-sentinel.php": "cf36a558683436d9e5c54ebcca5a0c81",
     "includes/class-acknowledgements.php": "d940aa39e3decbcbc14ddabac427c279",
     "includes/class-acme-client.php": "533ad7673c04bfb975d263ab41eaa1d0",
     "includes/class-admin.php": "cb6fb4810116acf5975a7ca41a062dec",
@@ -9,7 +9,7 @@
     "includes/class-cloud-connect-state.php": "6680803ed69ff35f3dbe74a6014f0d42",
     "includes/class-commands.php": "3b9166c263f2f1789b48b138acc3a850",
     "includes/class-cron.php": "ad93440305c4a0396b8fe87cebafaa9c",
-    "includes/class-deep-scanner.php": "fc98328f2a7d3aeacc1a03ccf54fd33e",
+    "includes/class-deep-scanner.php": "e403843f523e629c03b5063dd0c0bcd7",
     "includes/class-features.php": "acf0e1b1fba863f1c3d6eb22cf210723",
     "includes/class-file-actions.php": "fc5ef487a707c332e42f879bc2087ea7",
     "includes/class-freesiem-sentinel-s3-client.php": "2e329f9825bd812497174e93c3424f0a",

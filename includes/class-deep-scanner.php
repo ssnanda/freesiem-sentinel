@@ -1299,6 +1299,26 @@ class Freesiem_Deep_Scanner
 		$checksums = $this->core_checksums();
 
 		if ($checksums === []) {
+			// The reported version has no published checksum manifest at
+			// api.wordpress.org. The usual cause is a host that re-brands core
+			// with a vanity version string (e.g. Hostinger ships WordPress 6.8
+			// as "7.1"); it can also be an offline box or an impossible version.
+			// Either way, core files were NOT verified this run — say so loudly
+			// rather than reporting a clean core check that never happened.
+			$this->add_finding($state, [
+				'finding_key' => 'deep_core_checksums_unavailable',
+				'category' => 'core_integrity',
+				'severity' => 'medium',
+				'title' => 'WordPress core files could not be verified',
+				'description' => sprintf(
+					'WordPress reports version "%s", which has no published checksum manifest at WordPress.org. Core file integrity checking was skipped for this scan. This is normal on hosts that re-brand core with their own version number, but it also means a modified or extra core file would not be caught by the checksum check (the deep content scan still ran).',
+					get_bloginfo('version')
+				),
+				'recommendation' => 'If your host re-brands WordPress, this is expected — rely on the content scan and the file-change baseline. If it does not, confirm the reported version is a real WordPress release and that the site can reach api.wordpress.org, then re-scan.',
+				'evidence' => ['reported_version' => (string) get_bloginfo('version'), 'db_version' => (string) ($GLOBALS['wp_db_version'] ?? '')],
+				'score' => 74,
+			]);
+
 			return true;
 		}
 
