@@ -45,6 +45,7 @@ class Freesiem_Admin
 		add_action('admin_post_freesiem_sentinel_run_full_scan_now', [$this, 'handle_run_full_scan_now']);
 		add_action('admin_post_freesiem_sentinel_abort_deep_scan', [$this, 'handle_abort_deep_scan']);
 		add_action('admin_post_freesiem_sentinel_clear_cron_history', [$this, 'handle_clear_cron_history']);
+		add_action('admin_post_freesiem_sentinel_reset_cron_source', [$this, 'handle_reset_cron_source']);
 		add_action('admin_post_freesiem_sentinel_start_cloud_connect', [$this, 'handle_start_cloud_connect']);
 		add_action('admin_post_freesiem_sentinel_verify_cloud_connect', [$this, 'handle_verify_cloud_connect']);
 		add_action('admin_post_freesiem_sentinel_save_cloud_preferences', [$this, 'handle_save_cloud_preferences']);
@@ -655,6 +656,15 @@ class Freesiem_Admin
 		$this->plugin->get_deep_scanner()->abort();
 		freesiem_sentinel_set_notice('success', __('The running deep scan and its queued continuation were stopped.', 'freesiem-sentinel'));
 		$this->redirect_to_page('freesiem-scan');
+	}
+
+	public function handle_reset_cron_source(): void
+	{
+		$this->assert_manage_permissions();
+		freesiem_sentinel_require_admin_post_nonce();
+		$this->plugin->get_cron_monitor()->reset_source_state();
+		freesiem_sentinel_set_notice('success', __('Cron source detection reset. New observations will determine the source.', 'freesiem-sentinel'));
+		$this->redirect_to_page('freesiem-security', ['section' => 'wp-cron']);
 	}
 
 	public function handle_clear_cron_history(): void
@@ -1941,10 +1951,14 @@ class Freesiem_Admin
 		// site is set to; this says what is actually calling wp-cron.php.
 		$source = $monitor->analyze_source();
 		$source_border = ['system' => '#00a32a', 'traffic' => '#dba617'][$source['mode']] ?? '#dcdcde';
-		echo '<div style="background:#fff;border:1px solid ' . esc_attr($source_border) . ';border-radius:10px;padding:14px 18px;"><strong>' . esc_html($source['label']) . '</strong><br><span>' . esc_html__('Observed cron source', 'freesiem-sentinel') . '</span></div>';
+		echo '<a href="#freesiem-cron-source" style="display:block;color:inherit;text-decoration:none;background:#fff;border:1px solid ' . esc_attr($source_border) . ';border-radius:10px;padding:14px 18px;"><strong>' . esc_html($source['label']) . '</strong><br><span>' . esc_html__('Observed cron source', 'freesiem-sentinel') . '</span></a>';
 		echo '</div>';
 
-		echo '<div class="notice notice-' . esc_attr($source['mode'] === 'system' ? 'success' : 'info') . ' inline"><p>' . esc_html($source['detail']) . '</p>';
+		echo '<div id="freesiem-cron-source" tabindex="-1" class="notice notice-' . esc_attr($source['mode'] === 'system' ? 'success' : 'info') . ' inline"><p>' . esc_html($source['detail']) . '</p>';
+
+		echo '<form method="post" style="margin:8px 0;" action="' . esc_url(admin_url('admin-post.php')) . '"><input type="hidden" name="action" value="freesiem_sentinel_reset_cron_source">';
+		wp_nonce_field(FREESIEM_SENTINEL_NONCE_ACTION);
+		echo '<button class="button button-secondary" type="submit">' . esc_html__('Reset detection', 'freesiem-sentinel') . '</button></form>';
 
 		if ($source['mode'] !== 'system') {
 			$cron_cmd = 'curl -s "' . home_url('/wp-cron.php?doing_wp_cron') . '" >/dev/null 2>&1';

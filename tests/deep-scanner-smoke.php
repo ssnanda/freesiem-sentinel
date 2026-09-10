@@ -33,6 +33,23 @@ $deep = $plugin->get_deep_scanner();
 
 $uploads = wp_get_upload_dir();
 $dir = trailingslashit($uploads['basedir']) . 'freesiem-smoke';
+$orphan_security = WP_CONTENT_DIR . '/wflogs';
+$orphan_forms = trailingslashit($uploads['basedir']) . 'wpforms';
+$owned_data = trailingslashit($uploads['basedir']) . 'rank-math';
+$owner_plugin = WP_PLUGIN_DIR . '/seo-by-rank-math';
+$duplicate = ABSPATH . 'wp-header-test.php';
+// Refuse collisions rather than overwrite real plugin data during a smoke test.
+foreach ([$orphan_security, $orphan_forms, $owned_data, $owner_plugin, $duplicate] as $fixture) {
+	if (file_exists($fixture) || is_link($fixture)) {
+		throw new RuntimeException('Fixture path already exists: ' . $fixture);
+	}
+}
+foreach (['wordfence', 'wpforms', 'wpforms-lite'] as $slug) {
+	if (is_dir(WP_PLUGIN_DIR . '/' . $slug)) {
+		throw new RuntimeException('Orphan fixture owner is installed: ' . $slug);
+	}
+}
+
 wp_mkdir_p($dir);
 
 $shell = $dir . '/smoke-shell.php';
@@ -68,7 +85,7 @@ wp_mkdir_p($empty_backup_dir);
 file_put_contents($backup_file, str_repeat("\0", 2097152));
 file_put_contents($empty_backup_dir . '/smoke.log', "freesiem smoke\n");
 
-$cleanup = static function () use ($shell, $polyglot, $htaccess, $disguised, $selfmod, $dir, $backup_dir, $backup_file, $empty_backup_dir, $deep): void {
+$cleanup = static function () use ($orphan_security, $orphan_forms, $owned_data, $owner_plugin, $duplicate, $shell, $polyglot, $htaccess, $disguised, $selfmod, $dir, $backup_dir, $backup_file, $empty_backup_dir, $deep): void {
 	@unlink($shell);
 	@unlink($polyglot);
 	@unlink($htaccess);
@@ -79,10 +96,35 @@ $cleanup = static function () use ($shell, $polyglot, $htaccess, $disguised, $se
 	@rmdir($backup_dir);
 	@unlink($empty_backup_dir . '/smoke.log');
 	@rmdir($empty_backup_dir);
+	@unlink($orphan_security . '/config.php');
+	@rmdir($orphan_security);
+	@unlink($orphan_forms . '/cache/smoke.txt');
+	@rmdir($orphan_forms . '/cache');
+	@rmdir($orphan_forms);
+	@unlink($owned_data . '/smoke.txt');
+	@rmdir($owned_data);
+	@unlink($owner_plugin . '/smoke-owner.php');
+	@rmdir($owner_plugin);
+	@unlink($duplicate);
 	$deep->abort();
 };
 
 try {
+	wp_mkdir_p($orphan_security);
+	wp_mkdir_p($orphan_forms . '/cache');
+	wp_mkdir_p($owned_data);
+	wp_mkdir_p($owner_plugin);
+	file_put_contents($orphan_security . '/config.php', $php_open . " // benign smoke configuration\n");
+	file_put_contents($orphan_forms . '/cache/smoke.txt', 'smoke');
+	file_put_contents($owned_data . '/smoke.txt', 'smoke');
+	file_put_contents($owner_plugin . '/smoke-owner.php', $php_open . "\n/* Plugin Name: Smoke fixture owner */\n");
+	$bootstrap = file_get_contents(ABSPATH . 'wp-blog-header.php');
+	$assert(is_string($bootstrap) && $bootstrap !== '', 'live bootstrap fixture is readable');
+	$stripped = '';
+	foreach (token_get_all($bootstrap) as $token) {
+		$stripped .= is_array($token) ? (in_array($token[0], [T_COMMENT, T_DOC_COMMENT], true) ? ' ' : $token[1]) : $token;
+	}
+	file_put_contents($duplicate, $stripped);
 	$deep->start([
 		'scan_malware' => 1,
 		'scan_core_integrity' => 1,
@@ -183,6 +225,21 @@ try {
 
 	$assert($backup_severity === 'high', 'an exposed export folder is reported as high severity, got: ' . $backup_severity);
 	$assert($empty_severity === 'low', 'an empty leftover folder is reported as low severity, got: ' . $empty_severity);
+
+	$fixture_finding = static function (string $prefix, string $absolute) use ($findings): ?array {
+		$relative = ltrim(str_replace(wp_normalize_path(ABSPATH), '', wp_normalize_path($absolute)), '/');
+		foreach ($findings as $finding) {
+			if (str_starts_with($finding['finding_key'] ?? '', $prefix) && ($finding['evidence']['path'] ?? '') === $relative) {
+				return $finding;
+			}
+		}
+		return null;
+	};
+	$assert(($fixture_finding('deep_orphan_data_', $orphan_security)['severity'] ?? '') === 'medium', 'orphaned security configuration is medium');
+	$assert(($fixture_finding('deep_orphan_data_', $orphan_forms)['severity'] ?? '') === 'low', 'orphaned form cache is low');
+	$assert(($fixture_finding('deep_duplicate_bootstrap_', $duplicate)['severity'] ?? '') === 'high', 'comment-stripped bootstrap copy is high');
+	$assert($fixture_finding('deep_orphan_data_', $owned_data) === null, 'inactive installed plugin still owns its data');
+	$assert($fixture_finding('deep_orphan_data_', $backup_dir) === null, 'backup directory is not also orphan data');
 
 	$summary = is_array($cache['summary'] ?? null) ? $cache['summary'] : [];
 	$assert((int) ($summary['files_content_scanned'] ?? 0) > 0, 'files were content-scanned');

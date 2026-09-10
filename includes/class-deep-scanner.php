@@ -531,6 +531,63 @@ class Freesiem_Deep_Scanner
 		}
 	}
 
+	private function bootstrap_fingerprint(string $path): string
+	{
+		if (!is_readable($path) || is_link($path) || !is_file($path) || filesize($path) > self::MAX_READ_BYTES) {
+			return '';
+		}
+		$tokens = token_get_all((string) file_get_contents($path, false, null, 0, self::MAX_READ_BYTES));
+		$parts = [];
+		$php = false;
+		foreach ($tokens as $token) {
+			if (is_array($token)) {
+				if (in_array($token[0], [T_COMMENT, T_DOC_COMMENT, T_WHITESPACE], true)) {
+					continue;
+				}
+				$php = $php || $token[0] === T_OPEN_TAG;
+				// Preserve string literals and token boundaries: whitespace inside a string changes behaviour.
+				$parts[] = [$token[0], $token[0] === T_OPEN_TAG ? trim($token[1]) : $token[1]];
+			} else {
+				$parts[] = $token;
+			}
+		}
+		return $php ? hash('sha256', serialize($parts)) : '';
+	}
+
+	private function check_duplicate_bootstrap(string $path, array &$state): void
+	{
+		$core = ['wp-blog-header.php', 'wp-load.php', 'wp-settings.php', 'index.php'];
+		if (wp_normalize_path(dirname($path)) !== untrailingslashit(wp_normalize_path(ABSPATH)) || in_array(basename($path), $core, true)) {
+			return;
+		}
+		// Persist live fingerprints with this scan, avoiding four extra reads for every root PHP file.
+		if (!isset($state['bootstrap_fingerprints'])) {
+			$state['bootstrap_fingerprints'] = [];
+			foreach ($core as $name) {
+				$fingerprint = $this->bootstrap_fingerprint(ABSPATH . $name);
+				if ($fingerprint !== '') {
+					$state['bootstrap_fingerprints'][$fingerprint] = $name;
+				}
+			}
+		}
+		$fingerprint = $this->bootstrap_fingerprint($path);
+		$match = $state['bootstrap_fingerprints'][$fingerprint] ?? '';
+		if ($match === '') {
+			return;
+		}
+		$rel = $this->relative_path($path);
+		$this->add_finding($state, [
+			'finding_key' => 'deep_duplicate_bootstrap_' . md5($rel),
+			'category' => 'malware',
+			'severity' => 'high',
+			'title' => __('Duplicate WordPress entry point', 'freesiem-sentinel'),
+			'description' => sprintf(__('%1$s copies %2$s and starts WordPress under a name WordPress core does not ship. This gives a second entry point that bypasses protections tied to the normal front controller.', 'freesiem-sentinel'), $rel, $match),
+			'recommendation' => __('Check who created this file and remove it if it was not intentionally installed. Review protections tied to the normal WordPress entry point.', 'freesiem-sentinel'),
+			'evidence' => ['path' => $rel, 'matches_core' => $match],
+			'score' => 40,
+		]);
+	}
+
 	private function scan_file(string $path, array &$state): void
 	{
 		$state['counters']['files_seen']++;
@@ -543,6 +600,9 @@ class Freesiem_Deep_Scanner
 		$basename = strtolower((string) basename($path));
 		$extension = strtolower((string) pathinfo($path, PATHINFO_EXTENSION));
 		$size = (int) @filesize($path);
+		if ($extension === 'php' && !empty($state['prefs']['scan_malware'])) {
+			$this->check_duplicate_bootstrap($path, $state);
+		}
 
 		// A pristine copy of one of freeSIEM Sentinel's own shipped files
 		// legitimately contains signature strings ("coinhive", "c99shell", the
@@ -1109,9 +1169,13 @@ class Freesiem_Deep_Scanner
 
 	/**
 	 * True when the directory carries an .htaccess that blanket-denies web
-	 * access ("Require all denied" / "Deny from all"). Apache-only signal — nginx
-	 * and LiteSpeed ignore .htaccess — but enough to distinguish a backup tool's
-	 * sealed folder from a credentials file dropped straight in the doc root.
+	 * access ("Require all denied" / "Deny from all").
+	 *
+	 * Apache and LiteSpeed read .htaccess; nginx ignores it outright, and any
+	 * server can be configured with AllowOverride off. So this says a rule was
+	 * written, never that it is enforced — enough to tell a backup tool's sealed
+	 * folder from a credentials file dropped straight in the doc root, but not
+	 * enough on its own to call a secret safe.
 	 */
 	private function directory_denies_web_access(string $dir): bool
 	{
@@ -1814,6 +1878,41 @@ class Freesiem_Deep_Scanner
 		'wpress', 'daf', 'zip', 'sql', 'gz', 'tgz', 'tar', 'bz2', 'xz', '7z', 'rar', 'bak',
 	];
 
+	/** Deleted plugins leave private data and caches behind; present but inactive owners still count. */
+	private const PLUGIN_DATA_OWNERS = [
+		'wflogs' => ['wordfence'],
+		'litespeed' => ['litespeed-cache'],
+		'ast-block-templates-json' => ['astra-sites', 'astra-pro-sites', 'spectra', 'ultimate-addons-for-gutenberg'],
+		'wpforms' => ['wpforms-lite', 'wpforms'],
+		'astra-sites' => ['astra-sites', 'astra-pro-sites'],
+		'uag-plugin' => ['ultimate-addons-for-gutenberg', 'spectra'],
+		'elementor' => ['elementor', 'elementor-pro'],
+		'wc-logs' => ['woocommerce'],
+		'woocommerce_uploads' => ['woocommerce'],
+		'astra' => ['astra-sites', 'astra-pro-sites', 'astra-addon'],
+		'astra-addon' => ['astra-addon'],
+		'astra-docs' => ['astra-sites', 'astra-pro-sites', 'astra-addon'],
+		'ai-builder' => ['ai-builder', 'astra-sites', 'astra-pro-sites'],
+		'st-importer' => ['astra-sites', 'astra-pro-sites'],
+		'blocksy' => ['blocksy-companion', 'blocksy-companion-pro'],
+		'llms-logs' => ['lifterlms'],
+		'llms-tmp' => ['lifterlms'],
+		'wpcf7_uploads' => ['contact-form-7'],
+		'forminator' => ['forminator', 'forminator-pro'],
+		'suremails' => ['suremails'],
+		'airwpsync-logs' => ['air-wp-sync', 'air-wp-sync-pro', 'air-wp-sync-pro-plus'],
+		'wp_encryption' => ['wp-letsencrypt-ssl'],
+		'essential-addons-elementor' => ['essential-addons-for-elementor-lite', 'essential-addons-elementor'],
+		'updraft' => ['updraftplus'],
+		'backwpup' => ['backwpup'],
+		'wpvivid' => ['wpvivid-backuprestore'],
+		'smush-webp' => ['wp-smushit', 'wp-smush-pro'],
+		'rank-math' => ['seo-by-rank-math', 'seo-by-rank-math-pro'],
+		'wp-rocket' => ['wp-rocket'],
+		'nitropack' => ['nitropack'],
+		'w3tc-config' => ['w3-total-cache'],
+	];
+
 	private const BACKUP_DIR_MAX_FILES = 400;
 
 	/**
@@ -1839,7 +1938,7 @@ class Freesiem_Deep_Scanner
 			}
 
 			foreach ((array) @scandir($root) as $entry) {
-				if ($entry === '.' || $entry === '..') {
+				if (in_array(strtolower($entry), ['.', '..', 'plugins', 'themes', 'mu-plugins', 'uploads', 'upgrade', 'upgrade-temp-backup', 'languages', 'cache', 'index.php', 'synchy', 'synchy-sync', 'synchy-sync-b', 'ajcore-backups', 'ajphone-rules'], true) || preg_match('/^\d{4}$/', $entry)) {
 					continue;
 				}
 
@@ -1858,6 +1957,12 @@ class Freesiem_Deep_Scanner
 				$owners = $this->backup_dir_owners($entry);
 
 				if ($owners === null) {
+					$data_roots = [untrailingslashit(wp_normalize_path(WP_CONTENT_DIR)), untrailingslashit(wp_normalize_path($uploads['basedir'] ?? ''))];
+					$data_owners = self::PLUGIN_DATA_OWNERS[strtolower($entry)] ?? [];
+					if (in_array(wp_normalize_path($root), $data_roots, true) && $data_owners !== [] && array_intersect($data_owners, array_keys($installed)) === []) {
+						$this->report_orphan_data_dir($dir, $data_owners, $state);
+					}
+					$seen[$key] = true;
 					continue;
 				}
 
@@ -1865,6 +1970,65 @@ class Freesiem_Deep_Scanner
 				$this->report_backup_dir($dir, $entry, $owners, $installed, $state);
 			}
 		}
+	}
+
+	private function report_orphan_data_dir(string $dir, array $owners, array &$state): void
+	{
+		$files = $bytes = $visited = 0;
+		$sensitive = $truncated = false;
+		try {
+			// Count directories too so deeply nested or empty trees cannot evade the work cap.
+			$iterator = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($dir, FilesystemIterator::SKIP_DOTS), RecursiveIteratorIterator::SELF_FIRST);
+			$iterator->setMaxDepth(15);
+			foreach ($iterator as $file) {
+				if (++$visited > self::BACKUP_DIR_MAX_FILES) {
+					$truncated = true;
+					break;
+				}
+				if ($file->isLink()) {
+					continue;
+				}
+				if ($file->isDir() && $iterator->getDepth() === 15) {
+					$truncated = true;
+				}
+				if (!$file->isFile()) {
+					continue;
+				}
+				$files++;
+				$bytes += $file->getSize();
+				$sensitive = $sensitive || (bool) preg_match('~^(?:config\.php|attack-data\.php)$|\.(?:key|pem)$|credentials~i', $file->getFilename());
+			}
+		} catch (Exception $e) {
+			$truncated = true;
+		}
+		$denied = $this->directory_denies_web_access($dir);
+		$rel = $this->relative_path($dir);
+		$description = sprintf(__('%1$s contains %2$d file(s), totalling %3$s. Its owning plugin (%4$s) is no longer installed.', 'freesiem-sentinel'), $rel, $files, size_format($bytes), implode(' / ', $owners));
+		if ($sensitive) {
+			$description .= ' ' . __('File names indicate credentials, keys or security scan data may remain here.', 'freesiem-sentinel');
+		}
+		if ($denied) {
+			$description .= ' ' . __('The folder has a rule denying web access in .htaccess; confirm your web server honours it.', 'freesiem-sentinel');
+		}
+		if ($truncated) {
+			$description .= ' ' . __('The inventory was limited or unreadable in part; size and file count are lower bounds, and additional sensitive files may remain unchecked.', 'freesiem-sentinel');
+		}
+		$this->add_finding($state, [
+			'finding_key' => 'deep_orphan_data_' . md5($rel),
+			'category' => 'filesystem',
+			// A deny-all .htaccess does NOT pull a credentials-bearing folder down to
+			// "low". Whether that rule is enforced depends on the web server, and
+			// nothing on disk can tell us — so the one case where being wrong costs
+			// a leaked API key keeps the higher severity, with the caveat spelled
+			// out in the description. Non-sensitive leftovers stay low either way:
+			// they are disk hygiene, not exposure.
+			'severity' => $sensitive ? 'medium' : 'low',
+			'title' => sprintf(__('Data folder left by an uninstalled plugin: %s', 'freesiem-sentinel'), basename($dir)),
+			'description' => $description,
+			'recommendation' => __('Save any data you still need, then delete this leftover folder. Protect any credentials before removing it.', 'freesiem-sentinel'),
+			'evidence' => ['path' => $rel, 'owners' => $owners, 'files' => $files, 'total_bytes' => $bytes, 'sensitive_filenames' => $sensitive, 'denies_web_access' => $denied, 'truncated' => $truncated],
+			'score' => $sensitive ? 65 : 90,
+		]);
 	}
 
 	/**
