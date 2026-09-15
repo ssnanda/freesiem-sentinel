@@ -745,6 +745,16 @@ class Freesiem_Deep_Scanner
 	}
 
 	/**
+	 * Broader than looks_like_php_source(): any PHP open tag at all, including a
+	 * bare short tag, so "no match" means the file genuinely cannot execute PHP.
+	 * `<?xml` is ignored — with short_open_tag on it is a parse error, not code.
+	 */
+	private function contains_php_open_tag(string $contents): bool
+	{
+		return (bool) preg_match('~<\?(?!xml\b)|<script\s+language\s*=\s*[\'"]?php~i', $contents);
+	}
+
+	/**
 	 * Read up to MAX_READ_BYTES from the start of a file plus the last ~512 KB,
 	 * joined, so an oversized file is still partly signature-scanned.
 	 */
@@ -1563,15 +1573,29 @@ class Freesiem_Deep_Scanner
 				// Keep the severity a notch below wp-admin/wp-includes but still loud.
 				$rel = $this->relative_path($full);
 				$mimics_core = (bool) preg_match('~^wp[-_].*\.php$~i', $item);
+				$size = (int) @filesize($full);
+
+				// A .php file with no PHP open tag is static HTML served with a .php
+				// name and cannot execute anything — e.g. Hostinger's default.php
+				// parking page (16 KB of HTML). Core-mimicking names stay flagged.
+				if (!$mimics_core && $size <= 1048576 && !$this->contains_php_open_tag((string) @file_get_contents($full))) {
+					continue;
+				}
 
 				$this->add_finding($state, [
 					'finding_key' => 'deep_core_unknown_' . md5($rel),
 					'category' => 'core_integrity',
 					'severity' => $mimics_core ? 'high' : 'medium',
 					'title' => 'Unrecognized PHP file in the WordPress web root',
-					'description' => sprintf('%s sits in the site root but is not one of the files WordPress core places there.%s Loader files with core-looking names (wp-*.php) are a common backdoor / staging pattern.', $rel, $mimics_core ? ' Its name mimics a core file.' : ''),
+					'description' => sprintf(
+						'%s sits in the site root but is not one of the files WordPress core places there. %s',
+						$rel,
+						$mimics_core
+							? 'Its name mimics a core file — loader files with core-looking names (wp-*.php) are a common backdoor / staging pattern.'
+							: 'A PHP file in the web root can be requested directly and runs with full access to the site.'
+					),
 					'recommendation' => 'Open the file. If it is not something your host or a deliberate customization added, remove it and review access logs.',
-					'evidence' => ['path' => $rel, 'size' => (int) @filesize($full), 'mimics_core_name' => $mimics_core],
+					'evidence' => ['path' => $rel, 'size' => $size, 'mimics_core_name' => $mimics_core],
 					'score' => $mimics_core ? 44 : 62,
 				]);
 			}
@@ -2251,6 +2275,32 @@ class Freesiem_Deep_Scanner
 
 		$extra = $this->find_unrecognized_self_files($base, $manifest, $state);
 
+		// Dev-copy files that the content scan already reported one-by-one (a
+		// test fixture matching a signature) are folded into the single
+		// aggregate finding below, so one deployed tests/ folder costs one
+		// medium finding instead of two. Non-dev unrecognized files keep their
+		// own (high) finding.
+		$signature_matches = [];
+
+		foreach ($state['findings'] as $key => $finding) {
+			if (!str_starts_with((string) $key, 'deep_self_unrecognized_') || empty($finding['evidence']['looks_like_dev_copy'])) {
+				continue;
+			}
+
+			$path = (string) ($finding['evidence']['path'] ?? '');
+
+			if ($path === '') {
+				continue;
+			}
+
+			$extra[] = $path;
+			$signature_matches[$path] = (string) ($finding['evidence']['matched_signature'] ?? $finding['evidence']['original_title'] ?? '');
+			unset($state['findings'][$key]);
+		}
+
+		$extra = array_values(array_unique($extra));
+		sort($extra);
+
 		if ($modified === [] && $missing === [] && $extra === []) {
 			return;
 		}
@@ -2289,6 +2339,10 @@ class Freesiem_Deep_Scanner
 			));
 			$all_dev = count($dev_only) === count($extra);
 
+			$prefix = 'wp-content/plugins/' . FREESIEM_SENTINEL_SLUG . '/';
+			$listed = array_map(static fn (string $r): string => str_starts_with($r, $prefix) ? substr($r, strlen($prefix)) : $r, array_slice($extra, 0, 10));
+			$file_list = ' Files: ' . implode(', ', $listed) . (count($extra) > 10 ? sprintf(' (+%d more)', count($extra) - 10) : '') . '.';
+
 			$this->add_finding($state, [
 				'finding_key' => 'deep_self_extra_files_' . md5(FREESIEM_SENTINEL_VERSION),
 				'category' => 'plugin_integrity',
@@ -2306,7 +2360,7 @@ class Freesiem_Deep_Scanner
 					FREESIEM_SENTINEL_VERSION
 				) . ' ' . ($all_dev
 					? 'They all live under paths the release build strips (tests/, dist/, *.md), so this install was copied from a development tree rather than the release zip. Our own test fixtures deliberately contain malware-shaped strings.'
-					: 'Some are not development-only paths. A file that freeSIEM Sentinel neither ships nor recognises inside its own directory can be a planted shell.'),
+					: 'Some are not development-only paths. A file that freeSIEM Sentinel neither ships nor recognises inside its own directory can be a planted shell.') . $file_list,
 				'recommendation' => $all_dev
 					? sprintf('Reinstall freeSIEM Sentinel from the release zip, or delete the development-only files under wp-content/plugins/%s/.', FREESIEM_SENTINEL_SLUG)
 					: 'Review each file below. If you did not add it deliberately, quarantine it and reinstall freeSIEM Sentinel from a clean copy.',
@@ -2314,6 +2368,7 @@ class Freesiem_Deep_Scanner
 					'path' => 'wp-content/plugins/' . FREESIEM_SENTINEL_SLUG,
 					'version' => FREESIEM_SENTINEL_VERSION,
 					'unrecognized_files' => array_slice($extra, 0, 50),
+					'signature_matches' => $signature_matches,
 					'development_only' => $all_dev,
 				],
 				'score' => $all_dev ? 62 : 44,
@@ -2680,9 +2735,10 @@ class Freesiem_Deep_Scanner
 	}
 
 	/**
-	 * Current version string for every plugin / theme, keyed the same way as
-	 * extcode_component_for(). mu-plugins have no version and are omitted (any
-	 * change to one is always worth surfacing).
+	 * Current version string for every plugin / theme / mu-plugin, keyed the same
+	 * way as extcode_component_for(). A single-file mu-plugin's version comes from
+	 * its `Version:` header (e.g. Hostinger's hostinger-auto-updates.php); one
+	 * without a header stays unversioned, so any change to it is surfaced.
 	 *
 	 * @return array<string,string>
 	 */
@@ -2707,6 +2763,16 @@ class Freesiem_Deep_Scanner
 		if (function_exists('wp_get_themes')) {
 			foreach (wp_get_themes() as $slug => $theme) {
 				$versions['theme:' . $slug] = (string) $theme->get('Version');
+			}
+		}
+
+		if (function_exists('get_mu_plugins')) {
+			foreach (get_mu_plugins() as $file => $data) {
+				$version = (string) ($data['Version'] ?? '');
+
+				if ($version !== '') {
+					$versions['mu:' . basename((string) $file)] = $version;
+				}
 			}
 		}
 
