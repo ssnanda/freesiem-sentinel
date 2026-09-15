@@ -849,8 +849,12 @@ class Freesiem_Deep_Scanner
 		}
 
 		// Code after __halt_compiler() — "the data section is really a payload".
-		if (preg_match('~__halt_compiler\s*\(\s*\)\s*;(.{200,})~s', $contents, $m)
-			&& preg_match('~[A-Za-z0-9+/=]{200,}|\\\\x[0-9a-f]{2}|eval|base64_decode|gzinflate~i', $m[1])) {
+		// The parser never runs that section; it is only dangerous if code BEFORE
+		// the halt reads it back. A file whose sole code is `exit('...');` is an
+		// inert data store (Wordfence's wflogs/*.php, for one) and is skipped.
+		if (preg_match('~^(.*?)__halt_compiler\s*\(\s*\)\s*;(.{200,})~s', $contents, $m)
+			&& !preg_match('~^\s*<\?php\s+(?:exit|die)\s*(?:\(\s*(?:\'[^\']*\'|"[^"]*")?\s*\))?\s*;\s*$~i', $m[1])
+			&& preg_match('~[A-Za-z0-9+/=]{200,}|\\\\x[0-9a-f]{2}|eval|base64_decode|gzinflate~i', $m[2])) {
 			$reasons[] = 'executable-looking data after __halt_compiler()';
 			$exec += 60;
 		}
@@ -1955,6 +1959,7 @@ class Freesiem_Deep_Scanner
 
 		$seen = [];
 		$installed = $this->installed_plugin_slugs();
+		$leftovers = [];
 
 		foreach (array_unique($roots) as $root) {
 			if ($root === '' || !is_dir($root)) {
@@ -1984,7 +1989,7 @@ class Freesiem_Deep_Scanner
 					$data_roots = [untrailingslashit(wp_normalize_path(WP_CONTENT_DIR)), untrailingslashit(wp_normalize_path($uploads['basedir'] ?? ''))];
 					$data_owners = self::PLUGIN_DATA_OWNERS[strtolower($entry)] ?? [];
 					if (in_array(wp_normalize_path($root), $data_roots, true) && $data_owners !== [] && array_intersect($data_owners, array_keys($installed)) === []) {
-						$this->report_orphan_data_dir($dir, $data_owners, $state);
+						$this->report_orphan_data_dir($dir, $data_owners, $state, $leftovers);
 					}
 					$seen[$key] = true;
 					continue;
@@ -1994,9 +1999,62 @@ class Freesiem_Deep_Scanner
 				$this->report_backup_dir($dir, $entry, $owners, $installed, $state);
 			}
 		}
+
+		$this->report_orphan_data_leftovers($leftovers, $state);
 	}
 
-	private function report_orphan_data_dir(string $dir, array $owners, array &$state): void
+	/**
+	 * One combined finding for every non-sensitive leftover data folder. These
+	 * are disk hygiene, not exposure — fifteen tiny Astra/Spectra folders used to
+	 * cost fifteen separate "low" findings and wreck the site score. Info when
+	 * they are all small; one low when any holds 1 MB or more.
+	 *
+	 * @param list<array{path:string,owners:list<string>,files:int,total_bytes:int,denies_web_access:bool}> $leftovers
+	 */
+	private function report_orphan_data_leftovers(array $leftovers, array &$state): void
+	{
+		if ($leftovers === []) {
+			return;
+		}
+
+		usort($leftovers, static fn (array $a, array $b): int => $b['total_bytes'] <=> $a['total_bytes']);
+
+		$total_bytes = array_sum(array_column($leftovers, 'total_bytes'));
+		$largest = (int) $leftovers[0]['total_bytes'];
+		$listed = array_map(
+			static fn (array $l): string => sprintf('%s (%s)', $l['path'], size_format($l['total_bytes'])),
+			array_slice($leftovers, 0, 20)
+		);
+		$form_data = array_values(array_filter(
+			$leftovers,
+			static fn (array $l): bool => in_array(strtolower(basename($l['path'])), ['forminator', 'wpforms', 'wpcf7_uploads'], true)
+		));
+
+		$description = sprintf(
+			'%d folder(s) left behind by plugins that are no longer installed, totalling %s: %s%s.',
+			count($leftovers),
+			size_format($total_bytes),
+			implode(', ', $listed),
+			count($leftovers) > 20 ? sprintf(' (+%d more)', count($leftovers) - 20) : ''
+		);
+
+		if ($form_data !== []) {
+			$description .= ' Form-plugin folders (' . implode(', ', array_map(static fn (array $l): string => basename($l['path']), $form_data)) . ') can hold files visitors submitted through old forms.';
+		}
+
+		$this->add_finding($state, [
+			'finding_key' => 'deep_orphan_data_leftovers',
+			'category' => 'filesystem',
+			'severity' => $largest >= 1048576 ? 'low' : 'info',
+			'title' => sprintf('Data folders left by uninstalled plugins (%d)', count($leftovers)),
+			'description' => $description,
+			'recommendation' => 'None of these folder names suggest credentials. Save anything you still need (check form-plugin folders for submitted files), then delete the folders.',
+			'evidence' => ['path' => $this->relative_path(untrailingslashit(WP_CONTENT_DIR)), 'folders' => array_slice($leftovers, 0, 50), 'total_bytes' => $total_bytes],
+			'score' => $largest >= 1048576 ? 90 : 97,
+		]);
+	}
+
+	private function report_orphan_data_dir(string $dir, array $owners, array &$state, array &$leftovers): void
 	{
 		$files = $bytes = $visited = 0;
 		$sensitive = $truncated = false;
@@ -2027,6 +2085,15 @@ class Freesiem_Deep_Scanner
 		}
 		$denied = $this->directory_denies_web_access($dir);
 		$rel = $this->relative_path($dir);
+
+		// Fully inventoried and nothing credential-shaped: fold into the single
+		// combined leftovers finding instead of one finding per folder.
+		if (!$sensitive && !$truncated) {
+			$leftovers[] = ['path' => $rel, 'owners' => $owners, 'files' => $files, 'total_bytes' => $bytes, 'denies_web_access' => $denied];
+
+			return;
+		}
+
 		$description = sprintf(__('%1$s contains %2$d file(s), totalling %3$s. Its owning plugin (%4$s) is no longer installed.', 'freesiem-sentinel'), $rel, $files, size_format($bytes), implode(' / ', $owners));
 		if ($sensitive) {
 			$description .= ' ' . __('File names indicate credentials, keys or security scan data may remain here.', 'freesiem-sentinel');

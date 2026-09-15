@@ -7610,6 +7610,34 @@ function synchy_try_set_remote_site_role(array $options, string $role)
 	);
 }
 
+/**
+ * Paths inside the plugin folder that a release never ships. Mirrors the rsync
+ * excludes in bin/build-release.sh, so a remote plugin update built from an
+ * installed (possibly development) copy carries exactly what the release zip
+ * would: no tests/ fixtures (which contain malware-shaped strings), no *.md
+ * release notes, no nested dist/ builds.
+ */
+function synchy_is_self_update_excluded_path(string $relative_path): bool
+{
+	$relative_path = ltrim(wp_normalize_path($relative_path), '/');
+
+	if ($relative_path === '') {
+		return true;
+	}
+
+	$segments = explode('/', $relative_path);
+
+	foreach ($segments as $segment) {
+		if (in_array($segment, ['.git', '.github', '.DS_Store', 'dist', 'backups', 'releases', 'tests', 'node_modules'], true)) {
+			return true;
+		}
+	}
+
+	$basename = strtolower((string) end($segments));
+
+	return str_ends_with($basename, '.md') || str_ends_with($basename, '.zip');
+}
+
 function synchy_build_self_update_package()
 {
 	if (!class_exists('ZipArchive')) {
@@ -7648,14 +7676,7 @@ function synchy_build_self_update_package()
 		$absolute_path = wp_normalize_path($item->getPathname());
 		$relative_path = ltrim(str_replace($plugin_dir, '', $absolute_path), '/');
 
-		if (
-			$relative_path === ''
-			|| str_starts_with($relative_path, '.git/')
-			|| str_starts_with($relative_path, '.github/')
-			|| str_starts_with($relative_path, 'dist/')
-			|| str_starts_with($relative_path, 'backups/')
-			|| str_starts_with($relative_path, 'releases/')
-		) {
+		if (synchy_is_self_update_excluded_path($relative_path)) {
 			continue;
 		}
 
@@ -7712,14 +7733,7 @@ function synchy_get_self_update_plugin_file_entries(): array|WP_Error
 		$absolute_path = wp_normalize_path($item->getPathname());
 		$relative_path = ltrim(str_replace($plugin_dir, '', $absolute_path), '/');
 
-		if (
-			$relative_path === ''
-			|| str_starts_with($relative_path, '.git/')
-			|| str_starts_with($relative_path, '.github/')
-			|| str_starts_with($relative_path, 'dist/')
-			|| str_starts_with($relative_path, 'backups/')
-			|| str_starts_with($relative_path, 'releases/')
-		) {
+		if (synchy_is_self_update_excluded_path($relative_path)) {
 			continue;
 		}
 
@@ -7807,6 +7821,90 @@ function synchy_update_remote_synchy_via_sync_package(array $options)
 			synchy_rrmdir($temp_dir);
 		}
 	}
+}
+
+function synchy_remove_self_update_excluded_files(string $source_dir): void
+{
+	$source_dir = untrailingslashit(wp_normalize_path($source_dir));
+
+	if (!is_dir($source_dir)) {
+		return;
+	}
+
+	$iterator = new RecursiveIteratorIterator(
+		new RecursiveDirectoryIterator($source_dir, FilesystemIterator::SKIP_DOTS),
+		RecursiveIteratorIterator::CHILD_FIRST
+	);
+
+	foreach ($iterator as $item) {
+		$path = wp_normalize_path($item->getPathname());
+		$relative_path = ltrim(substr($path, strlen($source_dir)), '/');
+
+		if (!synchy_is_self_update_excluded_path($relative_path)) {
+			continue;
+		}
+
+		if ($item->isDir() && !$item->isLink()) {
+			@rmdir($path);
+		} else {
+			@unlink($path);
+		}
+	}
+}
+
+/**
+ * Delete files in the installed plugin folder that the just-applied update
+ * package does not contain, then remove directories left empty.
+ *
+ * Guarded so a malformed package can never empty the plugin: the destination
+ * must be a direct child of the plugins directory, and the package must carry
+ * the plugin's main file.
+ */
+function synchy_prune_self_update_stale_files(string $source_dir, string $destination_dir): int
+{
+	$source_dir = untrailingslashit(wp_normalize_path($source_dir));
+	$destination_dir = untrailingslashit(wp_normalize_path($destination_dir));
+	$plugins_dir = untrailingslashit(wp_normalize_path(WP_PLUGIN_DIR));
+
+	if (!is_dir($source_dir) || !is_dir($destination_dir) || dirname($destination_dir) !== $plugins_dir) {
+		return 0;
+	}
+
+	$main_file = basename($destination_dir) === 'freesiem-sentinel' ? 'freesiem-sentinel.php' : basename($destination_dir) . '.php';
+
+	if (!is_file($source_dir . '/' . $main_file)) {
+		return 0;
+	}
+
+	$deleted = 0;
+	$iterator = new RecursiveIteratorIterator(
+		new RecursiveDirectoryIterator($destination_dir, FilesystemIterator::SKIP_DOTS),
+		RecursiveIteratorIterator::CHILD_FIRST
+	);
+
+	foreach ($iterator as $item) {
+		$path = wp_normalize_path($item->getPathname());
+		$relative_path = ltrim(substr($path, strlen($destination_dir)), '/');
+
+		if ($relative_path === '') {
+			continue;
+		}
+
+		if ($item->isDir() && !$item->isLink()) {
+			// CHILD_FIRST: its contents were already handled; rmdir only succeeds when empty.
+			if (!is_dir($source_dir . '/' . $relative_path)) {
+				@rmdir($path);
+			}
+
+			continue;
+		}
+
+		if (!file_exists($source_dir . '/' . $relative_path) && @unlink($path)) {
+			$deleted++;
+		}
+	}
+
+	return $deleted;
 }
 
 function synchy_copy_directory_contents(string $source_dir, string $destination_dir)
@@ -7937,11 +8035,20 @@ function synchy_apply_self_update_package(string $zip_path)
 		$destination_dir = is_dir($sentinel_source_dir) && defined('FREESIEM_SENTINEL_PLUGIN_DIR')
 			? wp_normalize_path(FREESIEM_SENTINEL_PLUGIN_DIR)
 			: wp_normalize_path(plugin_dir_path(__FILE__));
+		// A sender still on an older version packages tests/ and *.md too; drop
+		// them here so the receiver never installs them, whoever sent the update.
+		synchy_remove_self_update_excluded_files($source_dir);
+
 		$copied = synchy_copy_directory_contents($source_dir, $destination_dir);
 
 		if (is_wp_error($copied)) {
 			return $copied;
 		}
+
+		// Copying over the old folder never removed anything, so files dropped
+		// from the plugin (and dev files a past update brought in) stayed forever.
+		// Make the destination an exact mirror of the package.
+		synchy_prune_self_update_stale_files($source_dir, $destination_dir);
 
 		// The files on disk are now the new version, but PHP's opcode cache (and, on this host,
 		// LiteSpeed's own cache) can keep serving the pre-update response to every request after

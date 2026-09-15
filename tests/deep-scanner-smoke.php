@@ -236,10 +236,19 @@ try {
 		return null;
 	};
 	$assert(($fixture_finding('deep_orphan_data_', $orphan_security)['severity'] ?? '') === 'medium', 'orphaned security configuration is medium');
-	$assert(($fixture_finding('deep_orphan_data_', $orphan_forms)['severity'] ?? '') === 'low', 'orphaned form cache is low');
+	// Non-sensitive leftovers are folded into one combined finding.
+	$leftover_paths = [];
+	foreach ($findings as $finding) {
+		if (($finding['finding_key'] ?? '') === 'deep_orphan_data_leftovers') {
+			$leftover_paths = array_column((array) ($finding['evidence']['folders'] ?? []), 'path');
+		}
+	}
+	$in_leftovers = static fn (string $absolute): bool => in_array(ltrim(str_replace(wp_normalize_path(ABSPATH), '', wp_normalize_path($absolute)), '/'), $leftover_paths, true);
+	$assert($fixture_finding('deep_orphan_data_', $orphan_forms) === null && $in_leftovers($orphan_forms), 'orphaned form cache is listed in the combined leftovers finding');
+	$assert(!$in_leftovers($orphan_security), 'orphaned security configuration keeps its own finding');
 	$assert(($fixture_finding('deep_duplicate_bootstrap_', $duplicate)['severity'] ?? '') === 'high', 'comment-stripped bootstrap copy is high');
-	$assert($fixture_finding('deep_orphan_data_', $owned_data) === null, 'inactive installed plugin still owns its data');
-	$assert($fixture_finding('deep_orphan_data_', $backup_dir) === null, 'backup directory is not also orphan data');
+	$assert($fixture_finding('deep_orphan_data_', $owned_data) === null && !$in_leftovers($owned_data), 'inactive installed plugin still owns its data');
+	$assert($fixture_finding('deep_orphan_data_', $backup_dir) === null && !$in_leftovers($backup_dir), 'backup directory is not also orphan data');
 
 	$summary = is_array($cache['summary'] ?? null) ? $cache['summary'] : [];
 	$assert((int) ($summary['files_content_scanned'] ?? 0) > 0, 'files were content-scanned');
