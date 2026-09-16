@@ -2891,6 +2891,7 @@ function synchy_is_sync_file_excluded(string $archive_path): bool
 	}
 
 	$excluded_exact = [
+		'wp-config-ddev.php',
 		'.DS_Store',
 		'Thumbs.db',
 		'desktop.ini',
@@ -5324,6 +5325,7 @@ function synchy_render_export_readme_panel(array $options): void
 					synchy_render_readme_list([
 						__('The selected export destination folder, when it is inside this WordPress install.', 'synchy'),
 						'wp-content/uploads/synchy-temp/',
+						'wp-config-ddev.php',
 						__('Unreadable files, symlinks, and directories PHP cannot traverse.', 'synchy'),
 					]);
 					?>
@@ -6387,6 +6389,8 @@ function synchy_get_effective_exclude_patterns(array $options, string $output_di
 		}
 	}
 
+	// Machine-specific DDEV configuration must never travel to another site.
+	$patterns[] = 'wp-config-ddev.php';
 	$patterns[] = 'wp-content/uploads/synchy-temp/';
 
 	return array_values(array_unique(array_filter($patterns)));

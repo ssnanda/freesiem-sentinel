@@ -1550,6 +1550,9 @@ class Freesiem_Deep_Scanner
 	{
 		$checksums = $this->is_released_version() ? $this->core_checksums() : [];
 		$have_manifest = $checksums !== [];
+		$is_local = (function_exists('wp_get_environment_type') && wp_get_environment_type() === 'local')
+			|| getenv('IS_DDEV_PROJECT') === 'true'
+			|| defined('DDEV_PRIMARY_URL');
 
 		// --- Web root: a stray top-level .php file (no checksum manifest needed) ---
 		$root = untrailingslashit(ABSPATH);
@@ -1564,6 +1567,11 @@ class Freesiem_Deep_Scanner
 				$lower = strtolower($item);
 
 				if (in_array($lower, self::CORE_ROOT_PHP, true)) {
+					continue;
+				}
+
+				// DDEV's local configuration is expected; content scanning still applies.
+				if ($item === 'wp-config-ddev.php' && $is_local) {
 					continue;
 				}
 
