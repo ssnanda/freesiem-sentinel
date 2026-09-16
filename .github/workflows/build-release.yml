@@ -22,7 +22,12 @@ jobs:
           rsync -av \
             --exclude=".git" \
             --exclude=".github" \
+            --exclude=".DS_Store" \
             --exclude="dist" \
+            --exclude="backups" \
+            --exclude="tests" \
+            --exclude="*.md" \
+            --exclude="*.zip" \
             ./ dist/freesiem-sentinel/
           cd dist
           zip -r freesiem-sentinel.zip freesiem-sentinel
