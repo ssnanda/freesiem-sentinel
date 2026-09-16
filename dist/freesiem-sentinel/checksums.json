@@ -1,5 +1,5 @@
 {
-    "freesiem-sentinel.php": "f9f75e1448df6bd9e0c24b7dd6a95c00",
+    "freesiem-sentinel.php": "5036df05b182d8c5b5bf9421239168c9",
     "includes/class-acknowledgements.php": "d940aa39e3decbcbc14ddabac427c279",
     "includes/class-acme-client.php": "533ad7673c04bfb975d263ab41eaa1d0",
     "includes/class-admin.php": "b1acc56706e56d2c31cacc2125c3df12",
@@ -23,7 +23,7 @@
     "includes/class-tfa-remote.php": "138e64c4eda961f54c6f909b12cbc165",
     "includes/class-tfa-service.php": "926c54b443e488c907e9b98fecbe94e5",
     "includes/class-threat-signatures.php": "b197ebed8139f994b68235567d81e079",
-    "includes/class-updater.php": "4809c53e09ea6527bdc103c2fd11e57b",
+    "includes/class-updater.php": "be433c3c442aebd4dfb50380cd2db088",
     "includes/helpers.php": "a9a9197f06bacce8e2232548018816cc",
     "includes/synchy/assets/admin.css": "8b64338dd2de75125fbd07e1ca2f5960",
     "includes/synchy/assets/export.js": "91801851722702c4b5cc6018f63cefc3",

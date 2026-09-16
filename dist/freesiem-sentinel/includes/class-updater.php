@@ -308,12 +308,13 @@ class Freesiem_Updater
 
 		if ($redirect_to !== '') {
 			$url = add_query_arg(
-				freesiem_sentinel_safe_query_args(['redirect_to' => $redirect_to]),
+				freesiem_sentinel_safe_query_args(['redirect_to' => rawurlencode($redirect_to)]),
 				(string) $url
 			);
 		}
 
-		return wp_nonce_url((string) $url, FREESIEM_SENTINEL_NONCE_ACTION);
+		// Return a raw URL for redirects; HTML callers escape it with esc_url().
+		return add_query_arg('_wpnonce', wp_create_nonce(FREESIEM_SENTINEL_NONCE_ACTION), (string) $url);
 	}
 
 	public function get_update_plugin_url(string $redirect_to = ''): string
@@ -326,12 +327,13 @@ class Freesiem_Updater
 
 		if ($redirect_to !== '') {
 			$url = add_query_arg(
-				freesiem_sentinel_safe_query_args(['redirect_to' => $redirect_to]),
+				freesiem_sentinel_safe_query_args(['redirect_to' => rawurlencode($redirect_to)]),
 				(string) $url
 			);
 		}
 
-		return wp_nonce_url((string) $url, FREESIEM_SENTINEL_NONCE_ACTION);
+		// wp_nonce_url() HTML-escapes separators, breaking the Settings redirect.
+		return add_query_arg('_wpnonce', wp_create_nonce(FREESIEM_SENTINEL_NONCE_ACTION), (string) $url);
 	}
 
 	public function get_plugin_upgrade_url(): string
