@@ -4353,7 +4353,8 @@ function synchy_build_sync_manifest(array $file_delta, array $db_delta, int $syn
 					foreach ((array) $paths as $path) {
 						$path = (string) $path;
 
-						if ($path !== '') {
+						// Protected paths are never uploaded, so they must never be deleted either.
+						if ($path !== '' && !synchy_is_sync_file_excluded($path)) {
 							$deleted_paths[] = $path;
 						}
 					}
@@ -9816,39 +9817,72 @@ function synchy_clear_sync_caches(): void
 	}
 }
 
+/**
+ * Top-level wp-content directories a Sync package may upload to (see
+ * synchy_validate_sync_zip_entries()) and therefore delete from. These roots
+ * themselves are never deleted or pruned.
+ */
+function synchy_get_sync_deleted_path_roots(): array
+{
+	return ['plugins', 'themes', 'uploads', 'mu-plugins'];
+}
+
+/**
+ * Structural check only: returns the normalized wp-content-relative path, or a
+ * WP_Error naming the offending path when it is empty, absolute, traverses with
+ * "..", or sits outside the Sync file scopes. Whether a well-formed path is
+ * protected is a separate question -- see synchy_is_sync_file_excluded().
+ */
+function synchy_validate_sync_deleted_path(string $raw_path): string|WP_Error
+{
+	$normalized = wp_normalize_path($raw_path);
+	$invalid = static fn(): WP_Error => new WP_Error(
+		'synchy_sync_deleted_path_invalid',
+		sprintf(
+			/* translators: %s: deleted path from the Sync manifest */
+			__('The Sync package contains an invalid deleted file path: %s', 'synchy'),
+			$raw_path === '' ? '(empty)' : $raw_path
+		)
+	);
+
+	if (
+		$normalized === ''
+		|| str_contains($normalized, "\0")
+		|| str_starts_with($normalized, '/')
+		|| preg_match('#^[A-Za-z]:/#', $normalized)
+		|| str_contains($normalized, '://')
+	) {
+		return $invalid();
+	}
+
+	$segments = explode('/', $normalized);
+
+	foreach ($segments as $segment) {
+		if ($segment === '' || $segment === '.' || $segment === '..') {
+			return $invalid();
+		}
+	}
+
+	if (count($segments) < 2 || !in_array($segments[0], synchy_get_sync_deleted_path_roots(), true)) {
+		return $invalid();
+	}
+
+	return $normalized;
+}
+
 function synchy_is_allowed_sync_deleted_path(string $relative_path): bool
 {
-	$relative_path = ltrim(wp_normalize_path($relative_path), '/');
+	$relative_path = synchy_validate_sync_deleted_path($relative_path);
 
-	if ($relative_path === '' || str_contains($relative_path, '../')) {
-		return false;
-	}
-
-	foreach (['uploads/synchy-backups/', 'uploads/synchy-import/', 'uploads/synchy-site-sync/', 'uploads/synchy-sync/'] as $protected_upload_prefix) {
-		if (str_starts_with($relative_path, $protected_upload_prefix)) {
-			return false;
-		}
-	}
-
-	if (str_starts_with($relative_path, 'plugins/ajcore/') && !synchy_is_ajcore_code_path($relative_path)) {
-		return false;
-	}
-
-	foreach (['plugins/', 'themes/', 'uploads/'] as $prefix) {
-		if (str_starts_with($relative_path, $prefix)) {
-			return true;
-		}
-	}
-
-	return false;
+	// Same rule the sender uses to decide what never gets uploaded, so a Sync can
+	// never delete anything Synchy protects from being overwritten.
+	return !is_wp_error($relative_path) && !synchy_is_sync_file_excluded($relative_path);
 }
 
 function synchy_get_sync_deleted_absolute_path(string $relative_path): string
 {
-	$relative_path = ltrim(wp_normalize_path($relative_path), '/');
-
 	return synchy_is_allowed_sync_deleted_path($relative_path)
-		? wp_normalize_path(trailingslashit(WP_CONTENT_DIR) . $relative_path)
+		? wp_normalize_path(trailingslashit(WP_CONTENT_DIR) . wp_normalize_path($relative_path))
 		: '';
 }
 
@@ -9856,6 +9890,7 @@ function synchy_deactivate_plugins_for_deleted_sync_path(string $relative_path):
 {
 	$relative_path = ltrim(wp_normalize_path($relative_path), '/');
 
+	// Only regular plugins are "activated"; mu-plugins, themes and uploads return here.
 	if (!str_starts_with($relative_path, 'plugins/')) {
 		return;
 	}
@@ -9894,15 +9929,17 @@ function synchy_prune_empty_sync_deleted_parent_dirs(array $deleted_paths): int
 	$candidate_dirs = [];
 
 	foreach ($deleted_paths as $relative_path) {
-		$relative_path = ltrim(wp_normalize_path((string) $relative_path), '/');
+		$relative_path = (string) $relative_path;
 
 		if (!synchy_is_allowed_sync_deleted_path($relative_path)) {
 			continue;
 		}
 
-		$dir = wp_normalize_path(dirname($relative_path));
+		$dir = wp_normalize_path(dirname(wp_normalize_path($relative_path)));
 
-		while ($dir !== '.' && $dir !== '' && !in_array($dir, ['plugins', 'themes', 'uploads'], true)) {
+		// Stop at the scope root: wp-content/mu-plugins (like plugins/themes/uploads)
+		// must survive even when the last file in it was deleted.
+		while ($dir !== '.' && $dir !== '' && !in_array($dir, synchy_get_sync_deleted_path_roots(), true)) {
 			$candidate_dirs[$dir] = true;
 			$dir = wp_normalize_path(dirname($dir));
 		}
@@ -10031,31 +10068,57 @@ function synchy_prune_unmanaged_sync_theme_directories(array $manifest): array|W
 
 function synchy_apply_sync_deleted_paths(array $manifest): array|WP_Error
 {
-	$deleted_paths = array_values(array_unique(array_filter(array_map(
-		static fn($path): string => ltrim(wp_normalize_path((string) $path), '/'),
+	$requested_paths = array_values(array_unique(array_map(
+		'strval',
 		(array) (($manifest['files']['deletedPaths'] ?? []))
-	), static fn(string $path): bool => $path !== '')));
-	$deleted_files = 0;
+	)));
+	$deletable_paths = [];
+	$skipped_protected_paths = [];
 
-	foreach ($deleted_paths as $relative_path) {
-		if (!synchy_is_allowed_sync_deleted_path($relative_path)) {
-			return new WP_Error('synchy_sync_deleted_path_invalid', __('The Sync package contains an invalid deleted file path.', 'synchy'));
+	// Validate the whole list before touching the filesystem, so a malformed path
+	// can't leave the destination with only half of the deletions applied.
+	foreach ($requested_paths as $raw_path) {
+		$relative_path = synchy_validate_sync_deleted_path($raw_path);
+
+		if (is_wp_error($relative_path)) {
+			return $relative_path;
 		}
 
+		if (synchy_is_sync_file_excluded($relative_path)) {
+			$skipped_protected_paths[] = $relative_path;
+			continue;
+		}
+
+		$deletable_paths[] = $relative_path;
+	}
+
+	$deletable_paths = array_values(array_unique($deletable_paths));
+	$skipped_protected_paths = array_values(array_unique($skipped_protected_paths));
+	$skipped_non_file_paths = [];
+	$deleted_files = 0;
+
+	foreach ($deletable_paths as $relative_path) {
 		$absolute_path = synchy_get_sync_deleted_absolute_path($relative_path);
 
 		if ($absolute_path === '') {
 			continue;
 		}
 
+		// A path that is a directory on the destination (e.g. "mu-plugins/_disabled")
+		// is never removed recursively; it only goes away via empty-dir pruning below.
+		if (is_dir($absolute_path) && !is_link($absolute_path)) {
+			$skipped_non_file_paths[] = $relative_path;
+			continue;
+		}
+
 		synchy_deactivate_plugins_for_deleted_sync_path($relative_path);
 
-		if (is_file($absolute_path) && @unlink($absolute_path)) {
+		if ((is_file($absolute_path) || is_link($absolute_path)) && @unlink($absolute_path)) {
 			$deleted_files++;
 		}
 	}
 
-	$deleted_dirs = synchy_prune_empty_sync_deleted_parent_dirs($deleted_paths);
+	$deleted_dirs = synchy_prune_empty_sync_deleted_parent_dirs($deletable_paths);
 	$theme_prune = synchy_prune_unmanaged_sync_theme_directories($manifest);
 
 	if (is_wp_error($theme_prune)) {
@@ -10065,8 +10128,12 @@ function synchy_apply_sync_deleted_paths(array $manifest): array|WP_Error
 	return [
 		'deletedFiles' => $deleted_files + (int) ($theme_prune['deletedFiles'] ?? 0),
 		'deletedDirs' => $deleted_dirs + (int) ($theme_prune['deletedDirs'] ?? 0),
-		'deletedPaths' => $deleted_paths,
+		'deletedPaths' => $deletable_paths,
 		'deletedThemeDirs' => (array) ($theme_prune['deletedThemeDirs'] ?? []),
+		'skippedProtectedCount' => count($skipped_protected_paths),
+		'skippedProtectedPaths' => array_slice($skipped_protected_paths, 0, 40),
+		'skippedNonFileCount' => count($skipped_non_file_paths),
+		'skippedNonFilePaths' => array_slice($skipped_non_file_paths, 0, 40),
 	];
 }
 
@@ -10295,6 +10362,25 @@ function synchy_handle_remote_sync_request(WP_REST_Request $request)
 		}
 
 		$deleted_posts_result = synchy_apply_sync_deleted_posts($manifest);
+		$skipped_deletions_note = '';
+
+		if ((int) ($deleted_result['skippedProtectedCount'] ?? 0) > 0) {
+			$skipped_deletions_note .= ' ' . sprintf(
+				/* translators: 1: skipped count, 2: comma-separated paths */
+				__('Skipped %1$d protected deleted paths: %2$s.', 'synchy'),
+				(int) $deleted_result['skippedProtectedCount'],
+				implode(', ', (array) ($deleted_result['skippedProtectedPaths'] ?? []))
+			);
+		}
+
+		if ((int) ($deleted_result['skippedNonFileCount'] ?? 0) > 0) {
+			$skipped_deletions_note .= ' ' . sprintf(
+				/* translators: 1: skipped count, 2: comma-separated paths */
+				__('Left %1$d deleted paths that are directories on the destination: %2$s.', 'synchy'),
+				(int) $deleted_result['skippedNonFileCount'],
+				implode(', ', (array) ($deleted_result['skippedNonFilePaths'] ?? []))
+			);
+		}
 
 		// Any PHP file this Sync just wrote (plugin/theme code, not just Sentinel's own self-update
 		// path above) can be served stale by the same opcache/LiteSpeed caching until this runs.
@@ -10328,12 +10414,16 @@ function synchy_handle_remote_sync_request(WP_REST_Request $request)
 				$db_rows_synced,
 				(int) ($deleted_result['deletedFiles'] ?? 0),
 				(int) ($deleted_posts_result['deletedPosts'] ?? 0)
-			),
+			) . $skipped_deletions_note,
 			'optionRowsApplied' => $applied_option_rows,
 			'navMenuRepair' => $nav_menu_repair,
 			'deletedFiles' => (int) ($deleted_result['deletedFiles'] ?? 0),
 			'deletedDirs' => (int) ($deleted_result['deletedDirs'] ?? 0),
 			'deletedPosts' => (int) ($deleted_posts_result['deletedPosts'] ?? 0),
+			'skippedProtectedDeletions' => (int) ($deleted_result['skippedProtectedCount'] ?? 0),
+			'skippedProtectedDeletionPaths' => (array) ($deleted_result['skippedProtectedPaths'] ?? []),
+			'skippedNonFileDeletions' => (int) ($deleted_result['skippedNonFileCount'] ?? 0),
+			'skippedNonFileDeletionPaths' => (array) ($deleted_result['skippedNonFilePaths'] ?? []),
 		]);
 		synchy_apply_site_sync_version($site_version);
 
@@ -10364,10 +10454,14 @@ function synchy_handle_remote_sync_request(WP_REST_Request $request)
 				$db_rows_synced,
 				(int) ($deleted_result['deletedFiles'] ?? 0),
 				(int) ($deleted_posts_result['deletedPosts'] ?? 0)
-			),
+			) . $skipped_deletions_note,
 			'deletedFiles' => (int) ($deleted_result['deletedFiles'] ?? 0),
 			'deletedDirs' => (int) ($deleted_result['deletedDirs'] ?? 0),
 			'deletedPosts' => (int) ($deleted_posts_result['deletedPosts'] ?? 0),
+			'skippedProtectedDeletions' => (int) ($deleted_result['skippedProtectedCount'] ?? 0),
+			'skippedProtectedDeletionPaths' => (array) ($deleted_result['skippedProtectedPaths'] ?? []),
+			'skippedNonFileDeletions' => (int) ($deleted_result['skippedNonFileCount'] ?? 0),
+			'skippedNonFileDeletionPaths' => (array) ($deleted_result['skippedNonFilePaths'] ?? []),
 			'navMenuRepair' => $nav_menu_repair,
 		]);
 	} finally {
