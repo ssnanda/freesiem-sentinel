@@ -193,7 +193,7 @@ class Freesiem_Deep_Scanner
 	 */
 	public function run_weekly_full_scan(): void
 	{
-		if (!freesiem_sentinel_get_setting('deep_scan_weekly_enabled', 1)) {
+		if (!freesiem_sentinel_get_setting('deep_scan_weekly_enabled', 0)) {
 			return;
 		}
 
@@ -3269,7 +3269,7 @@ class Freesiem_Deep_Scanner
 		$this->plugin->get_results()->record_scan_run($mode === 'weekly' ? 'weekly' : 'deep', $merged_findings, $metrics);
 		$this->plugin->push_local_findings_snapshot();
 
-		if ($mode === 'weekly' && !empty(freesiem_sentinel_get_setting('scan_email_on_weekly', 1))) {
+		if ($mode === 'weekly' && !empty(freesiem_sentinel_get_setting('scan_email_on_weekly', 0))) {
 			freesiem_sentinel_send_scan_report_email([], 'weekly');
 		}
 

@@ -78,11 +78,11 @@ function freesiem_sentinel_get_default_settings(): array
 			'max_depth' => 5,
 			'cloud_upload' => 1,
 		],
-		'deep_scan_weekly_enabled' => 1,
+		'deep_scan_weekly_enabled' => 0,
 		'deep_scan_weekly_day' => -1,
 		'report_primary_email' => '',
 		'scan_email_recipients' => '',
-		'scan_email_on_weekly' => 1,
+		'scan_email_on_weekly' => 0,
 		'summary_cache' => [
 			'fetched_at' => '',
 			'summary' => [],
@@ -5050,6 +5050,47 @@ function freesiem_sentinel_weekly_scan_timestamp(): int
 }
 
 /**
+ * One-time migration (1.0.138): turn the weekly full deep scan and its
+ * "email the report after each scan" companion off on installs that were
+ * created while both shipped enabled by default. Sites that want either one
+ * back can re-tick the boxes on the Scan screen; the flag below makes sure we
+ * only ever force this once, so a deliberate re-enable is never undone.
+ */
+function freesiem_sentinel_maybe_disable_weekly_scan_defaults(): void
+{
+	if (get_option('freesiem_sentinel_weekly_scan_default_off', '') === '1') {
+		return;
+	}
+
+	update_option('freesiem_sentinel_weekly_scan_default_off', '1', false);
+
+	$saved = get_option(FREESIEM_SENTINEL_OPTION, []);
+
+	if (!is_array($saved)) {
+		return;
+	}
+
+	$changed = false;
+
+	foreach (['deep_scan_weekly_enabled', 'scan_email_on_weekly'] as $key) {
+		if (!empty($saved[$key])) {
+			$saved[$key] = 0;
+			$changed = true;
+		}
+	}
+
+	if (!$changed) {
+		return;
+	}
+
+	update_option(FREESIEM_SENTINEL_OPTION, $saved, false);
+
+	if (function_exists('wp_clear_scheduled_hook')) {
+		wp_clear_scheduled_hook(Freesiem_Cron::WEEKLY_DEEP_SCAN_HOOK);
+	}
+}
+
+/**
  * (Re)schedule the weekly full-scan cron event to match current settings.
  */
 function freesiem_sentinel_reschedule_weekly_scan(): void
@@ -5060,7 +5101,7 @@ function freesiem_sentinel_reschedule_weekly_scan(): void
 
 	wp_clear_scheduled_hook(Freesiem_Cron::WEEKLY_DEEP_SCAN_HOOK);
 
-	if (!freesiem_sentinel_get_setting('deep_scan_weekly_enabled', 1)) {
+	if (!freesiem_sentinel_get_setting('deep_scan_weekly_enabled', 0)) {
 		return;
 	}
 

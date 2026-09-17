@@ -58,6 +58,7 @@ class Freesiem_Plugin
 	public function register(): void
 	{
 		freesiem_sentinel_maybe_upgrade_logs_table();
+		freesiem_sentinel_maybe_disable_weekly_scan_defaults();
 		$this->cron->register();
 		$this->cron_monitor->register();
 		$this->updater->register();
