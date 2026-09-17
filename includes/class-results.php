@@ -157,6 +157,7 @@ class Freesiem_Results
 				'last_local_scan_at' => $now,
 				'last_deep_scan_at' => (string) ($metrics['finished_at'] ?? $now),
 				'files_content_scanned' => (int) ($metrics['files_scanned'] ?? 0),
+				'deep_scan_duration_seconds' => (int) ($metrics['duration_seconds'] ?? 0),
 				'files_seen_deep' => (int) ($metrics['files_seen'] ?? 0),
 				'bytes_scanned' => (int) ($metrics['bytes_scanned'] ?? 0),
 				'malware_hits' => (int) ($metrics['malware_hits'] ?? 0),

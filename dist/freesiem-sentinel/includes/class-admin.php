@@ -2363,6 +2363,10 @@ class Freesiem_Admin
 			[__('Scan Duration', 'freesiem-sentinel'), $this->format_duration($scan_metrics['duration_seconds'] ?? '')],
 		];
 
+		if (isset($summary['deep_scan_duration_seconds'])) {
+			$metrics[] = [__('Deep Scan Duration', 'freesiem-sentinel'), $this->format_duration($summary['deep_scan_duration_seconds'])];
+		}
+
 		if (isset($summary['files_content_scanned'])) {
 			$metrics[] = [__('Content-Scanned', 'freesiem-sentinel'), number_format_i18n((int) $summary['files_content_scanned'])];
 		}
@@ -3236,6 +3240,7 @@ class Freesiem_Admin
 		echo '<div id="fs-deep-bar" style="background:#2271b1;height:100%;width:' . esc_attr((string) $percent) . '%;transition:width .5s ease;"></div>';
 		echo '</div>';
 		echo '<p id="fs-deep-status" style="margin:8px 0 0;color:#50575e;font-size:13px;">' . esc_html(sprintf($status_tmpl, $percent, $files, $queued, $hits)) . '</p>';
+		echo '<p style="margin:8px 0 0;color:#50575e;font-size:13px;">' . esc_html__('Elapsed:', 'freesiem-sentinel') . ' <span id="fs-deep-elapsed">' . esc_html($this->format_elapsed($progress['elapsed_seconds'] ?? 0)) . '</span></p>';
 		echo '<div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-top:8px;"><p style="margin:0;color:#50575e;font-size:13px;">' . esc_html__('Keep this tab open to run the scan from your browser; background slices are spaced out to protect shared-host resources.', 'freesiem-sentinel') . '</p>';
 		echo '<form method="post" action="' . esc_url(admin_url('admin-post.php')) . '" style="margin:0;"><input type="hidden" name="action" value="freesiem_sentinel_abort_deep_scan">';
 		wp_nonce_field(FREESIEM_SENTINEL_NONCE_ACTION);
@@ -3245,6 +3250,8 @@ class Freesiem_Admin
 			'url' => $ajax_url,
 			'nonce' => $nonce,
 			'tmpl' => $js_tmpl,
+			'elapsed' => (int) ($progress['elapsed_seconds'] ?? 0),
+			'local' => $deep->is_local_environment(),
 		]);
 
 		echo '<script>(function(){'
@@ -3252,19 +3259,27 @@ class Freesiem_Admin
 			. 'var bar=document.getElementById("fs-deep-bar");'
 			. 'var st=document.getElementById("fs-deep-status");'
 			. 'var lb=document.getElementById("fs-deep-label");'
-			. 'var busy=false,misses=0;'
+			. 'var timer=document.getElementById("fs-deep-elapsed");'
+			. 'var busy=false,misses=0,elapsed=c.elapsed,anchor=Date.now();'
+			. 'var delay=c.local?0:15000;'
+			. 'var iv=null;'
+			. 'function clock(){var s=Math.max(0,elapsed+Math.floor((Date.now()-anchor)/1000)),h=Math.floor(s/3600),m=Math.floor(s%3600/60),sec=s%60;if(timer){timer.textContent=(h?h+"h ":"")+m+"m "+sec+"s";}}'
+			. 'clock();var clockId=setInterval(clock,1000);'
 			. 'function fmt(p,f,q,h){return c.tmpl.replace("%1$s",p).replace("%2$s",Number(f).toLocaleString()).replace("%3$s",Number(q).toLocaleString()).replace("%4$s",Number(h).toLocaleString());}'
+			. 'function scheduleNext(ms){if(iv){clearTimeout(iv);}iv=setTimeout(tick,ms);}'
 			. 'function tick(){if(busy){return;}busy=true;'
 			. 'fetch(c.url,{method:"POST",credentials:"same-origin",headers:{"Content-Type":"application/x-www-form-urlencoded"},body:"action=freesiem_sentinel_deep_scan_tick&nonce="+encodeURIComponent(c.nonce)})'
 			. '.then(function(r){return r.json();}).then(function(res){busy=false;misses=0;'
-			. 'var d=(res&&res.data)?res.data:{};'
+			. 'if(!res||!res.success){throw new Error("Scan progress unavailable");}'
+			. 'var d=res.data||{};if(typeof d.elapsed_seconds==="number"){elapsed=d.elapsed_seconds;anchor=Date.now();clock();}'
 			. 'var pct=Math.max(2,Math.min(100,parseInt(d.percent,10)||0));'
 			. 'if(bar){bar.style.width=pct+"%";}'
 			. 'if(lb&&d.label){lb.textContent=d.label;}'
 			. 'if(st){st.textContent=fmt(pct,d.files_seen||0,(d.files_pending||0)+(d.dirs_pending||0),d.malware_hits||0);}'
-			. 'if(d.running===false){window.location.reload();}'
-			. '}).catch(function(){busy=false;if(++misses>8){clearInterval(iv);}});}'
-			. 'var iv=setInterval(tick,15000);setTimeout(tick,800);'
+			. 'if(d.running===false){clearInterval(clockId);window.location.reload();return;}'
+			. 'scheduleNext(delay);'
+			. '}).catch(function(){busy=false;if(++misses>8){if(iv){clearTimeout(iv);}return;}scheduleNext(c.local?1000:15000);});}'
+			. 'scheduleNext(c.local?0:800);'
 			. '})();</script>';
 
 		echo '</div>';
@@ -3384,6 +3399,9 @@ class Freesiem_Admin
 			echo '<p><strong>' . esc_html__('Files analyzed', 'freesiem-sentinel') . ':</strong> ' . esc_html($this->summary_value_or_fallback($scan_metrics['files_analyzed'] ?? ($filesystem['inspected_files'] ?? ''), false)) . '</p>';
 			echo '<p><strong>' . esc_html__('Flagged files', 'freesiem-sentinel') . ':</strong> ' . esc_html($this->summary_value_or_fallback($scan_metrics['files_flagged'] ?? ($filesystem['flagged_files'] ?? ''), false)) . '</p>';
 			echo '<p><strong>' . esc_html__('Scan duration', 'freesiem-sentinel') . ':</strong> ' . esc_html($this->format_duration($scan_metrics['duration_seconds'] ?? '')) . '</p>';
+			if (isset($scan_metrics['deep_scan_duration_seconds'])) {
+				echo '<p><strong>' . esc_html__('Deep scan duration', 'freesiem-sentinel') . ':</strong> ' . esc_html($this->format_duration($scan_metrics['deep_scan_duration_seconds'])) . '</p>';
+			}
 			if (isset($scan_metrics['files_content_scanned'])) {
 				echo '<p><strong>' . esc_html__('Files content-scanned (deep)', 'freesiem-sentinel') . ':</strong> ' . esc_html(number_format_i18n((int) $scan_metrics['files_content_scanned'])) . '</p>';
 			}
@@ -4327,7 +4345,33 @@ class Freesiem_Admin
 			return __('No scan yet', 'freesiem-sentinel');
 		}
 
-		return sprintf(__('%s seconds', 'freesiem-sentinel'), number_format_i18n($duration, 2));
+		if ($duration >= 60) {
+			$hours = (int) floor($duration / 3600);
+			$mins = (int) floor(($duration % 3600) / 60);
+			$secs = (int) round($duration % 60);
+
+			if ($hours > 0) {
+				return sprintf(__('%dh %dm %ds', 'freesiem-sentinel'), $hours, $mins, $secs);
+			}
+
+			return sprintf(__('%dm %ds', 'freesiem-sentinel'), $mins, $secs);
+		}
+
+		return sprintf(__('%s seconds', 'freesiem-sentinel'), number_format_i18n($duration, 1));
+	}
+
+	private function format_elapsed(int $seconds): string
+	{
+		$seconds = max(0, $seconds);
+		$hours = (int) floor($seconds / 3600);
+		$mins = (int) floor(($seconds % 3600) / 60);
+		$secs = $seconds % 60;
+
+		if ($hours > 0) {
+			return sprintf('%dh %dm %ds', $hours, $mins, $secs);
+		}
+
+		return sprintf('%dm %ds', $mins, $secs);
 	}
 
 	private function build_scan_url(array $args = []): string

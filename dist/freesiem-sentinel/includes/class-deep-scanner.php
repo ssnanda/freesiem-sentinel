@@ -23,6 +23,7 @@ class Freesiem_Deep_Scanner
 {
 	public const STATE_OPTION = 'freesiem_sentinel_deep_scan_state';
 	public const CONTINUE_HOOK = 'freesiem_sentinel_deep_scan_continue';
+	private const LOCK_OPTION = 'freesiem_sentinel_deep_scan_lock';
 	private const LOCK_TRANSIENT = 'freesiem_sentinel_deep_scan_lock';
 
 	private const MAX_FINDINGS = 500;
@@ -96,7 +97,7 @@ class Freesiem_Deep_Scanner
 	public function abort(): void
 	{
 		delete_option(self::STATE_OPTION);
-		delete_transient(self::LOCK_TRANSIENT);
+		$this->release_slice_lock();
 		wp_clear_scheduled_hook(self::CONTINUE_HOOK);
 	}
 
@@ -108,6 +109,9 @@ class Freesiem_Deep_Scanner
 	 */
 	public function start(array $options = [], string $mode = 'deep'): array
 	{
+		$this->release_slice_lock();
+		wp_clear_scheduled_hook(self::CONTINUE_HOOK);
+
 		$full = $mode === 'weekly' || !empty($options['full']);
 
 		if ($full) {
@@ -195,7 +199,7 @@ class Freesiem_Deep_Scanner
 
 		if ($this->is_running()) {
 			if ($this->is_stalled()) {
-				delete_transient(self::LOCK_TRANSIENT);
+				$this->release_slice_lock();
 				wp_clear_scheduled_hook(self::CONTINUE_HOOK);
 			}
 			$this->schedule_continue(self::CONTINUE_DELAY_SECONDS);
@@ -280,6 +284,10 @@ class Freesiem_Deep_Scanner
 
 	private function schedule_continue(int $delay): void
 	{
+		if ($delay === self::CONTINUE_DELAY_SECONDS && $this->is_local_environment()) {
+			$delay = 5;
+		}
+
 		$next = function_exists('wp_next_scheduled') ? wp_next_scheduled(self::CONTINUE_HOOK) : false;
 
 		// An overdue single event can remain in the cron option after a killed
@@ -298,6 +306,44 @@ class Freesiem_Deep_Scanner
 	// Slice execution
 	// ---------------------------------------------------------------------
 
+	private function acquire_slice_lock(string $run_token): bool
+	{
+		$now = time();
+		$payload = [
+			'started' => $now,
+			'run_token' => $run_token,
+		];
+
+		// Atomic insert: succeeds only if option doesn't already exist.
+		if (add_option(self::LOCK_OPTION, $payload, '', 'no')) {
+			return true;
+		}
+
+		$lock = get_option(self::LOCK_OPTION);
+		if (!is_array($lock)) {
+			$transient_lock = get_transient(self::LOCK_TRANSIENT);
+			if (is_array($transient_lock)) {
+				$lock = $transient_lock;
+			}
+		}
+
+		$lock_started = is_array($lock) ? (int) ($lock['started'] ?? 0) : 0;
+		if ($lock_started > 0 && ($now - $lock_started) < self::SLICE_LOCK_SECONDS) {
+			return false;
+		}
+
+		// Expired / stale lock. Clear and re-acquire atomically.
+		$this->release_slice_lock();
+
+		return (bool) add_option(self::LOCK_OPTION, $payload, '', 'no');
+	}
+
+	private function release_slice_lock(): void
+	{
+		delete_option(self::LOCK_OPTION);
+		delete_transient(self::LOCK_TRANSIENT);
+	}
+
 	/**
 	 * Process work until the first budget limit is hit, then persist and return.
 	 *
@@ -314,16 +360,9 @@ class Freesiem_Deep_Scanner
 
 		// Prevent a cron event and a browser tick (or two tabs) from running
 		// slices concurrently and racing on the state option.
-		$lock = get_transient(self::LOCK_TRANSIENT);
-		$lock_started = is_array($lock) ? (int) ($lock['started'] ?? 0) : 0;
-		if ($lock && $lock_started > time() - self::SLICE_LOCK_SECONDS) {
+		if (!$this->acquire_slice_lock((string) ($state['run_token'] ?? ''))) {
 			return ['done' => false, 'progress' => $this->progress()];
 		}
-
-		set_transient(self::LOCK_TRANSIENT, [
-			'started' => time(),
-			'run_token' => (string) ($state['run_token'] ?? ''),
-		], self::SLICE_LOCK_SECONDS);
 
 		if (function_exists('ignore_user_abort')) {
 			ignore_user_abort(true);
@@ -347,54 +386,57 @@ class Freesiem_Deep_Scanner
 		$since_sleep = 0;
 		$since_checkpoint = 0;
 
-		while ($processed < $file_cap && microtime(true) < $deadline) {
-			if ($mem_ceiling > 0 && memory_get_usage(true) > $mem_ceiling) {
-				$state['partial'] = true;
-				$state['partial_reason'] = 'memory';
-				break;
+		try {
+			while ($processed < $file_cap && microtime(true) < $deadline) {
+				if ($mem_ceiling > 0 && memory_get_usage(true) > $mem_ceiling) {
+					$state['partial'] = true;
+					$state['partial_reason'] = 'memory';
+					break;
+				}
+
+				$phase = $state['phase'] ?? 'done';
+
+				if ($phase === 'filesystem') {
+					$this->step_filesystem($state);
+				} elseif ($phase === 'integrity') {
+					$this->step_integrity($state);
+				} elseif ($phase === 'database') {
+					$this->step_database($state);
+				} else {
+					break;
+				}
+
+				$processed++;
+				$since_sleep++;
+				$since_checkpoint++;
+
+				if ($throttle > 0 && $since_sleep >= $batch) {
+					usleep($throttle);
+					$since_sleep = 0;
+				}
+
+				// Persist periodically so a hard kill (FastCGI timeout, OOM) loses at
+				// most a few hundred files of progress rather than the whole slice.
+				if ($since_checkpoint >= 400) {
+					$state['updated_at'] = freesiem_sentinel_get_iso8601_time();
+					$state['progress_floor'] = max((int) ($state['progress_floor'] ?? 0), $this->percent_from_state($state));
+					$this->save_state($state);
+					$since_checkpoint = 0;
+				}
 			}
 
-			$phase = $state['phase'] ?? 'done';
+			$state['updated_at'] = freesiem_sentinel_get_iso8601_time();
+			$state['progress_floor'] = max((int) ($state['progress_floor'] ?? 0), $this->percent_from_state($state));
+			$done = ($state['phase'] ?? 'done') === 'done';
 
-			if ($phase === 'filesystem') {
-				$this->step_filesystem($state);
-			} elseif ($phase === 'integrity') {
-				$this->step_integrity($state);
-			} elseif ($phase === 'database') {
-				$this->step_database($state);
-			} else {
-				break;
+			if ($done) {
+				$state['finished_at'] = $state['updated_at'];
 			}
 
-			$processed++;
-			$since_sleep++;
-			$since_checkpoint++;
-
-			if ($throttle > 0 && $since_sleep >= $batch) {
-				usleep($throttle);
-				$since_sleep = 0;
-			}
-
-			// Persist periodically so a hard kill (FastCGI timeout, OOM) loses at
-			// most a few hundred files of progress rather than the whole slice.
-			if ($since_checkpoint >= 400) {
-				$state['updated_at'] = freesiem_sentinel_get_iso8601_time();
-				$state['progress_floor'] = max((int) ($state['progress_floor'] ?? 0), $this->percent_from_state($state));
-				$this->save_state($state);
-				$since_checkpoint = 0;
-			}
+			$this->save_state($state);
+		} finally {
+			$this->release_slice_lock();
 		}
-
-		$state['updated_at'] = freesiem_sentinel_get_iso8601_time();
-		$state['progress_floor'] = max((int) ($state['progress_floor'] ?? 0), $this->percent_from_state($state));
-		$done = ($state['phase'] ?? 'done') === 'done';
-
-		if ($done) {
-			$state['finished_at'] = $state['updated_at'];
-		}
-
-		$this->save_state($state);
-		delete_transient(self::LOCK_TRANSIENT);
 
 		return ['done' => $done, 'progress' => $this->progress()];
 	}
@@ -1550,9 +1592,7 @@ class Freesiem_Deep_Scanner
 	{
 		$checksums = $this->is_released_version() ? $this->core_checksums() : [];
 		$have_manifest = $checksums !== [];
-		$is_local = (function_exists('wp_get_environment_type') && wp_get_environment_type() === 'local')
-			|| getenv('IS_DDEV_PROJECT') === 'true'
-			|| defined('DDEV_PRIMARY_URL');
+		$is_local = $this->is_local_environment();
 
 		// --- Web root: a stray top-level .php file (no checksum manifest needed) ---
 		$root = untrailingslashit(ABSPATH);
@@ -3218,6 +3258,8 @@ class Freesiem_Deep_Scanner
 			'finished_at' => (string) ($state['finished_at'] ?? freesiem_sentinel_get_iso8601_time()),
 		];
 
+		$metrics['duration_seconds'] = $this->elapsed_seconds($state);
+
 		$merged_cache = $this->plugin->get_results()->merge_deep_scan($findings, $metrics);
 
 		// Record the run against the FULL merged result set (deep findings +
@@ -3305,6 +3347,14 @@ class Freesiem_Deep_Scanner
 	// Progress / presentation
 	// ---------------------------------------------------------------------
 
+	private function elapsed_seconds(array $state): int
+	{
+		$started = strtotime((string) ($state['started_at'] ?? ''));
+		$finished = strtotime((string) ($state['finished_at'] ?? ''));
+
+		return $started === false ? 0 : max(0, ($finished === false ? time() : $finished) - $started);
+	}
+
 	public function progress(): array
 	{
 		$state = $this->get_state();
@@ -3327,6 +3377,7 @@ class Freesiem_Deep_Scanner
 		return [
 			'running' => $phase !== 'done',
 			'stalled' => $this->is_stalled(),
+			'elapsed_seconds' => $this->elapsed_seconds($state),
 			'phase' => $phase,
 			'mode' => (string) ($state['mode'] ?? 'deep'),
 			'full' => !empty($state['full']),
@@ -3632,6 +3683,27 @@ class Freesiem_Deep_Scanner
 		];
 	}
 
+	public function is_local_environment(): bool
+	{
+		if (function_exists('wp_get_environment_type') && wp_get_environment_type() === 'local') {
+			return true;
+		}
+
+		if (getenv('IS_DDEV_PROJECT') === 'true' || defined('DDEV_PRIMARY_URL')) {
+			return true;
+		}
+
+		$host = function_exists('wp_parse_url') ? wp_parse_url(home_url(), PHP_URL_HOST) : null;
+		if (is_string($host) && $host !== '') {
+			$host = strtolower($host);
+			if ($host === 'localhost' || $host === '127.0.0.1' || str_ends_with($host, '.ddev.site') || str_ends_with($host, '.local') || str_ends_with($host, '.test')) {
+				return true;
+			}
+		}
+
+		return false;
+	}
+
 	private function resolve_budget(string $context): array
 	{
 		$state = $this->get_state();
@@ -3643,6 +3715,13 @@ class Freesiem_Deep_Scanner
 			'thorough' => ['files' => 800, 'seconds' => 8.0, 'throttle_us' => 8000, 'batch' => 25],
 			default => ['files' => 400, 'seconds' => 6.0, 'throttle_us' => 16000, 'batch' => 20],
 		};
+
+		// Local scans can do more work per slice without artificial throttling.
+		if ($this->is_local_environment()) {
+			$base['files'] *= 4;
+			$base['seconds'] = min(15.0, $base['seconds'] * 2.0);
+			$base['throttle_us'] = 0;
+		}
 
 		if (isset($prefs['throttle_us']) && (int) $prefs['throttle_us'] >= 0) {
 			$base['throttle_us'] = (int) $prefs['throttle_us'];
