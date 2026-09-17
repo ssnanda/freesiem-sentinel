@@ -24,6 +24,7 @@ class Freesiem_Admin
 	{
 		add_action('admin_menu', [$this, 'register_menu']);
 		add_action('admin_menu', [$this, 'remove_synchy_top_level_menu'], 999);
+		add_action('current_screen', [$this, 'set_hidden_page_title']);
 		add_action('admin_init', [$this->plugin, 'maybe_process_pending_task_maintenance']);
 		add_action('admin_init', [$this, 'maybe_redirect_legacy_synchy_pages']);
 		add_action('admin_init', [$this, 'maybe_redirect_legacy_about_page']);
@@ -126,6 +127,27 @@ class Freesiem_Admin
 		add_submenu_page('', __('Logs', 'freesiem-sentinel'), __('Logs', 'freesiem-sentinel'), 'manage_options', 'freesiem-logs', [$this, 'render_logs_page']);
 		add_submenu_page('', __('Pending Tasks', 'freesiem-sentinel'), __('Pending Tasks', 'freesiem-sentinel'), 'read', 'freesiem-pending-tasks', [$this, 'render_pending_tasks_page']);
 		add_submenu_page('', __('Scan', 'freesiem-sentinel'), __('Scan', 'freesiem-sentinel'), 'manage_options', 'freesiem-scan', [$this, 'render_scan_page']);
+	}
+
+	/**
+	 * Hidden pages (parent '') are never matched by get_admin_page_title(), so core's
+	 * admin-header.php would run strip_tags(null) and emit a PHP 8.1+ deprecation. Seed the
+	 * global $title from the registered submenu entry before the header renders.
+	 */
+	public function set_hidden_page_title(): void
+	{
+		global $title, $submenu, $plugin_page;
+
+		if (!empty($title) || empty($plugin_page) || empty($submenu['']) || !is_array($submenu[''])) {
+			return;
+		}
+
+		foreach ($submenu[''] as $item) {
+			if (isset($item[2], $item[3]) && $item[2] === $plugin_page) {
+				$title = (string) $item[3];
+				return;
+			}
+		}
 	}
 
 	public function remove_synchy_top_level_menu(): void
