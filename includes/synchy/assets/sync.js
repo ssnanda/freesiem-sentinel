@@ -1765,6 +1765,12 @@
 			return;
 		}
 
+		// Set once a delta Sync finishes: clearPreview() drops latestPreview back to null, which
+		// makes Push look actionable again even though everything was just sent. Re-running the
+		// delta preview after the run settles the button on the real post-Sync state instead of
+		// forcing the user to click Push a second time just to discover there is nothing left.
+		let refreshPreviewAfterSync = false;
+
 		const destinationUrl = destinationUrlInput?.value?.trim() || "";
 		const scopeLabels = getSelectedScopeLabels();
 		const selectedFileSections = form.querySelectorAll('input[name="synchy_sync_selected_file_scopes[]"]:checked').length;
@@ -1868,6 +1874,7 @@
 			}
 			if (!getHasResumableFullSync()) {
 				clearPreview();
+				refreshPreviewAfterSync = !isFullSync;
 			}
 		} catch (error) {
 			if (!getHasResumableFullSync()) {
@@ -1893,6 +1900,10 @@
 			} else {
 				setBusy(false);
 			}
+		}
+
+		if (refreshPreviewAfterSync && currentJob?.status !== "running") {
+			await runPreview("delta");
 		}
 	};
 
