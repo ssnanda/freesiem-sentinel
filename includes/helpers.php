@@ -1102,6 +1102,18 @@ function freesiem_sentinel_is_valid_us_phone(string $value): bool
 	return freesiem_sentinel_sanitize_phone_number($value) !== '';
 }
 
+// Contact details to prefill on the Cloud Connect form when nothing is saved yet.
+// Email: the site's admin email. Phone: only a placeholder on *.ddev.site so local
+// test sites can Connect straight away; production sites are never prefilled —
+// Core sends the verification code there, so it must be a real number.
+function freesiem_sentinel_get_contact_defaults(): array
+{
+	return [
+		'email' => sanitize_email((string) get_option('admin_email', '')),
+		'phone' => freesiem_sentinel_is_local_dev_site() ? '8888888888' : '',
+	];
+}
+
 function freesiem_sentinel_format_phone(string $value, bool $masked = false): string
 {
 	$digits = freesiem_sentinel_sanitize_phone_number($value);

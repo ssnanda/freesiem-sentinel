@@ -2693,6 +2693,24 @@ class Freesiem_Admin
 		$settings = freesiem_sentinel_get_settings();
 		$state = (string) ($settings['connection_state'] ?? 'disconnected');
 		$is_connected = Freesiem_Cloud_Connect_State::is_connected($settings);
+
+		// First visit: prefill (and save, so Connect is usable) the contact details
+		// from what the site already knows. Never overwrites anything already saved.
+		if (!$is_connected && $state === 'disconnected' && (empty($settings['email']) || empty($settings['phone']))) {
+			$defaults = freesiem_sentinel_get_contact_defaults();
+			$prefill = [];
+			if (empty($settings['email']) && is_email($defaults['email'])) {
+				$prefill['email'] = $defaults['email'];
+			}
+			if (empty($settings['phone']) && $defaults['phone'] !== '') {
+				$prefill['phone'] = $defaults['phone'];
+				$prefill['phone_number'] = $defaults['phone'];
+			}
+			if ($prefill !== []) {
+				$settings = freesiem_sentinel_update_settings($prefill);
+			}
+		}
+
 		$email = safe($settings['email'] ?? '');
 		$phone = freesiem_sentinel_format_phone((string) ($settings['phone'] ?? ''));
 		$can_connect = is_email($email) && freesiem_sentinel_is_valid_us_phone((string) ($settings['phone'] ?? ''));
@@ -2741,6 +2759,9 @@ class Freesiem_Admin
 			echo '</form>';
 		} else {
 			echo '<p style="margin-top:16px;">' . esc_html__('Save this site contact info locally first, then connect using the saved email and phone number.', 'freesiem-sentinel') . '</p>';
+			if (!freesiem_sentinel_is_local_dev_site() && !freesiem_sentinel_is_valid_us_phone((string) ($settings['phone'] ?? ''))) {
+				echo '<div class="notice notice-warning inline"><p><strong>' . esc_html__('WARNING:', 'freesiem-sentinel') . '</strong> ' . esc_html__('An actual phone number is required to activate.', 'freesiem-sentinel') . '</p></div>';
+			}
 			echo '<form method="post" action="' . esc_url(admin_url('admin-post.php')) . '">';
 			wp_nonce_field(FREESIEM_SENTINEL_NONCE_ACTION);
 			echo '<input type="hidden" name="action" value="freesiem_sentinel_save_cloud_connect_contact" />';
