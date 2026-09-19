@@ -41,7 +41,11 @@ class Freesiem_Cron
 			wp_schedule_event(time() + (20 * MINUTE_IN_SECONDS), 'daily', self::SSL_AUTO_RENEW_HOOK);
 		}
 
-		if (freesiem_sentinel_get_setting('deep_scan_weekly_enabled', 0) && !wp_next_scheduled(self::WEEKLY_DEEP_SCAN_HOOK)) {
+		if (!freesiem_sentinel_get_setting('deep_scan_weekly_enabled', 0)) {
+			if (wp_next_scheduled(self::WEEKLY_DEEP_SCAN_HOOK)) {
+				wp_clear_scheduled_hook(self::WEEKLY_DEEP_SCAN_HOOK);
+			}
+		} elseif (!wp_next_scheduled(self::WEEKLY_DEEP_SCAN_HOOK)) {
 			wp_schedule_event(freesiem_sentinel_weekly_scan_timestamp(), 'weekly', self::WEEKLY_DEEP_SCAN_HOOK);
 		}
 	}
@@ -86,7 +90,11 @@ class Freesiem_Cron
 			wp_schedule_event(time() + (20 * MINUTE_IN_SECONDS), 'daily', self::SSL_AUTO_RENEW_HOOK);
 		}
 
-		if (freesiem_sentinel_get_setting('deep_scan_weekly_enabled', 0) && !wp_next_scheduled(self::WEEKLY_DEEP_SCAN_HOOK)) {
+		if (!freesiem_sentinel_get_setting('deep_scan_weekly_enabled', 0)) {
+			if (wp_next_scheduled(self::WEEKLY_DEEP_SCAN_HOOK)) {
+				wp_clear_scheduled_hook(self::WEEKLY_DEEP_SCAN_HOOK);
+			}
+		} elseif (!wp_next_scheduled(self::WEEKLY_DEEP_SCAN_HOOK)) {
 			wp_schedule_event(freesiem_sentinel_weekly_scan_timestamp(), 'weekly', self::WEEKLY_DEEP_SCAN_HOOK);
 		}
 	}
@@ -112,7 +120,7 @@ class Freesiem_Cron
 	public function local_scan(): void
 	{
 		$this->plugin->run_local_scan(true);
-		$this->plugin->get_deep_scanner()->maybe_start_scheduled();
+		$this->plugin->get_deep_scanner()->maybe_resume_scan();
 	}
 
 	public function deep_scan_continue(): void

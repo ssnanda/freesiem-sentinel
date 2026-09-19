@@ -9,7 +9,7 @@ class Freesiem_Install_Base_Dial_Home
 	private const ADDON_NAME = 'freeSIEM Sentinel';
 	private const ADDON_SLUG = FREESIEM_SENTINEL_SLUG;
 	private const ADDON_TYPE = 'wordpress-plugin';
-	private const LOCAL_ENDPOINT = 'https://localhost:8443/api/v1/install-base/dial-home';
+	private const LOCAL_ENDPOINT = 'https://host.docker.internal:8443/api/v1/install-base/dial-home';
 	private const PRODUCTION_ENDPOINT = 'https://core.freesiem.com/api/v1/install-base/dial-home';
 	private const SHARED_SECRET = 'freesiem-sentinel-shared-secret';
 	private const HEARTBEAT_INTERVAL = 12 * HOUR_IN_SECONDS;
@@ -227,6 +227,7 @@ class Freesiem_Install_Base_Dial_Home
 
 	private function is_local_endpoint(string $endpoint): bool
 	{
-		return str_starts_with($endpoint, 'https://localhost:8443/');
+		return str_starts_with($endpoint, 'https://host.docker.internal:8443/')
+			|| str_starts_with($endpoint, 'https://localhost:8443/');
 	}
 }

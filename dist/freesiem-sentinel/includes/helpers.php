@@ -4763,14 +4763,32 @@ function freesiem_sentinel_get_timezone_string(): string
 	return $offset === 0.0 ? 'UTC' : sprintf('UTC%+g', $offset);
 }
 
+function freesiem_sentinel_is_local_dev_site(?string $home_url = null): bool
+{
+	$home_url = $home_url ?? home_url();
+	$host = strtolower((string) wp_parse_url($home_url, PHP_URL_HOST));
+
+	return str_ends_with($host, '.ddev.site');
+}
+
+// True for the local-core URL (Docker host alias) — the only backend served with
+// a self-signed certificate, so the only one where TLS verification is skipped.
+function freesiem_sentinel_is_local_backend_url(string $url): bool
+{
+	return strtolower((string) wp_parse_url($url, PHP_URL_HOST)) === 'host.docker.internal';
+}
+
+// DDEV sites talk to the local docker core; every other site talks to production.
 function freesiem_sentinel_get_effective_cloud_backend_base_url(?array $settings = null): string
 {
-	return FREESIEM_SENTINEL_BACKEND_URL;
+	$url = freesiem_sentinel_is_local_dev_site() ? FREESIEM_SENTINEL_LOCAL_BACKEND_URL : FREESIEM_SENTINEL_BACKEND_URL;
+
+	return (string) apply_filters('freesiem_sentinel_cloud_backend_base_url', $url, home_url());
 }
 
 function freesiem_sentinel_is_custom_cloud_backend(?array $settings = null): bool
 {
-	return false;
+	return freesiem_sentinel_get_effective_cloud_backend_base_url($settings) !== FREESIEM_SENTINEL_BACKEND_URL;
 }
 
 function freesiem_sentinel_mask_secret(string $value, int $visible = 4): string

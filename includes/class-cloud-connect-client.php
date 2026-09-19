@@ -74,6 +74,8 @@ class Freesiem_Cloud_Connect_Client
 			$this->base_url . $path,
 			[
 				'timeout' => 20,
+				// Local core (host.docker.internal) is served with a self-signed cert.
+				'sslverify' => !freesiem_sentinel_is_local_backend_url($this->base_url),
 				'headers' => $headers,
 				'body' => $body,
 				'data_format' => 'body',

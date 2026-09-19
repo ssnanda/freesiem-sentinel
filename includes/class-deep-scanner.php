@@ -34,7 +34,6 @@ class Freesiem_Deep_Scanner
 	private const STALE_LOCK_SECONDS = 300; // no saved progress for five minutes means the continuation chain is stalled
 	private const SLICE_LOCK_SECONDS = 90;
 	private const CONTINUE_DELAY_SECONDS = 60;
-	private const RESCAN_AFTER_SECONDS = 43200; // 12h — scheduled deep scan cadence
 	private const CORE_CHECK_BATCH = 40;
 	private const PLUGIN_CHECK_BATCH = 30;
 
@@ -105,7 +104,7 @@ class Freesiem_Deep_Scanner
 	 * Reset state and seed the work queue for a fresh scan.
 	 *
 	 * @param array  $options per-run preference overrides
-	 * @param string $mode    'deep' (manual / 12-hourly) or 'weekly' (scheduled full sweep)
+	 * @param string $mode    'deep' (manual) or 'weekly' (scheduled full sweep)
 	 */
 	public function start(array $options = [], string $mode = 'deep'): array
 	{
@@ -210,32 +209,15 @@ class Freesiem_Deep_Scanner
 		$this->start_full('weekly');
 	}
 
-	public function maybe_start_scheduled(): void
+	/**
+	 * Repair the continuation chain for an existing scan without starting a new one.
+	 * New deep scans require a manual request or the enabled weekly schedule.
+	 */
+	public function maybe_resume_scan(): void
 	{
 		if ($this->is_running()) {
-			// A scan is in progress (possibly with a broken continuation chain, or
-			// simply slow between cron ticks). Resume it from its saved position
-			// rather than restarting and losing coverage.
 			$this->schedule_continue(self::CONTINUE_DELAY_SECONDS);
-
-			return;
 		}
-
-		$settings = freesiem_sentinel_get_settings();
-		$prefs = freesiem_sentinel_safe_array($settings['scan_preferences'] ?? []);
-
-		if (empty($prefs['scan_malware']) && empty($prefs['scan_core_integrity']) && empty($prefs['scan_plugin_integrity']) && empty($prefs['scan_database'])) {
-			return;
-		}
-
-		$last = strtotime((string) ($settings['summary_cache']['summary']['last_deep_scan_at'] ?? '')) ?: 0;
-
-		if ($last > 0 && (time() - $last) < self::RESCAN_AFTER_SECONDS) {
-			return;
-		}
-
-		$this->start();
-		$this->schedule_continue(5);
 	}
 
 	/**
