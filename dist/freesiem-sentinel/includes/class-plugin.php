@@ -958,6 +958,8 @@ class Freesiem_Plugin
 
 			if ($kind === 'upgrade') {
 				$this->install_base_dial_home->maybe_send_upgrade();
+			} elseif ($kind === 'change') {
+				$this->install_base_send_change();
 			} else {
 				$this->install_base_dial_home->heartbeat();
 			}
@@ -971,9 +973,20 @@ class Freesiem_Plugin
 		}
 	}
 
+	private function install_base_send_change(): void
+	{
+		$result = $this->install_base_dial_home->send('change');
+
+		if (is_wp_error($result)) {
+			error_log('[freeSIEM] install-base change report failed: ' . $result->get_error_message());
+		}
+	}
+
 	public function queue_install_base_heartbeat_if_due(): void
 	{
-		if ($this->install_base_dial_home->is_due()) {
+		if ($this->install_base_dial_home->needs_change_event()) {
+			$this->queue_install_base_send('change');
+		} elseif ($this->install_base_dial_home->is_due()) {
 			$this->queue_install_base_send('heartbeat');
 		}
 	}

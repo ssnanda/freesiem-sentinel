@@ -16,7 +16,34 @@ class Freesiem_Install_Base_Dial_Home
 
 	public const RESULT_OPTION = 'freesiem_sentinel_install_base_last_result';
 	public const ATTEMPT_OPTION = 'freesiem_sentinel_install_base_last_attempt';
+	public const FINGERPRINT_OPTION = 'freesiem_sentinel_install_base_fingerprint';
 	private const ATTEMPT_BACKOFF = 10 * MINUTE_IN_SECONDS;
+
+	// Hash of what Core shows for this install (WordPress, PHP, active theme, URLs,
+	// plugin version). Cheap: nothing here touches the database beyond autoloaded options.
+	private function fingerprint(): string
+	{
+		$theme = wp_get_theme();
+
+		return hash('sha256', wp_json_encode([
+			get_bloginfo('version'),
+			PHP_VERSION,
+			(string) $theme->get('Name'),
+			site_url(),
+			home_url(),
+			FREESIEM_SENTINEL_VERSION,
+			function_exists('wp_get_environment_type') ? wp_get_environment_type() : 'production',
+		]));
+	}
+
+	// Something Core displays changed since the last successful report (a WordPress or
+	// PHP upgrade, a theme switch, a new URL), and we have not just tried.
+	public function needs_change_event(): bool
+	{
+		return $this->is_enabled()
+			&& $this->fingerprint() !== (string) get_option(self::FINGERPRINT_OPTION, '')
+			&& (time() - (int) get_option(self::ATTEMPT_OPTION, 0)) >= self::ATTEMPT_BACKOFF;
+	}
 
 	// True when a heartbeat is due and we have not tried in the last 10 minutes, so a
 	// Core that is down or unreachable is retried gently, not on every page load.
@@ -67,7 +94,7 @@ class Freesiem_Install_Base_Dial_Home
 			return ['skipped' => true, 'reason' => 'disabled'];
 		}
 
-		if (!in_array($event, ['activation', 'heartbeat', 'upgrade'], true)) {
+		if (!in_array($event, ['activation', 'heartbeat', 'upgrade', 'change'], true)) {
 			return new WP_Error('freesiem_install_base_invalid_event', __('Invalid install-base dial-home event.', 'freesiem-sentinel'));
 		}
 
@@ -121,6 +148,7 @@ class Freesiem_Install_Base_Dial_Home
 
 		$this->record_success($event);
 		$this->remember_result(true, $event, $endpoint, $code, '');
+		update_option(self::FINGERPRINT_OPTION, $this->fingerprint(), false);
 
 		return [
 			'success' => true,
