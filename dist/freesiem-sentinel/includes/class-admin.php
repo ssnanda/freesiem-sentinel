@@ -52,6 +52,7 @@ class Freesiem_Admin
 		add_action('admin_post_freesiem_sentinel_save_cloud_preferences', [$this, 'handle_save_cloud_preferences']);
 		add_action('admin_post_freesiem_sentinel_request_remote_scan', [$this, 'handle_request_remote_scan']);
 		add_action('admin_post_freesiem_sentinel_sync_results', [$this, 'handle_sync_results']);
+		add_action('admin_post_freesiem_sentinel_install_base_send_now', [$this, 'handle_install_base_send_now']);
 		add_action('admin_post_freesiem_sentinel_reconnect', [$this, 'handle_reconnect']);
 		add_action('admin_post_freesiem_sentinel_disconnect_cloud', [$this, 'handle_disconnect_cloud']);
 		add_action('admin_post_freesiem_sentinel_test_connection', [$this, 'handle_test_connection']);
@@ -1084,6 +1085,7 @@ class Freesiem_Admin
 
 		$preferences = [
 			'allow_remote_scan' => empty($_POST['allow_remote_scan']) ? 0 : 1,
+			'install_base_enabled' => empty($_POST['install_base_enabled']) ? 0 : 1,
 			'scan_frequency' => isset($_POST['scan_frequency']) ? sanitize_key(wp_unslash((string) $_POST['scan_frequency'])) : 'daily',
 			'user_sync_enabled' => empty($_POST['user_sync_enabled']) ? 0 : 1,
 			'enable_pending_task_queue' => empty($_POST['enable_pending_task_queue']) ? 0 : 1,
@@ -1117,6 +1119,23 @@ class Freesiem_Admin
 			? __('Cloud automation preferences were saved and synced to freeSIEM Core.', 'freesiem-sentinel')
 			: __('Cloud automation preferences were saved locally and will sync after connection.', 'freesiem-sentinel');
 		freesiem_sentinel_set_notice('success', $message);
+		$this->redirect_to_page('freesiem-remote');
+	}
+
+	public function handle_install_base_send_now(): void
+	{
+		$this->assert_manage_permissions();
+		freesiem_sentinel_require_admin_post_nonce();
+		$result = $this->plugin->send_install_base_event('heartbeat', true);
+
+		if (is_wp_error($result)) {
+			freesiem_sentinel_set_notice('error', $result->get_error_message());
+		} elseif (is_array($result) && !empty($result['skipped'])) {
+			freesiem_sentinel_set_notice('error', __('Install Base reporting is turned off.', 'freesiem-sentinel'));
+		} else {
+			freesiem_sentinel_set_notice('success', __('Install Base report sent.', 'freesiem-sentinel'));
+		}
+
 		$this->redirect_to_page('freesiem-remote');
 	}
 
@@ -2788,6 +2807,7 @@ class Freesiem_Admin
 		wp_nonce_field(FREESIEM_SENTINEL_NONCE_ACTION);
 		echo '<input type="hidden" name="action" value="freesiem_sentinel_save_cloud_preferences" />';
 		echo '<p><label><input type="checkbox" name="allow_remote_scan" value="1"' . checked(!empty($settings['allow_remote_scan']), true, false) . ' /> ' . esc_html__('Allow Remote Scans', 'freesiem-sentinel') . '</label></p>';
+		echo '<p><label><input type="checkbox" name="install_base_enabled" value="1"' . checked(!empty($settings['install_base_enabled']), true, false) . ' /> ' . esc_html__('Report this install (Install Base)', 'freesiem-sentinel') . '</label></p>';
 		echo '<p><strong>' . esc_html__('Scan Frequency', 'freesiem-sentinel') . '</strong></p>';
 		echo '<p><label><input type="radio" name="scan_frequency" value="manual"' . checked(($settings['scan_frequency'] ?? 'daily') === 'manual', true, false) . ' /> ' . esc_html__('Manual only', 'freesiem-sentinel') . '</label></p>';
 		echo '<p><label><input type="radio" name="scan_frequency" value="daily"' . checked(($settings['scan_frequency'] ?? 'daily') === 'daily', true, false) . ' /> ' . esc_html__('Once daily', 'freesiem-sentinel') . '</label></p>';
@@ -2842,6 +2862,36 @@ class Freesiem_Admin
 		echo '<tr><td><strong>' . esc_html__('Site ID', 'freesiem-sentinel') . '</strong></td><td>' . esc_html($site_id !== '' ? $this->friendly_site_id($site_id) : __('Not assigned', 'freesiem-sentinel')) . '</td></tr>';
 		echo '<tr><td><strong>' . esc_html__('Last Heartbeat', 'freesiem-sentinel') . '</strong></td><td>' . esc_html($last_heartbeat) . '</td></tr>';
 		echo '<tr><td><strong>' . esc_html__('Last Result', 'freesiem-sentinel') . '</strong></td><td>' . esc_html($last_heartbeat_result !== '' ? $last_heartbeat_result : __('No heartbeat sent yet.', 'freesiem-sentinel')) . '</td></tr>';
+		$install_base = $this->plugin->install_base_status();
+		$last_dial = $install_base['last'];
+
+		if (!$install_base['enabled']) {
+			$install_base_text = __('Off', 'freesiem-sentinel');
+		} elseif (empty($last_dial)) {
+			$install_base_text = __('Not sent yet', 'freesiem-sentinel');
+		} else {
+			$install_base_text = sprintf(
+				/* translators: 1: OK/Failed, 2: event, 3: time, 4: detail */
+				'%1$s — %2$s, %3$s%4$s',
+				!empty($last_dial['ok']) ? __('OK', 'freesiem-sentinel') : __('Failed', 'freesiem-sentinel'),
+				(string) ($last_dial['event'] ?? ''),
+				(string) ($last_dial['at'] ?? ''),
+				empty($last_dial['ok']) ? ' (' . trim('HTTP ' . (int) ($last_dial['status_code'] ?? 0) . ' ' . (string) ($last_dial['message'] ?? '')) . ')' : ''
+			);
+		}
+
+		echo '<tr><td><strong>' . esc_html__('Install Base', 'freesiem-sentinel') . '</strong></td><td>' . esc_html($install_base_text);
+		echo '<br /><span class="description">' . esc_html($install_base['local'] ? __('Local freeSIEM Core (ddev)', 'freesiem-sentinel') : __('freeSIEM Core (production)', 'freesiem-sentinel')) . '</span>';
+
+		if ($install_base['enabled']) {
+			echo '<form method="post" action="' . esc_url(admin_url('admin-post.php')) . '" style="margin-top:6px;">';
+			wp_nonce_field(FREESIEM_SENTINEL_NONCE_ACTION);
+			echo '<input type="hidden" name="action" value="freesiem_sentinel_install_base_send_now" />';
+			submit_button(__('Send now', 'freesiem-sentinel'), 'secondary small', '', false);
+			echo '</form>';
+		}
+
+		echo '</td></tr>';
 		echo '<tr><td><strong>' . esc_html__('Last Core Scan', 'freesiem-sentinel') . '</strong></td><td>' . esc_html(safe($settings['last_core_scan_summary'] ?? '') !== '' ? safe($settings['last_core_scan_summary']) : __('No Core scan yet.', 'freesiem-sentinel')) . '</td></tr>';
 		echo '<tr><td><strong>' . esc_html__('Remote Scan Allowed', 'freesiem-sentinel') . '</strong></td><td>' . esc_html(!empty($settings['allow_remote_scan']) ? __('Yes', 'freesiem-sentinel') : __('No', 'freesiem-sentinel')) . '</td></tr>';
 		echo '<tr><td><strong>' . esc_html__('Scan Frequency', 'freesiem-sentinel') . '</strong></td><td>' . esc_html(safe($settings['scan_frequency'] ?? 'daily')) . '</td></tr>';

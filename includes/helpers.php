@@ -21,6 +21,7 @@ function freesiem_sentinel_get_default_settings(): array
 		'cloud_verification_code' => '',
 		'cloud_connected_at' => '',
 		'allow_remote_scan' => 1,
+		'install_base_enabled' => 1,
 		'scan_frequency' => 'daily',
 		'user_sync_enabled' => 0,
 		'plugin_auto_update' => 1,
@@ -388,6 +389,7 @@ function freesiem_sentinel_sanitize_settings(array $settings): array
 	$settings['registration_status'] = sanitize_key((string) $settings['registration_status']);
 	$settings['last_local_scan_at'] = freesiem_sentinel_sanitize_datetime((string) $settings['last_local_scan_at']);
 	$settings['last_remote_scan_at'] = freesiem_sentinel_sanitize_datetime((string) $settings['last_remote_scan_at']);
+	$settings['install_base_enabled'] = empty($settings['install_base_enabled']) ? 0 : 1;
 	$settings['last_core_scan_state'] = sanitize_text_field((string) ($settings['last_core_scan_state'] ?? ''));
 	$settings['last_core_scan_summary'] = sanitize_text_field((string) ($settings['last_core_scan_summary'] ?? ''));
 	$settings['last_sync_at'] = freesiem_sentinel_sanitize_datetime((string) $settings['last_sync_at']);

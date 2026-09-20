@@ -475,6 +475,7 @@ class Freesiem_Plugin
 		$scan_metrics = freesiem_sentinel_safe_array($local_inventory['scan_metrics'] ?? []);
 		$preference_payload = $this->build_cloud_preference_payload($settings);
 		$task_heartbeat_payload = $this->pending_tasks->build_heartbeat_payload($settings);
+		$inventory_fingerprint = '';
 		$payload = [
 			'plugin_version' => FREESIEM_SENTINEL_VERSION,
 			'wp_version' => get_bloginfo('version'),
@@ -500,6 +501,16 @@ class Freesiem_Plugin
 				'stealth_mode' => $this->build_stealth_mode_status_payload(),
 				'preferences' => $preference_payload['preferences'],
 			], $task_heartbeat_payload);
+
+			// Installed core/plugins/themes (names + versions). Only when it changed or
+			// a day has passed, so most heartbeats stay small.
+			$inventory = Freesiem_Inventory::build();
+			$fingerprint = Freesiem_Inventory::fingerprint($inventory);
+
+			if (Freesiem_Inventory::should_send($fingerprint)) {
+				$payload['inventory'] = $inventory;
+				$inventory_fingerprint = $fingerprint;
+			}
 		}
 
 		$response = $this->cloud_connect_client->heartbeat($payload);
@@ -512,6 +523,9 @@ class Freesiem_Plugin
 		$updated = Freesiem_Cloud_Connect_State::update_from_heartbeat($response, true, __('Heartbeat successful.', 'freesiem-sentinel'));
 		$this->refresh_runtime_clients($updated);
 		$this->pending_tasks->mark_heartbeat_payload_reported($task_heartbeat_payload);
+		if ($inventory_fingerprint !== '') {
+			Freesiem_Inventory::mark_sent($inventory_fingerprint);
+		}
 		$this->record_core_scan($response['latest_scan'] ?? null);
 
 		return $response;
@@ -928,9 +942,19 @@ class Freesiem_Plugin
 		$this->install_base_dial_home->maybe_send_upgrade();
 	}
 
-	public function send_install_base_event(string $event)
+	public function send_install_base_event(string $event, bool $force = false)
 	{
-		return $this->install_base_dial_home->send($event);
+		return $this->install_base_dial_home->send($event, $force);
+	}
+
+	public function install_base_status(): array
+	{
+		return [
+			'enabled' => $this->install_base_dial_home->is_enabled(),
+			'local' => $this->install_base_dial_home->is_local_channel(),
+			'endpoint' => $this->install_base_dial_home->get_endpoint(),
+			'last' => $this->install_base_dial_home->last_result(),
+		];
 	}
 
 	public function send_install_base_heartbeat(): void

@@ -14,15 +14,53 @@ class Freesiem_Install_Base_Dial_Home
 	private const SHARED_SECRET = 'freesiem-sentinel-shared-secret';
 	private const HEARTBEAT_INTERVAL = 12 * HOUR_IN_SECONDS;
 
-	public function send(string $event)
+	public const RESULT_OPTION = 'freesiem_sentinel_install_base_last_result';
+
+	public function is_enabled(): bool
+	{
+		return (bool) apply_filters('freesiem_sentinel_install_base_enabled', !empty(freesiem_sentinel_get_setting('install_base_enabled', 1)));
+	}
+
+	// Last attempt, success or failure: ['ok', 'event', 'at', 'message', 'endpoint', 'status_code'].
+	public function last_result(): array
+	{
+		return (array) get_option(self::RESULT_OPTION, []);
+	}
+
+	public function is_local_channel(): bool
+	{
+		return $this->is_local_endpoint($this->get_endpoint());
+	}
+
+	private function remember_result(bool $ok, string $event, string $endpoint, int $status_code, string $message): void
+	{
+		update_option(
+			self::RESULT_OPTION,
+			[
+				'ok' => $ok,
+				'event' => $event,
+				'at' => freesiem_sentinel_get_iso8601_time(),
+				'message' => $message,
+				'endpoint' => $endpoint,
+				'status_code' => $status_code,
+			],
+			false
+		);
+	}
+
+	public function send(string $event, bool $force = false)
 	{
 		$event = sanitize_key($event);
+
+		if (!$this->is_enabled()) {
+			return ['skipped' => true, 'reason' => 'disabled'];
+		}
 
 		if (!in_array($event, ['activation', 'heartbeat', 'upgrade'], true)) {
 			return new WP_Error('freesiem_install_base_invalid_event', __('Invalid install-base dial-home event.', 'freesiem-sentinel'));
 		}
 
-		if ($event === 'heartbeat' && !$this->should_send_heartbeat()) {
+		if ($event === 'heartbeat' && !$force && !$this->should_send_heartbeat()) {
 			return ['skipped' => true, 'reason' => 'heartbeat_interval'];
 		}
 
@@ -48,11 +86,16 @@ class Freesiem_Install_Base_Dial_Home
 		);
 
 		if (is_wp_error($response)) {
+			$this->remember_result(false, $event, $endpoint, 0, $response->get_error_message());
+
 			return $response;
 		}
 
 		$code = (int) wp_remote_retrieve_response_code($response);
 		if ($code < 200 || $code >= 300) {
+			$detail = json_decode((string) wp_remote_retrieve_body($response), true);
+			$this->remember_result(false, $event, $endpoint, $code, is_array($detail) && is_string($detail['detail'] ?? null) ? $detail['detail'] : '');
+
 			return new WP_Error(
 				'freesiem_install_base_dial_home_failed',
 				sprintf(
@@ -64,6 +107,7 @@ class Freesiem_Install_Base_Dial_Home
 		}
 
 		$this->record_success($event);
+		$this->remember_result(true, $event, $endpoint, $code, '');
 
 		return [
 			'success' => true,
