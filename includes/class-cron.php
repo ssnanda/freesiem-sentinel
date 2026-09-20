@@ -31,6 +31,7 @@ class Freesiem_Cron
 		add_action(self::SYNC_HOOK, [$this, 'sync_results']);
 		add_action(self::TASK_PROCESS_HOOK, [$this, 'process_pending_tasks']);
 		add_action(self::INSTALL_BASE_HEARTBEAT_HOOK, [$this, 'install_base_heartbeat']);
+		add_action('init', [$this, 'ensure_install_base_scheduled']);
 		add_action(self::SSL_AUTO_RENEW_HOOK, [$this, 'ssl_auto_renew']);
 		add_action(self::WEEKLY_DEEP_SCAN_HOOK, [$this, 'weekly_deep_scan']);
 
@@ -62,6 +63,16 @@ class Freesiem_Cron
 		];
 
 		return $schedules;
+	}
+
+	// schedule_events() only runs on activation, so a plugin that was updated in
+	// place (not re-activated) never got the install-base task. Cheap check on
+	// every load; creates the event only if it is missing.
+	public function ensure_install_base_scheduled(): void
+	{
+		if (!wp_next_scheduled(self::INSTALL_BASE_HEARTBEAT_HOOK)) {
+			wp_schedule_event(time() + (5 * MINUTE_IN_SECONDS), 'hourly', self::INSTALL_BASE_HEARTBEAT_HOOK);
+		}
 	}
 
 	public static function schedule_events(): void

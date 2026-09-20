@@ -67,6 +67,7 @@ class Freesiem_Plugin
 		$this->tfa_auth->register();
 		$this->tfa_remote->register();
 		add_action('init', [$this, 'maybe_send_install_base_upgrade_event']);
+		add_action('init', [$this, 'queue_install_base_heartbeat_if_due'], 20);
 		// Priority 0 so the built-in ACME client's HTTP-01 challenge responder
 		// runs before any template_redirect-based HTTPS-force logic and can't
 		// be swallowed by a redirect.
@@ -937,9 +938,44 @@ class Freesiem_Plugin
 		}
 	}
 
+	// Any request — front end, admin, REST, cron — can trigger the report; no login
+	// is needed. It is sent on shutdown, after the response has gone out, so a visitor
+	// never waits on Core. An upgrade (new version) takes priority over a heartbeat.
+	private bool $install_base_send_queued = false;
+
+	private function queue_install_base_send(string $kind): void
+	{
+		if ($this->install_base_send_queued) {
+			return;
+		}
+
+		$this->install_base_send_queued = true;
+
+		add_action('shutdown', function () use ($kind): void {
+			if (function_exists('fastcgi_finish_request')) {
+				fastcgi_finish_request();
+			}
+
+			if ($kind === 'upgrade') {
+				$this->install_base_dial_home->maybe_send_upgrade();
+			} else {
+				$this->install_base_dial_home->heartbeat();
+			}
+		});
+	}
+
 	public function maybe_send_install_base_upgrade_event(): void
 	{
-		$this->install_base_dial_home->maybe_send_upgrade();
+		if ($this->install_base_dial_home->needs_upgrade_event()) {
+			$this->queue_install_base_send('upgrade');
+		}
+	}
+
+	public function queue_install_base_heartbeat_if_due(): void
+	{
+		if ($this->install_base_dial_home->is_due()) {
+			$this->queue_install_base_send('heartbeat');
+		}
 	}
 
 	public function send_install_base_event(string $event, bool $force = false)

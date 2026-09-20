@@ -15,6 +15,17 @@ class Freesiem_Install_Base_Dial_Home
 	private const HEARTBEAT_INTERVAL = 12 * HOUR_IN_SECONDS;
 
 	public const RESULT_OPTION = 'freesiem_sentinel_install_base_last_result';
+	public const ATTEMPT_OPTION = 'freesiem_sentinel_install_base_last_attempt';
+	private const ATTEMPT_BACKOFF = 10 * MINUTE_IN_SECONDS;
+
+	// True when a heartbeat is due and we have not tried in the last 10 minutes, so a
+	// Core that is down or unreachable is retried gently, not on every page load.
+	public function is_due(): bool
+	{
+		return $this->is_enabled()
+			&& $this->should_send_heartbeat()
+			&& (time() - (int) get_option(self::ATTEMPT_OPTION, 0)) >= self::ATTEMPT_BACKOFF;
+	}
 
 	public function is_enabled(): bool
 	{
@@ -63,6 +74,8 @@ class Freesiem_Install_Base_Dial_Home
 		if ($event === 'heartbeat' && !$force && !$this->should_send_heartbeat()) {
 			return ['skipped' => true, 'reason' => 'heartbeat_interval'];
 		}
+
+		update_option(self::ATTEMPT_OPTION, time(), false);
 
 		$endpoint = $this->get_endpoint();
 		$body = $this->build_raw_json_body($this->build_payload($event));
@@ -117,21 +130,28 @@ class Freesiem_Install_Base_Dial_Home
 		];
 	}
 
+	// The running version differs from the last one Core was told about (a fresh
+	// install, or the plugin files were just updated), and we have not just tried.
+	public function needs_upgrade_event(): bool
+	{
+		return $this->is_enabled()
+			&& (string) get_option(FREESIEM_SENTINEL_INSTALL_BASE_VERSION_OPTION, '') !== FREESIEM_SENTINEL_VERSION
+			&& (time() - (int) get_option(self::ATTEMPT_OPTION, 0)) >= self::ATTEMPT_BACKOFF;
+	}
+
 	public function maybe_send_upgrade(): void
 	{
-		$stored_version = (string) get_option(FREESIEM_SENTINEL_INSTALL_BASE_VERSION_OPTION, '');
-
-		if ($stored_version === FREESIEM_SENTINEL_VERSION) {
+		if (!$this->needs_upgrade_event()) {
 			return;
 		}
 
+		// On success record_success() stores the version; on failure it stays unset,
+		// so the report is retried after the back-off instead of being lost.
 		$result = $this->send('upgrade');
 
 		if (is_wp_error($result)) {
 			error_log('[freeSIEM] install-base dial-home failed: ' . $result->get_error_message());
 		}
-
-		update_option(FREESIEM_SENTINEL_INSTALL_BASE_VERSION_OPTION, FREESIEM_SENTINEL_VERSION, false);
 	}
 
 	public function heartbeat(): void
