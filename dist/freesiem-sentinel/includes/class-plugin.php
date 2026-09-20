@@ -512,8 +512,60 @@ class Freesiem_Plugin
 		$updated = Freesiem_Cloud_Connect_State::update_from_heartbeat($response, true, __('Heartbeat successful.', 'freesiem-sentinel'));
 		$this->refresh_runtime_clients($updated);
 		$this->pending_tasks->mark_heartbeat_payload_reported($task_heartbeat_payload);
+		$this->record_core_scan($response['latest_scan'] ?? null);
 
 		return $response;
+	}
+
+	// Core reports the state of its newest scan of this site in every heartbeat
+	// reply (queued / running / completed / failed) — state only, never results.
+	// Each new "<id>:<status>" is written to Logs once, so the site shows that a
+	// Core scan started and finished without seeing what it found.
+	private function record_core_scan($scan): void
+	{
+		if (!is_array($scan)) {
+			return;
+		}
+
+		$job_id = absint($scan['job_id'] ?? 0);
+		$status = sanitize_key((string) ($scan['status'] ?? ''));
+
+		if ($job_id === 0 || $status === '') {
+			return;
+		}
+
+		$state = $job_id . ':' . $status;
+
+		if ($state === (string) freesiem_sentinel_get_setting('last_core_scan_state', '')) {
+			return;
+		}
+
+		$labels = [
+			'queued' => __('queued', 'freesiem-sentinel'),
+			'running' => __('running', 'freesiem-sentinel'),
+			'completed' => __('finished', 'freesiem-sentinel'),
+			'failed' => __('failed', 'freesiem-sentinel'),
+		];
+		$label = $labels[$status] ?? $status;
+		/* translators: 1: scan id, 2: state (queued, running, finished, failed) */
+		$summary = sprintf(__('freeSIEM Core scan #%1$d %2$s.', 'freesiem-sentinel'), $job_id, $label);
+
+		freesiem_sentinel_log_event('core_scan', $summary, '', '', [
+			'job_id' => $job_id,
+			'status' => $status,
+			'scanned_at' => sanitize_text_field((string) ($scan['scanned_at'] ?? '')),
+		]);
+
+		$updates = [
+			'last_core_scan_state' => $state,
+			'last_core_scan_summary' => $summary,
+		];
+
+		if (in_array($status, ['completed', 'failed'], true)) {
+			$updates['last_remote_scan_at'] = sanitize_text_field((string) ($scan['scanned_at'] ?? freesiem_sentinel_get_iso8601_time()));
+		}
+
+		freesiem_sentinel_update_settings($updates);
 	}
 
 	public function disconnect_cloud_connect()

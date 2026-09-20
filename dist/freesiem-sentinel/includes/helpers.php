@@ -31,6 +31,8 @@ function freesiem_sentinel_get_default_settings(): array
 		'registration_status' => 'unregistered',
 		'last_local_scan_at' => '',
 		'last_remote_scan_at' => '',
+		'last_core_scan_state' => '',
+		'last_core_scan_summary' => '',
 		'last_sync_at' => '',
 		'last_upload_error' => '',
 		'last_upload_error_at' => '',
@@ -386,6 +388,8 @@ function freesiem_sentinel_sanitize_settings(array $settings): array
 	$settings['registration_status'] = sanitize_key((string) $settings['registration_status']);
 	$settings['last_local_scan_at'] = freesiem_sentinel_sanitize_datetime((string) $settings['last_local_scan_at']);
 	$settings['last_remote_scan_at'] = freesiem_sentinel_sanitize_datetime((string) $settings['last_remote_scan_at']);
+	$settings['last_core_scan_state'] = sanitize_text_field((string) ($settings['last_core_scan_state'] ?? ''));
+	$settings['last_core_scan_summary'] = sanitize_text_field((string) ($settings['last_core_scan_summary'] ?? ''));
 	$settings['last_sync_at'] = freesiem_sentinel_sanitize_datetime((string) $settings['last_sync_at']);
 	$settings['last_upload_error'] = sanitize_text_field((string) ($settings['last_upload_error'] ?? ''));
 	$settings['last_upload_error_at'] = freesiem_sentinel_sanitize_datetime((string) ($settings['last_upload_error_at'] ?? ''));

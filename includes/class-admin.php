@@ -2842,6 +2842,7 @@ class Freesiem_Admin
 		echo '<tr><td><strong>' . esc_html__('Site ID', 'freesiem-sentinel') . '</strong></td><td>' . esc_html($site_id !== '' ? $this->friendly_site_id($site_id) : __('Not assigned', 'freesiem-sentinel')) . '</td></tr>';
 		echo '<tr><td><strong>' . esc_html__('Last Heartbeat', 'freesiem-sentinel') . '</strong></td><td>' . esc_html($last_heartbeat) . '</td></tr>';
 		echo '<tr><td><strong>' . esc_html__('Last Result', 'freesiem-sentinel') . '</strong></td><td>' . esc_html($last_heartbeat_result !== '' ? $last_heartbeat_result : __('No heartbeat sent yet.', 'freesiem-sentinel')) . '</td></tr>';
+		echo '<tr><td><strong>' . esc_html__('Last Core Scan', 'freesiem-sentinel') . '</strong></td><td>' . esc_html(safe($settings['last_core_scan_summary'] ?? '') !== '' ? safe($settings['last_core_scan_summary']) : __('No Core scan yet.', 'freesiem-sentinel')) . '</td></tr>';
 		echo '<tr><td><strong>' . esc_html__('Remote Scan Allowed', 'freesiem-sentinel') . '</strong></td><td>' . esc_html(!empty($settings['allow_remote_scan']) ? __('Yes', 'freesiem-sentinel') : __('No', 'freesiem-sentinel')) . '</td></tr>';
 		echo '<tr><td><strong>' . esc_html__('Scan Frequency', 'freesiem-sentinel') . '</strong></td><td>' . esc_html(safe($settings['scan_frequency'] ?? 'daily')) . '</td></tr>';
 		echo '<tr><td><strong>' . esc_html__('User Sync Enabled', 'freesiem-sentinel') . '</strong></td><td>' . esc_html(!empty($settings['user_sync_enabled']) ? __('Yes', 'freesiem-sentinel') : __('No', 'freesiem-sentinel')) . '</td></tr>';
