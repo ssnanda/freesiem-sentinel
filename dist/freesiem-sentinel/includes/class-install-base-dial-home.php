@@ -18,7 +18,7 @@ class Freesiem_Install_Base_Dial_Home
 
 	public function is_enabled(): bool
 	{
-		return (bool) apply_filters('freesiem_sentinel_install_base_enabled', !empty(freesiem_sentinel_get_setting('install_base_enabled', 1)));
+		return (bool) apply_filters('freesiem_sentinel_install_base_enabled', true);
 	}
 
 	// Last attempt, success or failure: ['ok', 'event', 'at', 'message', 'endpoint', 'status_code'].

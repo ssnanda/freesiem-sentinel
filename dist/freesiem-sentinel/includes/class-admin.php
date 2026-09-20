@@ -1085,7 +1085,6 @@ class Freesiem_Admin
 
 		$preferences = [
 			'allow_remote_scan' => empty($_POST['allow_remote_scan']) ? 0 : 1,
-			'install_base_enabled' => empty($_POST['install_base_enabled']) ? 0 : 1,
 			'scan_frequency' => isset($_POST['scan_frequency']) ? sanitize_key(wp_unslash((string) $_POST['scan_frequency'])) : 'daily',
 			'user_sync_enabled' => empty($_POST['user_sync_enabled']) ? 0 : 1,
 			'enable_pending_task_queue' => empty($_POST['enable_pending_task_queue']) ? 0 : 1,
@@ -2807,7 +2806,6 @@ class Freesiem_Admin
 		wp_nonce_field(FREESIEM_SENTINEL_NONCE_ACTION);
 		echo '<input type="hidden" name="action" value="freesiem_sentinel_save_cloud_preferences" />';
 		echo '<p><label><input type="checkbox" name="allow_remote_scan" value="1"' . checked(!empty($settings['allow_remote_scan']), true, false) . ' /> ' . esc_html__('Allow Remote Scans', 'freesiem-sentinel') . '</label></p>';
-		echo '<p><label><input type="checkbox" name="install_base_enabled" value="1"' . checked(!empty($settings['install_base_enabled']), true, false) . ' /> ' . esc_html__('Report this install (Install Base)', 'freesiem-sentinel') . '</label></p>';
 		echo '<p><strong>' . esc_html__('Scan Frequency', 'freesiem-sentinel') . '</strong></p>';
 		echo '<p><label><input type="radio" name="scan_frequency" value="manual"' . checked(($settings['scan_frequency'] ?? 'daily') === 'manual', true, false) . ' /> ' . esc_html__('Manual only', 'freesiem-sentinel') . '</label></p>';
 		echo '<p><label><input type="radio" name="scan_frequency" value="daily"' . checked(($settings['scan_frequency'] ?? 'daily') === 'daily', true, false) . ' /> ' . esc_html__('Once daily', 'freesiem-sentinel') . '</label></p>';
