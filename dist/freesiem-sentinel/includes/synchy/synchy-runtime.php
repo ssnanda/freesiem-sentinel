@@ -3123,6 +3123,9 @@ function synchy_should_sync_option_name(string $option_name): bool
 		SYNCHY_IMPORT_OPTIONS,
 		SYNCHY_IMPORT_RESULT_OPTION,
 		'ajforms_last_portal_db_error',
+		// Plugin version markers: the destination runs its own upgrade routines.
+		'ajforms_version',
+		'googlesitekit_version',
 	];
 
 	foreach (synchy_get_site_sync_profile_ids() as $profile_id) {
@@ -3175,6 +3178,9 @@ function synchy_should_sync_option_name(string $option_name): bool
 		'zip_ai_',
 		'ajcore_portal_',
 		'ajcore_customer_portal_',
+		// Per-environment dial-home attempt/result logs and one-time seed markers.
+		'freesiem_dial_home_',
+		'ajcore_seeded_',
 	];
 
 	foreach ($excluded_prefixes as $prefix) {
@@ -12720,6 +12726,10 @@ function synchy_render_incremental_site_sync_page(array $current): void
 									<span class="synchy-sync-warning-banner__icon" aria-hidden="true">⚠</span>
 									<span><?php esc_html_e('A Sync job is actively running. Do not make changes to this site (content, plugins, or settings) until it finishes — edits made mid-Sync can be lost or cause conflicts.', 'synchy'); ?></span>
 								</div>
+								<p>
+									<button type="button" class="button" data-synchy-export-pending disabled><?php esc_html_e('Export changes', 'synchy'); ?></button>
+									<span class="synchy-field-note" data-synchy-export-pending-status></span>
+								</p>
 								<div class="<?php echo esc_attr($pending_tree_classes); ?>" data-synchy-sync-preview-tree><?php echo wp_kses_post($pending_tree_html); ?></div>
 							</div>
 						</div>
@@ -13497,6 +13507,99 @@ add_action('wp_ajax_synchy_inspect_sync_pending_rows', function (): void {
 	wp_send_json_success([
 		'totalRows' => (int) ($db_delta['total_rows'] ?? 0),
 		'tables' => synchy_build_sync_pending_rows_preview((array) ($db_delta['tables'] ?? [])),
+	]);
+});
+
+// Full machine-readable manifest of what a Push would send, for the "Export changes" button on
+// the main page: every file (with scope + size), files that would be deleted on the destination,
+// files excluded by protection rules, every DB row with untruncated raw values, and the post IDs
+// that would be removed. Same payload derivation as Push/inspect, honoring the current checkbox
+// selection. On-demand only; can be slow and large on big deltas.
+add_action('wp_ajax_synchy_export_sync_pending_changes', function (): void {
+	if (!current_user_can('manage_options')) {
+		wp_send_json_error(['message' => __('You are not allowed to export Synchy Sync data.', 'synchy')], 403);
+	}
+
+	check_ajax_referer('synchy_sync_ajax', 'nonce');
+
+	$options = isset($_POST[SYNCHY_SITE_SYNC_OPTIONS]) ? synchy_sanitize_site_sync_options(wp_unslash($_POST[SYNCHY_SITE_SYNC_OPTIONS])) : synchy_get_site_sync_options();
+	$validation = synchy_validate_site_sync_options($options);
+
+	if (is_wp_error($validation)) {
+		wp_send_json_error(['message' => $validation->get_error_message()], 400);
+	}
+
+	$force_full = synchy_should_force_full_sync($_POST);
+	$selection = synchy_get_sync_preview_selection($_POST);
+	$payload = synchy_prepare_sync_payload($options, $selection, $force_full);
+
+	if (is_wp_error($payload)) {
+		wp_send_json_error(['message' => $payload->get_error_message()], 400);
+	}
+
+	$file_delta = (array) ($payload['file_delta'] ?? []);
+	$db_delta = (array) ($payload['db_delta'] ?? []);
+	$manifest = (array) ($payload['manifest'] ?? []);
+
+	$files = [];
+
+	foreach ((array) ($file_delta['files'] ?? []) as $file) {
+		$files[] = [
+			'path' => (string) ($file['archive_path'] ?? ''),
+			'scope' => (string) ($file['scope_id'] ?? ''),
+			'size' => (int) ($file['size'] ?? 0),
+		];
+	}
+
+	$tables = [];
+
+	foreach ((array) ($db_delta['tables'] ?? []) as $table => $data) {
+		if (synchy_is_ajcore_protected_table((string) $table)) {
+			continue;
+		}
+
+		$key_columns = (array) ($data['key_columns'] ?? []);
+		$rows = [];
+
+		foreach ((array) ($data['rows'] ?? []) as $row) {
+			if (is_array($row)) {
+				$rows[] = [
+					'key' => synchy_get_sync_row_key($row, $key_columns),
+					'values' => $row,
+				];
+			}
+		}
+
+		$tables[(string) $table] = [
+			'scope' => (string) ($data['scope_id'] ?? ''),
+			'keyColumns' => array_values($key_columns),
+			'rowCount' => count($rows),
+			'rows' => $rows,
+		];
+	}
+
+	wp_send_json_success([
+		'export' => [
+			'generatedAt' => gmdate('c'),
+			'source' => home_url('/'),
+			'destination' => (string) ($options['destination_url'] ?? ''),
+			'mode' => (string) ($manifest['mode'] ?? 'delta'),
+			'scopes' => (array) ($manifest['scopes']['selectedLabels'] ?? []),
+			'files' => [
+				'updateCount' => count($files),
+				'updateBytes' => (int) ($file_delta['bytes'] ?? 0),
+				'update' => $files,
+				'deleteOnDestination' => (array) ($manifest['files']['deletedPaths'] ?? []),
+				'excludedCount' => (int) ($manifest['files']['excludedCount'] ?? 0),
+				'excluded' => (array) ($manifest['files']['excludedPaths'] ?? []),
+			],
+			'database' => [
+				'totalRows' => (int) ($db_delta['total_rows'] ?? 0),
+				'tables' => $tables,
+				// Only post deletions are tracked by Sync; option/meta/term row removals are not propagated.
+				'deletePostIdsOnDestination' => (array) ($manifest['database']['deletedPostIds'] ?? []),
+			],
+		],
 	]);
 });
 

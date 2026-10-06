@@ -53,6 +53,9 @@
 	const pushConfirmCancelButtons = Array.from(document.querySelectorAll("[data-synchy-push-confirm-cancel]"));
 	const pushConfirmRowsToggle = document.querySelector("[data-synchy-push-confirm-rows-toggle]");
 	const pushConfirmRowsContainer = document.querySelector("[data-synchy-push-confirm-rows]");
+	const exportPendingButton = document.querySelector("[data-synchy-export-pending]");
+	const exportPendingStatus = document.querySelector("[data-synchy-export-pending-status]");
+	let exportPendingBusy = false;
 
 	if (
 		!form ||
@@ -770,6 +773,10 @@
 
 		if (manualBaselineButton) {
 			manualBaselineButton.disabled = busy || !hasSelection;
+		}
+
+		if (exportPendingButton) {
+			exportPendingButton.disabled = busy || exportPendingBusy || !hasSelection || latestPreview === null;
 		}
 	};
 
@@ -2308,6 +2315,44 @@
 		overrideVersionButton.addEventListener("click", overrideSiteVersion);
 	}
 	previewButton.addEventListener("click", () => runPreview("delta"));
+
+	// Downloads the complete pending-changes manifest (files, deletions, exclusions, DB rows) as JSON.
+	if (exportPendingButton) {
+		exportPendingButton.addEventListener("click", async () => {
+			const isFull = latestPreviewMode === "full" || Boolean(latestPreview?.forceFull);
+
+			exportPendingBusy = true;
+			updateActionButtons();
+			if (exportPendingStatus) {
+				exportPendingStatus.textContent = "Building export...";
+			}
+
+			try {
+				const data = await sendAjax("synchy_export_sync_pending_changes", {
+					synchy_sync_run_mode: isFull ? "full" : "delta",
+				});
+				const blob = new Blob([JSON.stringify(data.export || {}, null, 2)], { type: "application/json" });
+				const url = URL.createObjectURL(blob);
+				const link = document.createElement("a");
+				link.href = url;
+				link.download = `synchy-pending-changes-${new Date().toISOString().replace(/[:.]/g, "-")}.json`;
+				document.body.appendChild(link);
+				link.click();
+				link.remove();
+				setTimeout(() => URL.revokeObjectURL(url), 1000);
+				if (exportPendingStatus) {
+					exportPendingStatus.textContent = "";
+				}
+			} catch (error) {
+				if (exportPendingStatus) {
+					exportPendingStatus.textContent = error.message || "Export failed.";
+				}
+			} finally {
+				exportPendingBusy = false;
+				updateActionButtons();
+			}
+		});
+	}
 	fullSyncButton.addEventListener("click", () => {
 		if (latestPreview !== null && (latestPreviewMode === "full" || Boolean(latestPreview?.forceFull))) {
 			runSync();
