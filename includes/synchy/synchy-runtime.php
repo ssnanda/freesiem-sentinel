@@ -2953,7 +2953,11 @@ function synchy_collect_sync_file_delta(array $state, array $selected_scope_ids,
 	$excluded_paths = [];
 	$excluded_count = 0;
 
-	foreach (synchy_get_sync_file_targets($selected_scope_ids) as $target) {
+	// An empty scope list means "no file scopes enabled", not "all of them"
+	// (synchy_get_sync_file_targets() treats [] as everything).
+	$file_targets = $selected_scope_ids === [] ? [] : synchy_get_sync_file_targets($selected_scope_ids);
+
+	foreach ($file_targets as $target) {
 		$scope_id = (string) ($target['scope_id'] ?? '');
 		$scope_last_sync_time = max(0, (int) ($scope_sync_times[$scope_id] ?? 0));
 		$previous_scope_paths = array_values(
