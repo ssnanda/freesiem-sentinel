@@ -1,5 +1,5 @@
 {
-    "freesiem-sentinel.php": "e5eb4996952e8ac88ab8b428d3a43692",
+    "freesiem-sentinel.php": "a92f87ef87ba3e77acc081008e227adf",
     "includes/class-acknowledgements.php": "d940aa39e3decbcbc14ddabac427c279",
     "includes/class-acme-client.php": "533ad7673c04bfb975d263ab41eaa1d0",
     "includes/class-admin.php": "015938e61c7faa4bbb132afbc1af7898",
@@ -31,5 +31,5 @@
     "includes/synchy/assets/installer-template.php": "1f849bd503691a581aa19cd8b502b0f6",
     "includes/synchy/assets/site-sync.js": "58d8926af5f18ef0cf048e6923295943",
     "includes/synchy/assets/sync.js": "b3122e1c1fa9c30a456150c8496c40c4",
-    "includes/synchy/synchy-runtime.php": "322a87538986bf28d5bce1474a317280"
+    "includes/synchy/synchy-runtime.php": "1d373a68d564cae49c3e5a42f425d490"
 }

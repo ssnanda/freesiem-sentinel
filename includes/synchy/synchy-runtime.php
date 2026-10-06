@@ -3181,6 +3181,9 @@ function synchy_should_sync_option_name(string $option_name): bool
 		// Per-environment dial-home attempt/result logs and one-time seed markers.
 		'freesiem_dial_home_',
 		'ajcore_seeded_',
+		// Local cron bookkeeping and the connected-sites cache (lists this environment's own domains/UUIDs).
+		'ajcore_local_',
+		'ajcore_connected_sites_',
 	];
 
 	foreach ($excluded_prefixes as $prefix) {
