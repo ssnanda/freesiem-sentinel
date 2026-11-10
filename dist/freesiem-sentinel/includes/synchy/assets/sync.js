@@ -1385,6 +1385,7 @@
 
 		try {
 			const data = await sendAjax("synchy_get_sync_job_status");
+			applyScopeStatus(data.scopeStatus || null);
 			if (data.status) {
 				currentStatus = data.status;
 				renderStatus(data.status);

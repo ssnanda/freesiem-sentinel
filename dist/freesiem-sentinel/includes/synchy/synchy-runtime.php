@@ -9422,6 +9422,63 @@ function synchy_send_full_sync_postmeta_mirror(array $options)
 }
 
 /**
+ * AJ Core's storage table maps an attachment ID to a customer file on S3, and AJ Core then
+ * rewrites that attachment's URL to the S3 object. When Sync writes a post under an ID that still
+ * has such a mapping for a *different* file (another type, or not an attachment at all), the
+ * mapping would hijack the incoming post's URL -- e.g. a blog hero image served as a customer's
+ * private PDF. Those mappings are parked on an unused ID (kept, not deleted) so the customer
+ * file record can be re-attached later.
+ */
+function synchy_park_mismatched_storage_mappings(array $prepared_tables): int
+{
+	global $wpdb;
+
+	$table = $wpdb->prefix . 'aj_storage_objects';
+
+	if ($wpdb->get_var($wpdb->prepare('SHOW TABLES LIKE %s', $wpdb->esc_like($table))) !== $table) {
+		return 0;
+	}
+
+	$incoming = [];
+
+	foreach ((array) ($prepared_tables[$wpdb->posts]['rows'] ?? []) as $row) {
+		if (is_array($row) && (int) ($row['ID'] ?? 0) > 0) {
+			$incoming[(int) $row['ID']] = $row;
+		}
+	}
+
+	$parked = 0;
+
+	foreach (array_chunk(array_keys($incoming), 250) as $chunk) {
+		$placeholders = implode(', ', array_fill(0, count($chunk), '%d'));
+		$mappings = $wpdb->get_results(
+			$wpdb->prepare('SELECT `id`, `attachment_id`, `content_type` FROM `' . str_replace('`', '``', $table) . '` WHERE `attachment_id` IN (' . $placeholders . ')', $chunk),
+			ARRAY_A
+		);
+
+		foreach ((array) $mappings as $mapping) {
+			$post = $incoming[(int) $mapping['attachment_id']] ?? null;
+
+			if ($post === null) {
+				continue;
+			}
+
+			$is_attachment = (string) ($post['post_type'] ?? '') === 'attachment';
+			$same_type = strtolower((string) ($post['post_mime_type'] ?? '')) === strtolower((string) $mapping['content_type']);
+
+			if ($is_attachment && $same_type) {
+				continue;
+			}
+
+			$wpdb->update($table, ['attachment_id' => 1000000 + (int) $mapping['id']], ['id' => (int) $mapping['id']], ['%d'], ['%d']);
+			$parked++;
+		}
+	}
+
+	return $parked;
+}
+
+/**
  * Refuses to apply a Sync that would overwrite a *different* record on this site. Rows are
  * written by raw ID (posts.ID, postmeta.meta_id); when this site created its own rows with the
  * same IDs (e.g. portal-uploaded attachments), the upsert silently replaced them. Same ID but a
@@ -10630,6 +10687,8 @@ function synchy_handle_remote_sync_request(WP_REST_Request $request)
 		if (is_wp_error($executed)) {
 			return new WP_Error($executed->get_error_code(), $executed->get_error_message(), ['status' => 500]);
 		}
+
+		synchy_park_mismatched_storage_mappings((array) ($prepared_sql['tables'] ?? []));
 
 		// Statements actually run must match what the manifest called for -- a silent shortfall
 		// here once dropped every table after the first while the receipt still said "success".
@@ -14149,6 +14208,9 @@ add_action('wp_ajax_synchy_get_sync_job_status', function (): void {
 	wp_send_json_success([
 		'status' => synchy_get_sync_status(),
 		'job' => synchy_build_sync_job_response(synchy_get_visible_sync_job()),
+		// Without this the page keeps the "pending baseline" list it loaded with, so a finished
+		// baseline/Full Sync still showed "Start Baseline" until the page was reloaded.
+		'scopeStatus' => synchy_get_sync_scope_status(synchy_get_site_sync_options()),
 	]);
 });
 
