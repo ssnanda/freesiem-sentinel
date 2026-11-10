@@ -9332,6 +9332,18 @@ function synchy_relocate_colliding_destination_posts(array $prepared_tables, arr
 		$wpdb->update($wpdb->term_relationships, ['object_id' => $new_id], ['object_id' => $old_id], ['%d'], ['%d']);
 		$wpdb->update($wpdb->posts, ['post_parent' => $new_id], ['post_parent' => $old_id], ['%d'], ['%d']);
 		$wpdb->update($wpdb->comments, ['comment_post_ID' => $new_id], ['comment_post_ID' => $old_id], ['%d'], ['%d']);
+
+		// AJ Core keeps its own tables keyed by attachment ID (customer files offloaded to S3,
+		// portal file records). Those must follow the moved record, or AJ Core would rewrite
+		// whatever now owns the old ID (e.g. a blog image) to the customer's S3 object.
+		foreach (['aj_storage_objects' => 'attachment_id', 'aj_portal_files' => 'attachment_id', 'aj_portal_mail_items' => 'scan_attachment_id'] as $suffix => $column) {
+			$aj_table = $wpdb->prefix . $suffix;
+
+			if ($wpdb->get_var($wpdb->prepare('SHOW TABLES LIKE %s', $wpdb->esc_like($aj_table))) === $aj_table) {
+				$wpdb->update($aj_table, [$column => $new_id], [$column => $old_id], ['%d'], ['%d']);
+			}
+		}
+
 		$moved[$old_id] = $new_id;
 	}
 
