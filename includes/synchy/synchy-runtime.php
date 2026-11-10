@@ -4238,6 +4238,65 @@ function synchy_build_sync_upsert_statements(string $table, array $rows, array $
 	return $statements;
 }
 
+/**
+ * Postmeta is applied by (post_id, meta_key), never by meta_id: meta_id is an arbitrary
+ * auto-increment that differs per site, so keying on it overwrote (or lost to) unrelated rows
+ * on a destination that had created its own meta. For every incoming (post, key) pair the
+ * destination's rows for that pair are removed and the incoming rows inserted with a fresh
+ * meta_id. Keys the destination has but the source doesn't send are left alone.
+ */
+function synchy_build_sync_postmeta_statements(string $table, array $rows): array
+{
+	$rows = array_values(array_filter($rows, static fn($row): bool => is_array($row) && (int) ($row['post_id'] ?? 0) > 0 && (string) ($row['meta_key'] ?? '') !== ''));
+
+	if ($rows === []) {
+		return [];
+	}
+
+	$pairs = [];
+	$insert_rows = [];
+
+	foreach ($rows as $row) {
+		$pairs[(int) $row['post_id'] . "\n" . (string) $row['meta_key']] = [(int) $row['post_id'], (string) $row['meta_key']];
+		$insert_rows[] = [
+			'post_id' => $row['post_id'],
+			'meta_key' => $row['meta_key'],
+			'meta_value' => $row['meta_value'] ?? null,
+		];
+	}
+
+	$quoted_table = '`' . str_replace('`', '``', $table) . '`';
+	$statements = [];
+
+	foreach (array_chunk(array_values($pairs), 100) as $chunk) {
+		$conditions = [];
+
+		foreach ($chunk as [$post_id, $meta_key]) {
+			$conditions[] = '(`post_id` = ' . $post_id . ' AND `meta_key` = ' . synchy_sync_sql_value($meta_key) . ')';
+		}
+
+		$statements[] = 'DELETE FROM ' . $quoted_table . ' WHERE ' . implode(' OR ', $conditions) . ';';
+	}
+
+	return array_merge($statements, synchy_build_sync_upsert_statements($table, $insert_rows, ['post_id', 'meta_key'], []));
+}
+
+function synchy_build_sync_table_statements(string $table, array $data): array
+{
+	global $wpdb;
+
+	if ($table === $wpdb->postmeta) {
+		return synchy_build_sync_postmeta_statements($table, (array) ($data['rows'] ?? []));
+	}
+
+	return synchy_build_sync_upsert_statements(
+		$table,
+		(array) ($data['rows'] ?? []),
+		(array) ($data['key_columns'] ?? []),
+		(array) ($data['update_columns'] ?? [])
+	);
+}
+
 function synchy_write_sync_sql_file(array $tables, string $path)
 {
 	$sql = "-- Backup & Restore Sync Delta\n";
@@ -4251,12 +4310,7 @@ function synchy_write_sync_sql_file(array $tables, string $path)
 		$sql .= '-- Table: ' . $table . "\n";
 
 		foreach (
-			synchy_build_sync_upsert_statements(
-				$table,
-				(array) ($data['rows'] ?? []),
-				(array) ($data['key_columns'] ?? []),
-				(array) ($data['update_columns'] ?? [])
-			) as $statement
+			synchy_build_sync_table_statements((string) $table, (array) $data) as $statement
 		) {
 			$sql .= $statement . "\n\n";
 		}
@@ -9005,8 +9059,8 @@ function synchy_build_sync_sql_from_manifest(array $manifest, string $sql_path)
 
 	$expected_statements = 0;
 
-	foreach ($prepared_tables as $prepared_table) {
-		$expected_statements += (int) ceil(count((array) ($prepared_table['rows'] ?? [])) / 100);
+	foreach ($prepared_tables as $prepared_table_name => $prepared_table) {
+		$expected_statements += count(synchy_build_sync_table_statements((string) $prepared_table_name, (array) $prepared_table));
 	}
 
 	return [
@@ -9239,7 +9293,8 @@ function synchy_execute_sync_sql_file(string $sql_path)
  * Refuses to apply a Sync that would overwrite a *different* record on this site. Rows are
  * written by raw ID (posts.ID, postmeta.meta_id); when this site created its own rows with the
  * same IDs (e.g. portal-uploaded attachments), the upsert silently replaced them. Same ID but a
- * different record (guid path / post_type for posts, post_id for postmeta) is a collision.
+ * different record (guid path differs) is a collision. Postmeta is exempt: it is applied by
+ * (post_id, meta_key), not meta_id.
  * Returns a list of human-readable conflicts, empty when safe.
  */
 function synchy_find_sync_id_collisions(array $prepared_tables): array
@@ -9284,32 +9339,6 @@ function synchy_find_sync_id_collisions(array $prepared_tables): array
 					(string) $existing['post_name'],
 					(string) ($incoming['post_type'] ?? ''),
 					(string) ($incoming['post_name'] ?? '')
-				);
-			}
-		}
-	}
-
-	$meta_rows = [];
-
-	foreach ((array) ($prepared_tables[$wpdb->postmeta]['rows'] ?? []) as $row) {
-		if (is_array($row) && (int) ($row['meta_id'] ?? 0) > 0) {
-			$meta_rows[(int) $row['meta_id']] = $row;
-		}
-	}
-
-	foreach (array_chunk(array_keys($meta_rows), 250) as $chunk) {
-		$existing_rows = synchy_fetch_rows_by_ids($wpdb->postmeta, 'meta_id', $chunk, ['meta_id', 'post_id', 'meta_key']);
-
-		foreach ($existing_rows as $existing) {
-			$incoming = $meta_rows[(int) $existing['meta_id']] ?? null;
-
-			if ($incoming !== null && (int) $existing['post_id'] !== (int) ($incoming['post_id'] ?? 0)) {
-				$conflicts[] = sprintf(
-					'postmeta ID %d: belongs to post %d here (%s), Sync would move it to post %d',
-					(int) $existing['meta_id'],
-					(int) $existing['post_id'],
-					(string) $existing['meta_key'],
-					(int) ($incoming['post_id'] ?? 0)
 				);
 			}
 		}
