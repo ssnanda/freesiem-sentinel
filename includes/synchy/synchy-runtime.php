@@ -9003,7 +9003,14 @@ function synchy_build_sync_sql_from_manifest(array $manifest, string $sql_path)
 		return $result;
 	}
 
+	$expected_statements = 0;
+
+	foreach ($prepared_tables as $prepared_table) {
+		$expected_statements += (int) ceil(count((array) ($prepared_table['rows'] ?? [])) / 100);
+	}
+
 	return [
+		'expectedStatements' => $expected_statements,
 		'tables' => $prepared_tables,
 		'optionRows' => $prepared_option_rows,
 		'totalRows' => array_sum(array_map(static fn(array $table): int => count((array) ($table['rows'] ?? [])), $prepared_tables)) + count($prepared_option_rows),
@@ -9126,7 +9133,11 @@ function synchy_iterate_sync_sql_statements(string $sql_path, callable $callback
 	$statement_count = 0;
 
 	while (($line = fgets($handle)) !== false) {
-		if (!$in_single_quote && !$in_double_quote && $buffer === '') {
+		// trim(), not === '': the newline after a statement's ';' is appended to the buffer, so a
+		// strict empty check let the next table's "-- Table:" header glue onto its INSERT and the
+		// whole statement was then discarded as a comment (every table after the first was lost).
+		if (!$in_single_quote && !$in_double_quote && trim($buffer) === '') {
+			$buffer = '';
 			$trimmed = ltrim($line);
 
 			if ($trimmed === '' || strncmp($trimmed, '-- ', 3) === 0) {
@@ -9222,6 +9233,89 @@ function synchy_execute_sync_sql_file(string $sql_path)
 			)
 		);
 	}
+}
+
+/**
+ * Refuses to apply a Sync that would overwrite a *different* record on this site. Rows are
+ * written by raw ID (posts.ID, postmeta.meta_id); when this site created its own rows with the
+ * same IDs (e.g. portal-uploaded attachments), the upsert silently replaced them. Same ID but a
+ * different record (guid path / post_type for posts, post_id for postmeta) is a collision.
+ * Returns a list of human-readable conflicts, empty when safe.
+ */
+function synchy_find_sync_id_collisions(array $prepared_tables): array
+{
+	global $wpdb;
+
+	$conflicts = [];
+	$guid_key = static function (string $guid): string {
+		$path = (string) wp_parse_url($guid, PHP_URL_PATH);
+		$query = (string) wp_parse_url($guid, PHP_URL_QUERY);
+
+		return $path . ($query !== '' ? '?' . $query : '');
+	};
+
+	$post_rows = (array) ($prepared_tables[$wpdb->posts]['rows'] ?? []);
+	$incoming_posts = [];
+
+	foreach ($post_rows as $row) {
+		if (is_array($row) && (int) ($row['ID'] ?? 0) > 0) {
+			$incoming_posts[(int) $row['ID']] = $row;
+		}
+	}
+
+	foreach (array_chunk(array_keys($incoming_posts), 250) as $chunk) {
+		$existing_rows = synchy_fetch_rows_by_ids($wpdb->posts, 'ID', $chunk, ['ID', 'post_type', 'post_name', 'guid']);
+
+		foreach ($existing_rows as $existing) {
+			$incoming = $incoming_posts[(int) $existing['ID']] ?? null;
+
+			if ($incoming === null) {
+				continue;
+			}
+
+			$existing_guid = $guid_key((string) $existing['guid']);
+			$incoming_guid = $guid_key((string) ($incoming['guid'] ?? ''));
+
+			if ($existing_guid !== '' && $incoming_guid !== '' && $existing_guid !== $incoming_guid) {
+				$conflicts[] = sprintf(
+					'post ID %d: this site has %s "%s", Sync would replace it with %s "%s"',
+					(int) $existing['ID'],
+					(string) $existing['post_type'],
+					(string) $existing['post_name'],
+					(string) ($incoming['post_type'] ?? ''),
+					(string) ($incoming['post_name'] ?? '')
+				);
+			}
+		}
+	}
+
+	$meta_rows = [];
+
+	foreach ((array) ($prepared_tables[$wpdb->postmeta]['rows'] ?? []) as $row) {
+		if (is_array($row) && (int) ($row['meta_id'] ?? 0) > 0) {
+			$meta_rows[(int) $row['meta_id']] = $row;
+		}
+	}
+
+	foreach (array_chunk(array_keys($meta_rows), 250) as $chunk) {
+		$existing_rows = synchy_fetch_rows_by_ids($wpdb->postmeta, 'meta_id', $chunk, ['meta_id', 'post_id', 'meta_key']);
+
+		foreach ($existing_rows as $existing) {
+			$incoming = $meta_rows[(int) $existing['meta_id']] ?? null;
+
+			if ($incoming !== null && (int) $existing['post_id'] !== (int) ($incoming['post_id'] ?? 0)) {
+				$conflicts[] = sprintf(
+					'postmeta ID %d: belongs to post %d here (%s), Sync would move it to post %d',
+					(int) $existing['meta_id'],
+					(int) $existing['post_id'],
+					(string) $existing['meta_key'],
+					(int) ($incoming['post_id'] ?? 0)
+				);
+			}
+		}
+	}
+
+	return $conflicts;
 }
 
 function synchy_get_manifest_table_rows_by_suffix(array $manifest, string $suffix): array
@@ -10348,11 +10442,41 @@ function synchy_handle_remote_sync_request(WP_REST_Request $request)
 			return new WP_Error($prepared_sql->get_error_code(), $prepared_sql->get_error_message(), ['status' => 500]);
 		}
 
+		$id_collisions = synchy_find_sync_id_collisions((array) ($prepared_sql['tables'] ?? []));
+
+		if ($id_collisions !== []) {
+			return new WP_Error(
+				'synchy_sync_id_collision',
+				sprintf(
+					/* translators: 1: conflict count, 2: first conflicts */
+					__('Sync stopped: %1$d row(s) would overwrite different records on this site that share the same ID. Nothing was applied. %2$s', 'synchy'),
+					count($id_collisions),
+					implode('; ', array_slice($id_collisions, 0, 8))
+				),
+				['status' => 409]
+			);
+		}
+
 		synchy_prepare_sync_metadata_replacements($manifest);
 		$executed = synchy_execute_sync_sql_file($sql_path);
 
 		if (is_wp_error($executed)) {
 			return new WP_Error($executed->get_error_code(), $executed->get_error_message(), ['status' => 500]);
+		}
+
+		// Statements actually run must match what the manifest called for -- a silent shortfall
+		// here once dropped every table after the first while the receipt still said "success".
+		if ((int) $executed !== (int) ($prepared_sql['expectedStatements'] ?? $executed)) {
+			return new WP_Error(
+				'synchy_sync_sql_statement_mismatch',
+				sprintf(
+					/* translators: 1: statements run, 2: statements expected */
+					__('Synchy ran %1$d database statements but the Sync package called for %2$d. Nothing further was applied.', 'synchy'),
+					(int) $executed,
+					(int) $prepared_sql['expectedStatements']
+				),
+				['status' => 500]
+			);
 		}
 
 		$scope_part_index = (int) $request->get_header('X-Syncy-Scope-Part-Index');
