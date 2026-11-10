@@ -9387,6 +9387,75 @@ function synchy_apply_sync_postmeta_mirror(array $post_keys): int
 }
 
 /**
+ * Full Sync tail: this site's posts and pages must equal the source's. $source_ids is
+ * ['post' => [ids], 'page' => [ids]] -- every post/page the source has. Destination posts and
+ * pages not in that list are force-deleted. Guards: an empty list is refused, the front page,
+ * posts page and privacy page are kept, and a run that would remove more than half of what is
+ * here (min 10) is refused so a bad payload can never wipe the site.
+ */
+function synchy_apply_sync_post_mirror(array $source_ids)
+{
+	global $wpdb;
+
+	$keep_source = [];
+
+	foreach (['post', 'page'] as $type) {
+		$keep_source[$type] = array_flip(array_map('intval', (array) ($source_ids[$type] ?? [])));
+	}
+
+	if ($keep_source['post'] === [] && $keep_source['page'] === []) {
+		return new WP_Error('synchy_post_mirror_empty', __('Post mirror refused: the source sent no posts or pages.', 'synchy'), ['status' => 400]);
+	}
+
+	$protected = array_filter([
+		(int) get_option('page_on_front'),
+		(int) get_option('page_for_posts'),
+		(int) get_option('wp_page_for_privacy_policy'),
+	]);
+
+	$rows = $wpdb->get_results(
+		"SELECT `ID`, `post_type` FROM `{$wpdb->posts}` WHERE `post_type` IN ('post','page') AND `post_status` <> 'auto-draft'",
+		ARRAY_A
+	);
+	$extra = [];
+
+	foreach ((array) $rows as $row) {
+		$id = (int) $row['ID'];
+
+		if (!isset($keep_source[(string) $row['post_type']][$id]) && !in_array($id, $protected, true)) {
+			$extra[] = $id;
+		}
+	}
+
+	if (count($extra) > max(10, (int) ceil(count((array) $rows) / 2))) {
+		return new WP_Error(
+			'synchy_post_mirror_too_many',
+			sprintf(
+				/* translators: 1: posts to remove, 2: posts/pages on this site */
+				__('Post mirror refused: it would remove %1$d of %2$d posts and pages on this site.', 'synchy'),
+				count($extra),
+				count((array) $rows)
+			),
+			['status' => 409]
+		);
+	}
+
+	if (!function_exists('wp_delete_post')) {
+		require_once ABSPATH . 'wp-admin/includes/post.php';
+	}
+
+	$deleted = 0;
+
+	foreach ($extra as $id) {
+		if (wp_delete_post($id, true) !== false) {
+			$deleted++;
+		}
+	}
+
+	return ['deleted' => $deleted, 'ids' => $extra];
+}
+
+/**
  * Source side of the Full Sync tail: sends every synced post's complete meta-key list so the
  * destination can prune stale meta. Chunked to keep each request small.
  */
@@ -9403,6 +9472,23 @@ function synchy_send_full_sync_postmeta_mirror(array $options)
 
 	foreach ($wpdb->get_col('SELECT `ID` FROM `' . str_replace('`', '``', $wpdb->posts) . '`') as $post_id) {
 		$by_post[(int) $post_id] = $by_post[(int) $post_id] ?? [];
+	}
+
+	$source_ids = ['post' => [], 'page' => []];
+
+	foreach ((array) $wpdb->get_results("SELECT `ID`, `post_type` FROM `{$wpdb->posts}` WHERE `post_type` IN ('post','page') AND `post_status` <> 'auto-draft'", ARRAY_A) as $row) {
+		$source_ids[(string) $row['post_type']][] = (int) $row['ID'];
+	}
+
+	$result = synchy_site_sync_remote_request(
+		$options,
+		'sync/mirror',
+		'POST',
+		['timeout' => 60, 'body' => wp_json_encode(['source_post_ids' => $source_ids]), 'headers' => ['Content-Type' => 'application/json']]
+	);
+
+	if (is_wp_error($result)) {
+		return $result;
 	}
 
 	foreach (array_chunk($by_post, 400, true) as $chunk) {
@@ -13021,7 +13107,7 @@ function synchy_render_incremental_site_sync_page(array $current): void
 							?>
 						</p>
 						<p class="synchy-field-note synchy-field-note--warning">
-							<?php esc_html_e('Sync only adds/updates content that came from this site -- it never removes pages or posts the destination already had on its own. If an old page stops showing in a menu after Sync, it still exists on the destination; remove it there manually if you don\'t want it.', 'synchy'); ?>
+							<?php esc_html_e('Posts and pages on the destination mirror this site. Full Sync removes destination posts and pages that don\'t exist here; a normal Sync removes ones you deleted here.', 'synchy'); ?>
 						</p>
 
 						<div class="synchy-modal is-hidden" data-synchy-scope-help-modal aria-hidden="true">
@@ -14549,6 +14635,13 @@ add_action('rest_api_init', function (): void {
 				}
 
 				$params = $request->get_json_params();
+
+				if (is_array($params['source_post_ids'] ?? null)) {
+					$mirrored = synchy_apply_sync_post_mirror($params['source_post_ids']);
+
+					return is_wp_error($mirrored) ? $mirrored : rest_ensure_response(['success' => true, 'deletedPosts' => $mirrored['deleted']]);
+				}
+
 				$deleted = synchy_apply_sync_postmeta_mirror(is_array($params['post_keys'] ?? null) ? $params['post_keys'] : []);
 
 				return rest_ensure_response(['success' => true, 'deletedMeta' => $deleted]);
