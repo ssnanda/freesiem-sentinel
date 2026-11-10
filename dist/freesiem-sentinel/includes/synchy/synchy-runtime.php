@@ -8701,6 +8701,22 @@ function synchy_process_full_sync_job(array $job, array $options)
 		return $job;
 	}
 
+	if (in_array('db_content', (array) ($job['selected_scope_ids'] ?? []), true)) {
+		$job['phase'] = 'sending_package';
+		$job['message'] = __('Reconciling destination post meta with this site.', 'synchy');
+		synchy_update_sync_job($job);
+		$mirrored = synchy_send_full_sync_postmeta_mirror($options);
+
+		if (is_wp_error($mirrored)) {
+			$job['status'] = 'failed_partial';
+			$job['phase'] = 'error';
+			$job['resumable'] = true;
+			$job['message'] = $mirrored->get_error_message();
+
+			return synchy_update_sync_job($job);
+		}
+	}
+
 	return synchy_finalize_full_sync_success($job, $options, $started_at);
 }
 
@@ -9290,12 +9306,116 @@ function synchy_execute_sync_sql_file(string $sql_path)
 }
 
 /**
+ * Full Sync mirror semantics without data loss: a destination record that shares an ID with a
+ * different incoming record is moved to a fresh ID (with its postmeta, term links, children and
+ * comments) before the incoming row is written, instead of being overwritten.
+ */
+function synchy_relocate_colliding_destination_posts(array $prepared_tables, array $colliding_ids): array
+{
+	global $wpdb;
+
+	$moved = [];
+	$max_id = (int) $wpdb->get_var('SELECT MAX(`ID`) FROM `' . str_replace('`', '``', $wpdb->posts) . '`');
+
+	foreach ((array) ($prepared_tables[$wpdb->posts]['rows'] ?? []) as $row) {
+		if (is_array($row)) {
+			$max_id = max($max_id, (int) ($row['ID'] ?? 0));
+		}
+	}
+
+	foreach (array_keys($colliding_ids) as $old_id) {
+		$old_id = (int) $old_id;
+		$new_id = ++$max_id;
+
+		$wpdb->update($wpdb->posts, ['ID' => $new_id], ['ID' => $old_id], ['%d'], ['%d']);
+		$wpdb->update($wpdb->postmeta, ['post_id' => $new_id], ['post_id' => $old_id], ['%d'], ['%d']);
+		$wpdb->update($wpdb->term_relationships, ['object_id' => $new_id], ['object_id' => $old_id], ['%d'], ['%d']);
+		$wpdb->update($wpdb->posts, ['post_parent' => $new_id], ['post_parent' => $old_id], ['%d'], ['%d']);
+		$wpdb->update($wpdb->comments, ['comment_post_ID' => $new_id], ['comment_post_ID' => $old_id], ['%d'], ['%d']);
+		$moved[$old_id] = $new_id;
+	}
+
+	return $moved;
+}
+
+/**
+ * Full Sync tail: for every post the source sends, drop destination postmeta keys the source no
+ * longer has for it (e.g. a different record's leftover attachment meta). $post_keys is
+ * [post_id => [meta_key, ...]]. Posts that don't exist here are skipped.
+ */
+function synchy_apply_sync_postmeta_mirror(array $post_keys): int
+{
+	global $wpdb;
+
+	$deleted = 0;
+	$table = '`' . str_replace('`', '``', $wpdb->postmeta) . '`';
+
+	foreach ($post_keys as $post_id => $keys) {
+		$post_id = (int) $post_id;
+
+		if ($post_id <= 0 || !is_array($keys)) {
+			continue;
+		}
+
+		if ($keys === []) {
+			$result = $wpdb->query($wpdb->prepare('DELETE FROM ' . $table . ' WHERE `post_id` = %d', $post_id));
+		} else {
+			$keys = array_values(array_unique(array_map('strval', $keys)));
+			$placeholders = implode(', ', array_fill(0, count($keys), '%s'));
+			$result = $wpdb->query($wpdb->prepare(
+				'DELETE FROM ' . $table . ' WHERE `post_id` = %d AND `meta_key` NOT IN (' . $placeholders . ')',
+				array_merge([$post_id], $keys)
+			));
+		}
+
+		$deleted += is_int($result) ? $result : 0;
+	}
+
+	return $deleted;
+}
+
+/**
+ * Source side of the Full Sync tail: sends every synced post's complete meta-key list so the
+ * destination can prune stale meta. Chunked to keep each request small.
+ */
+function synchy_send_full_sync_postmeta_mirror(array $options)
+{
+	global $wpdb;
+
+	$rows = $wpdb->get_results('SELECT `post_id`, `meta_key` FROM `' . str_replace('`', '``', $wpdb->postmeta) . '`', ARRAY_A);
+	$by_post = [];
+
+	foreach ((array) $rows as $row) {
+		$by_post[(int) $row['post_id']][] = (string) $row['meta_key'];
+	}
+
+	foreach ($wpdb->get_col('SELECT `ID` FROM `' . str_replace('`', '``', $wpdb->posts) . '`') as $post_id) {
+		$by_post[(int) $post_id] = $by_post[(int) $post_id] ?? [];
+	}
+
+	foreach (array_chunk($by_post, 400, true) as $chunk) {
+		$result = synchy_site_sync_remote_request(
+			$options,
+			'sync/mirror',
+			'POST',
+			['timeout' => 60, 'body' => wp_json_encode(['post_keys' => $chunk]), 'headers' => ['Content-Type' => 'application/json']]
+		);
+
+		if (is_wp_error($result)) {
+			return $result;
+		}
+	}
+
+	return true;
+}
+
+/**
  * Refuses to apply a Sync that would overwrite a *different* record on this site. Rows are
  * written by raw ID (posts.ID, postmeta.meta_id); when this site created its own rows with the
  * same IDs (e.g. portal-uploaded attachments), the upsert silently replaced them. Same ID but a
  * different record (guid path differs) is a collision. Postmeta is exempt: it is applied by
  * (post_id, meta_key), not meta_id.
- * Returns a list of human-readable conflicts, empty when safe.
+ * Returns [existing post ID => human-readable conflict], empty when safe.
  */
 function synchy_find_sync_id_collisions(array $prepared_tables): array
 {
@@ -9332,7 +9452,7 @@ function synchy_find_sync_id_collisions(array $prepared_tables): array
 			$incoming_guid = $guid_key((string) ($incoming['guid'] ?? ''));
 
 			if ($existing_guid !== '' && $incoming_guid !== '' && $existing_guid !== $incoming_guid) {
-				$conflicts[] = sprintf(
+				$conflicts[(int) $existing['ID']] = sprintf(
 					'post ID %d: this site has %s "%s", Sync would replace it with %s "%s"',
 					(int) $existing['ID'],
 					(string) $existing['post_type'],
@@ -10474,16 +10594,22 @@ function synchy_handle_remote_sync_request(WP_REST_Request $request)
 		$id_collisions = synchy_find_sync_id_collisions((array) ($prepared_sql['tables'] ?? []));
 
 		if ($id_collisions !== []) {
-			return new WP_Error(
-				'synchy_sync_id_collision',
-				sprintf(
-					/* translators: 1: conflict count, 2: first conflicts */
-					__('Sync stopped: %1$d row(s) would overwrite different records on this site that share the same ID. Nothing was applied. %2$s', 'synchy'),
-					count($id_collisions),
-					implode('; ', array_slice($id_collisions, 0, 8))
-				),
-				['status' => 409]
-			);
+			if ((string) ($manifest['mode'] ?? '') === 'baseline') {
+				// Full/baseline Sync is a mirror: keep the destination's own record by moving it
+				// to a new ID rather than overwriting it or refusing.
+				synchy_relocate_colliding_destination_posts((array) ($prepared_sql['tables'] ?? []), $id_collisions);
+			} else {
+				return new WP_Error(
+					'synchy_sync_id_collision',
+					sprintf(
+						/* translators: 1: conflict count, 2: first conflicts */
+						__('Sync stopped: %1$d row(s) would overwrite different records on this site that share the same ID. Nothing was applied. Run a Full Sync to move them aside automatically. %2$s', 'synchy'),
+						count($id_collisions),
+						implode('; ', array_slice($id_collisions, 0, 8))
+					),
+					['status' => 409]
+				);
+			}
 		}
 
 		synchy_prepare_sync_metadata_replacements($manifest);
@@ -14337,6 +14463,25 @@ add_action('rest_api_init', function (): void {
 			['status' => rest_authorization_required_code()]
 		);
 	};
+
+	register_rest_route(
+		'synchy/v1',
+		'/sync/mirror',
+		[
+			'methods' => 'POST',
+			'callback' => static function (WP_REST_Request $request) {
+				if (synchy_is_sync_disabled()) {
+					return new WP_Error('synchy_sync_disabled', __('Incoming Sync is disabled on this site.', 'synchy'), ['status' => 403]);
+				}
+
+				$params = $request->get_json_params();
+				$deleted = synchy_apply_sync_postmeta_mirror(is_array($params['post_keys'] ?? null) ? $params['post_keys'] : []);
+
+				return rest_ensure_response(['success' => true, 'deletedMeta' => $deleted]);
+			},
+			'permission_callback' => $sync_permission,
+		]
+	);
 
 	register_rest_route(
 		'syncy/v1',
