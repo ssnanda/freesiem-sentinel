@@ -10191,17 +10191,54 @@ function synchy_extract_sync_package_to_content(string $zip_path)
 		return $entries;
 	}
 
-	$extracted = $zip->extractTo(WP_CONTENT_DIR, $entries);
+	// The manifest/SQL go to a folder unique to this request. They used to share one fixed
+	// wp-content/.synchy-sync/ folder that every request also deleted when it finished, so two
+	// overlapping requests (e.g. a source retry while the destination was still finishing the
+	// previous batch) could delete or overwrite each other's manifest mid-read -- the intermittent
+	// "could not extract" / "could not decode the uploaded Sync manifest" errors.
+	$meta_root = wp_normalize_path(WP_CONTENT_DIR . '/.synchy-sync-' . wp_generate_password(12, false, false));
+	$content_entries = [];
+	$meta_entries = [];
+
+	foreach ($entries as $entry) {
+		if (str_starts_with((string) $entry, '.synchy-sync/')) {
+			$meta_entries[] = $entry;
+		} else {
+			$content_entries[] = $entry;
+		}
+	}
+
+	if (!wp_mkdir_p($meta_root)) {
+		$zip->close();
+		return new WP_Error('synchy_sync_extract_failed', __('Synchy could not create a working folder in wp-content on the destination site.', 'synchy'));
+	}
+
+	$extracted = $zip->extractTo($meta_root, $meta_entries);
+
+	if ($extracted && $content_entries !== []) {
+		$extracted = $zip->extractTo(WP_CONTENT_DIR, $content_entries);
+	}
+
+	$status = $extracted ? '' : (string) $zip->getStatusString();
 	$zip->close();
 
 	if (!$extracted) {
-		return new WP_Error('synchy_sync_extract_failed', __('Synchy could not extract the Sync package into wp-content.', 'synchy'));
+		synchy_rrmdir($meta_root);
+
+		return new WP_Error(
+			'synchy_sync_extract_failed',
+			sprintf(
+				/* translators: %s: ZipArchive status */
+				__('Synchy could not extract the Sync package into wp-content. %s', 'synchy'),
+				$status
+			)
+		);
 	}
 
 	return [
-		'manifest_path' => wp_normalize_path(WP_CONTENT_DIR . '/.synchy-sync/db/manifest.json'),
-		'sql_path' => wp_normalize_path(WP_CONTENT_DIR . '/.synchy-sync/db/delta.sql'),
-		'meta_root' => wp_normalize_path(WP_CONTENT_DIR . '/.synchy-sync'),
+		'manifest_path' => wp_normalize_path($meta_root . '/.synchy-sync/db/manifest.json'),
+		'sql_path' => wp_normalize_path($meta_root . '/.synchy-sync/db/delta.sql'),
+		'meta_root' => $meta_root,
 	];
 }
 
