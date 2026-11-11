@@ -8705,7 +8705,7 @@ function synchy_process_full_sync_job(array $job, array $options)
 		$job['phase'] = 'sending_package';
 		$job['message'] = __('Reconciling destination post meta with this site.', 'synchy');
 		synchy_update_sync_job($job);
-		$mirrored = synchy_send_full_sync_postmeta_mirror($options);
+		$mirrored = synchy_send_full_sync_postmeta_mirror($options, in_array('db_taxonomies', (array) ($job['selected_scope_ids'] ?? []), true));
 
 		if (is_wp_error($mirrored)) {
 			$job['status'] = 'failed_partial';
@@ -9456,10 +9456,53 @@ function synchy_apply_sync_post_mirror(array $source_ids)
 }
 
 /**
+ * Full Sync tail, term links: for every post the source sends, drop destination term
+ * relationships the source doesn't have for it. $map is [object_id => [term_taxonomy_id, ...]].
+ * Without this a post (or nav menu item) kept stale links from earlier overwrites, e.g. a menu
+ * item also related to an unrelated taxonomy term. Term counts are recalculated afterwards.
+ */
+function synchy_apply_sync_term_relationship_mirror(array $map): int
+{
+	global $wpdb;
+
+	$deleted = 0;
+	$affected = [];
+	$table = '`' . str_replace('`', '``', $wpdb->term_relationships) . '`';
+
+	foreach ($map as $object_id => $term_taxonomy_ids) {
+		$object_id = (int) $object_id;
+
+		if ($object_id <= 0 || !is_array($term_taxonomy_ids) || get_post($object_id) === null) {
+			continue;
+		}
+
+		$keep = array_values(array_unique(array_map('intval', $term_taxonomy_ids)));
+		$sql = 'SELECT `term_taxonomy_id` FROM ' . $table . ' WHERE `object_id` = %d';
+		$existing = array_map('intval', (array) $wpdb->get_col($wpdb->prepare($sql, $object_id)));
+
+		foreach (array_diff($existing, $keep) as $term_taxonomy_id) {
+			$wpdb->delete($wpdb->term_relationships, ['object_id' => $object_id, 'term_taxonomy_id' => $term_taxonomy_id], ['%d', '%d']);
+			$affected[$term_taxonomy_id] = true;
+			$deleted++;
+		}
+	}
+
+	foreach (array_keys($affected) as $term_taxonomy_id) {
+		$taxonomy = (string) $wpdb->get_var($wpdb->prepare("SELECT `taxonomy` FROM `{$wpdb->term_taxonomy}` WHERE `term_taxonomy_id` = %d", $term_taxonomy_id));
+
+		if ($taxonomy !== '') {
+			wp_update_term_count_now([(int) $term_taxonomy_id], $taxonomy);
+		}
+	}
+
+	return $deleted;
+}
+
+/**
  * Source side of the Full Sync tail: sends every synced post's complete meta-key list so the
  * destination can prune stale meta. Chunked to keep each request small.
  */
-function synchy_send_full_sync_postmeta_mirror(array $options)
+function synchy_send_full_sync_postmeta_mirror(array $options, bool $with_term_links = false)
 {
 	global $wpdb;
 
@@ -9491,12 +9534,27 @@ function synchy_send_full_sync_postmeta_mirror(array $options)
 		return $result;
 	}
 
+	$by_object = [];
+
+	if ($with_term_links) {
+		foreach ((array) $wpdb->get_results('SELECT `object_id`, `term_taxonomy_id` FROM `' . str_replace('`', '``', $wpdb->term_relationships) . '`', ARRAY_A) as $row) {
+			$by_object[(int) $row['object_id']][] = (int) $row['term_taxonomy_id'];
+		}
+	}
+
 	foreach (array_chunk($by_post, 400, true) as $chunk) {
+		$payload = ['post_keys' => $chunk];
+
+		if ($with_term_links) {
+			$payload['term_links'] = array_intersect_key($by_object, $chunk) + array_fill_keys(array_keys($chunk), []);
+			$payload['term_links'] = array_intersect_key($payload['term_links'], $chunk);
+		}
+
 		$result = synchy_site_sync_remote_request(
 			$options,
 			'sync/mirror',
 			'POST',
-			['timeout' => 60, 'body' => wp_json_encode(['post_keys' => $chunk]), 'headers' => ['Content-Type' => 'application/json']]
+			['timeout' => 60, 'body' => wp_json_encode($payload), 'headers' => ['Content-Type' => 'application/json']]
 		);
 
 		if (is_wp_error($result)) {
@@ -14680,8 +14738,9 @@ add_action('rest_api_init', function (): void {
 				}
 
 				$deleted = synchy_apply_sync_postmeta_mirror(is_array($params['post_keys'] ?? null) ? $params['post_keys'] : []);
+				$deleted_links = is_array($params['term_links'] ?? null) ? synchy_apply_sync_term_relationship_mirror($params['term_links']) : 0;
 
-				return rest_ensure_response(['success' => true, 'deletedMeta' => $deleted]);
+				return rest_ensure_response(['success' => true, 'deletedMeta' => $deleted, 'deletedTermLinks' => $deleted_links]);
 			},
 			'permission_callback' => $sync_permission,
 		]
