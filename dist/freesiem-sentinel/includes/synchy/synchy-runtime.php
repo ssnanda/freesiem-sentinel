@@ -9306,51 +9306,6 @@ function synchy_execute_sync_sql_file(string $sql_path)
 }
 
 /**
- * Full Sync mirror semantics without data loss: a destination record that shares an ID with a
- * different incoming record is moved to a fresh ID (with its postmeta, term links, children and
- * comments) before the incoming row is written, instead of being overwritten.
- */
-function synchy_relocate_colliding_destination_posts(array $prepared_tables, array $colliding_ids): array
-{
-	global $wpdb;
-
-	$moved = [];
-	$max_id = (int) $wpdb->get_var('SELECT MAX(`ID`) FROM `' . str_replace('`', '``', $wpdb->posts) . '`');
-
-	foreach ((array) ($prepared_tables[$wpdb->posts]['rows'] ?? []) as $row) {
-		if (is_array($row)) {
-			$max_id = max($max_id, (int) ($row['ID'] ?? 0));
-		}
-	}
-
-	foreach (array_keys($colliding_ids) as $old_id) {
-		$old_id = (int) $old_id;
-		$new_id = ++$max_id;
-
-		$wpdb->update($wpdb->posts, ['ID' => $new_id], ['ID' => $old_id], ['%d'], ['%d']);
-		$wpdb->update($wpdb->postmeta, ['post_id' => $new_id], ['post_id' => $old_id], ['%d'], ['%d']);
-		$wpdb->update($wpdb->term_relationships, ['object_id' => $new_id], ['object_id' => $old_id], ['%d'], ['%d']);
-		$wpdb->update($wpdb->posts, ['post_parent' => $new_id], ['post_parent' => $old_id], ['%d'], ['%d']);
-		$wpdb->update($wpdb->comments, ['comment_post_ID' => $new_id], ['comment_post_ID' => $old_id], ['%d'], ['%d']);
-
-		// AJ Core keeps its own tables keyed by attachment ID (customer files offloaded to S3,
-		// portal file records). Those must follow the moved record, or AJ Core would rewrite
-		// whatever now owns the old ID (e.g. a blog image) to the customer's S3 object.
-		foreach (['aj_storage_objects' => 'attachment_id', 'aj_portal_files' => 'attachment_id', 'aj_portal_mail_items' => 'scan_attachment_id'] as $suffix => $column) {
-			$aj_table = $wpdb->prefix . $suffix;
-
-			if ($wpdb->get_var($wpdb->prepare('SHOW TABLES LIKE %s', $wpdb->esc_like($aj_table))) === $aj_table) {
-				$wpdb->update($aj_table, [$column => $new_id], [$column => $old_id], ['%d'], ['%d']);
-			}
-		}
-
-		$moved[$old_id] = $new_id;
-	}
-
-	return $moved;
-}
-
-/**
  * Full Sync tail: for every post the source sends, drop destination postmeta keys the source no
  * longer has for it (e.g. a different record's leftover attachment meta). $post_keys is
  * [post_id => [meta_key, ...]]. Posts that don't exist here are skipped.
@@ -9365,7 +9320,8 @@ function synchy_apply_sync_postmeta_mirror(array $post_keys): int
 	foreach ($post_keys as $post_id => $keys) {
 		$post_id = (int) $post_id;
 
-		if ($post_id <= 0 || !is_array($keys)) {
+		// Attachments here are frequently live-created customer files, so their meta is never pruned.
+		if ($post_id <= 0 || !is_array($keys) || get_post_type($post_id) === 'attachment') {
 			continue;
 		}
 
@@ -9453,10 +9409,26 @@ function synchy_apply_sync_post_mirror(array $source_ids)
 	}
 
 	$deleted = 0;
+	$affected_terms = [];
 
 	foreach ($extra as $id) {
+		// wp_delete_post() only clears links for taxonomies registered to the post's type, so
+		// links to any other taxonomy (e.g. a nav menu term) would be left pointing at nothing.
+		foreach ((array) $wpdb->get_col($wpdb->prepare("SELECT `term_taxonomy_id` FROM `{$wpdb->term_relationships}` WHERE `object_id` = %d", $id)) as $term_taxonomy_id) {
+			$affected_terms[(int) $term_taxonomy_id] = true;
+		}
+
 		if (wp_delete_post($id, true) !== false) {
 			$deleted++;
+			$wpdb->delete($wpdb->term_relationships, ['object_id' => $id], ['%d']);
+		}
+	}
+
+	foreach (array_keys($affected_terms) as $term_taxonomy_id) {
+		$taxonomy = (string) $wpdb->get_var($wpdb->prepare("SELECT `taxonomy` FROM `{$wpdb->term_taxonomy}` WHERE `term_taxonomy_id` = %d", $term_taxonomy_id));
+
+		if ($taxonomy !== '') {
+			wp_update_term_count_now([$term_taxonomy_id], $taxonomy);
 		}
 	}
 
@@ -9491,7 +9463,7 @@ function synchy_apply_sync_term_relationship_mirror(array $map): int
 	foreach ($map as $object_id => $term_taxonomy_ids) {
 		$object_id = (int) $object_id;
 
-		if ($object_id <= 0 || !is_array($term_taxonomy_ids) || get_post($object_id) === null) {
+		if ($object_id <= 0 || !is_array($term_taxonomy_ids) || get_post($object_id) === null || get_post_type($object_id) === 'attachment') {
 			continue;
 		}
 
@@ -9582,121 +9554,6 @@ function synchy_send_full_sync_postmeta_mirror(array $options, bool $with_term_l
 	}
 
 	return true;
-}
-
-/**
- * AJ Core's storage table maps an attachment ID to a customer file on S3, and AJ Core then
- * rewrites that attachment's URL to the S3 object. When Sync writes a post under an ID that still
- * has such a mapping for a *different* file (another type, or not an attachment at all), the
- * mapping would hijack the incoming post's URL -- e.g. a blog hero image served as a customer's
- * private PDF. Those mappings are parked on an unused ID (kept, not deleted) so the customer
- * file record can be re-attached later.
- */
-function synchy_park_mismatched_storage_mappings(array $prepared_tables): int
-{
-	global $wpdb;
-
-	$table = $wpdb->prefix . 'aj_storage_objects';
-
-	if ($wpdb->get_var($wpdb->prepare('SHOW TABLES LIKE %s', $wpdb->esc_like($table))) !== $table) {
-		return 0;
-	}
-
-	$incoming = [];
-
-	foreach ((array) ($prepared_tables[$wpdb->posts]['rows'] ?? []) as $row) {
-		if (is_array($row) && (int) ($row['ID'] ?? 0) > 0) {
-			$incoming[(int) $row['ID']] = $row;
-		}
-	}
-
-	$parked = 0;
-
-	foreach (array_chunk(array_keys($incoming), 250) as $chunk) {
-		$placeholders = implode(', ', array_fill(0, count($chunk), '%d'));
-		$mappings = $wpdb->get_results(
-			$wpdb->prepare('SELECT `id`, `attachment_id`, `content_type` FROM `' . str_replace('`', '``', $table) . '` WHERE `attachment_id` IN (' . $placeholders . ')', $chunk),
-			ARRAY_A
-		);
-
-		foreach ((array) $mappings as $mapping) {
-			$post = $incoming[(int) $mapping['attachment_id']] ?? null;
-
-			if ($post === null) {
-				continue;
-			}
-
-			$is_attachment = (string) ($post['post_type'] ?? '') === 'attachment';
-			$same_type = strtolower((string) ($post['post_mime_type'] ?? '')) === strtolower((string) $mapping['content_type']);
-
-			if ($is_attachment && $same_type) {
-				continue;
-			}
-
-			$wpdb->update($table, ['attachment_id' => 1000000 + (int) $mapping['id']], ['id' => (int) $mapping['id']], ['%d'], ['%d']);
-			$parked++;
-		}
-	}
-
-	return $parked;
-}
-
-/**
- * Refuses to apply a Sync that would overwrite a *different* record on this site. Rows are
- * written by raw ID (posts.ID, postmeta.meta_id); when this site created its own rows with the
- * same IDs (e.g. portal-uploaded attachments), the upsert silently replaced them. Same ID but a
- * different record (guid path differs) is a collision. Postmeta is exempt: it is applied by
- * (post_id, meta_key), not meta_id.
- * Returns [existing post ID => human-readable conflict], empty when safe.
- */
-function synchy_find_sync_id_collisions(array $prepared_tables): array
-{
-	global $wpdb;
-
-	$conflicts = [];
-	$guid_key = static function (string $guid): string {
-		$path = (string) wp_parse_url($guid, PHP_URL_PATH);
-		$query = (string) wp_parse_url($guid, PHP_URL_QUERY);
-
-		return $path . ($query !== '' ? '?' . $query : '');
-	};
-
-	$post_rows = (array) ($prepared_tables[$wpdb->posts]['rows'] ?? []);
-	$incoming_posts = [];
-
-	foreach ($post_rows as $row) {
-		if (is_array($row) && (int) ($row['ID'] ?? 0) > 0) {
-			$incoming_posts[(int) $row['ID']] = $row;
-		}
-	}
-
-	foreach (array_chunk(array_keys($incoming_posts), 250) as $chunk) {
-		$existing_rows = synchy_fetch_rows_by_ids($wpdb->posts, 'ID', $chunk, ['ID', 'post_type', 'post_name', 'guid']);
-
-		foreach ($existing_rows as $existing) {
-			$incoming = $incoming_posts[(int) $existing['ID']] ?? null;
-
-			if ($incoming === null) {
-				continue;
-			}
-
-			$existing_guid = $guid_key((string) $existing['guid']);
-			$incoming_guid = $guid_key((string) ($incoming['guid'] ?? ''));
-
-			if ($existing_guid !== '' && $incoming_guid !== '' && $existing_guid !== $incoming_guid) {
-				$conflicts[(int) $existing['ID']] = sprintf(
-					'post ID %d: this site has %s "%s", Sync would replace it with %s "%s"',
-					(int) $existing['ID'],
-					(string) $existing['post_type'],
-					(string) $existing['post_name'],
-					(string) ($incoming['post_type'] ?? ''),
-					(string) ($incoming['post_name'] ?? '')
-				);
-			}
-		}
-	}
-
-	return $conflicts;
 }
 
 function synchy_get_manifest_table_rows_by_suffix(array $manifest, string $suffix): array
@@ -10860,35 +10717,13 @@ function synchy_handle_remote_sync_request(WP_REST_Request $request)
 			return new WP_Error($prepared_sql->get_error_code(), $prepared_sql->get_error_message(), ['status' => 500]);
 		}
 
-		$id_collisions = synchy_find_sync_id_collisions((array) ($prepared_sql['tables'] ?? []));
-
-		if ($id_collisions !== []) {
-			if ((string) ($manifest['mode'] ?? '') === 'baseline') {
-				// Full/baseline Sync is a mirror: keep the destination's own record by moving it
-				// to a new ID rather than overwriting it or refusing.
-				synchy_relocate_colliding_destination_posts((array) ($prepared_sql['tables'] ?? []), $id_collisions);
-			} else {
-				return new WP_Error(
-					'synchy_sync_id_collision',
-					sprintf(
-						/* translators: 1: conflict count, 2: first conflicts */
-						__('Sync stopped: %1$d row(s) would overwrite different records on this site that share the same ID. Nothing was applied. Run a Full Sync to move them aside automatically. %2$s', 'synchy'),
-						count($id_collisions),
-						implode('; ', array_slice($id_collisions, 0, 8))
-					),
-					['status' => 409]
-				);
-			}
-		}
-
+		// Rows are written by ID and simply overwrite whatever this site has at that ID.
 		synchy_prepare_sync_metadata_replacements($manifest);
 		$executed = synchy_execute_sync_sql_file($sql_path);
 
 		if (is_wp_error($executed)) {
 			return new WP_Error($executed->get_error_code(), $executed->get_error_message(), ['status' => 500]);
 		}
-
-		synchy_park_mismatched_storage_mappings((array) ($prepared_sql['tables'] ?? []));
 
 		// Statements actually run must match what the manifest called for -- a silent shortfall
 		// here once dropped every table after the first while the receipt still said "success".
