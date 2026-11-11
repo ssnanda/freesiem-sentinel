@@ -1800,6 +1800,14 @@
 		if (filesCount === 0 && dbRows === 0) {
 			summaryItems.push("Nothing changed since the last successful Sync");
 		}
+		const skippedCustomerFiles = Number(latestPreview?.customerFilesSkipped || 0);
+		if (skippedCustomerFiles > 0) {
+			const ids = Array.isArray(latestPreview?.customerFilesSkippedIds) ? latestPreview.customerFilesSkippedIds.slice(0, 10).join(", ") : "";
+			summaryItems.push(`<strong>${skippedCustomerFiles.toLocaleString()}</strong> customer file record${skippedCustomerFiles === 1 ? "" : "s"} on this site skipped (the live site owns them)${ids ? ` — IDs ${escapeHtml(ids)}${skippedCustomerFiles > 10 ? ", …" : ""}` : ""}`);
+		}
+		(Array.isArray(latestPreview?.liveOwnedUploadDirs) ? latestPreview.liveOwnedUploadDirs : []).forEach((entry) => {
+			summaryItems.push(`Upload folder skipped (live-owned): <strong>${escapeHtml(String(entry.dir || ""))}</strong>${entry.exists ? ` — ${Number(entry.files || 0).toLocaleString()} file${Number(entry.files || 0) === 1 ? "" : "s"} not sent` : " (not present here)"}`);
+		});
 
 		const introMessage = isFullSync
 			? (config.strings.confirmFullSync || "Run a full Sync for the selected scopes and send all tracked files and rows to the destination site now?")

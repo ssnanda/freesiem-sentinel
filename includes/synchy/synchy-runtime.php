@@ -827,7 +827,45 @@ function synchy_get_site_sync_profile_option_bases(): array
 	];
 }
 
+/**
+ * Option name prefixes owned by AJ Core / AJ Forms / AJ Ops runtime: credentials, secrets, cursors,
+ * drafts and per-site state. Default-deny: an option with one of these prefixes never syncs unless it
+ * is explicitly listed as syncable. (Before this, only a hand-kept list of 13 names was protected, so
+ * ~17 more -- JWT secret, phone-API client secrets, encryption key, e-sign drafts, Gmail/Zoho intake
+ * state -- were overwritten by whatever the source held.) AJ Core can extend either list through the
+ * filters below instead of Synchy keeping a parallel list.
+ */
+function synchy_get_ajcore_owned_option_prefixes(): array
+{
+	return array_values(array_unique(array_map('strval', (array) apply_filters('synchy_ajcore_owned_option_prefixes', ['ajcore_', 'ajforms_', 'ajops_']))));
+}
+
+function synchy_get_ajcore_syncable_option_names(): array
+{
+	return array_values(array_unique(array_map('strval', (array) apply_filters('synchy_ajcore_syncable_option_names', []))));
+}
+
+function synchy_is_ajcore_owned_option(string $option_name): bool
+{
+	if (in_array($option_name, synchy_get_ajcore_syncable_option_names(), true)) {
+		return false;
+	}
+
+	foreach (synchy_get_ajcore_owned_option_prefixes() as $prefix) {
+		if ($prefix !== '' && str_starts_with($option_name, $prefix)) {
+			return true;
+		}
+	}
+
+	return false;
+}
+
 function synchy_get_ajcore_protected_option_names(): array
+{
+	return array_values(array_unique(array_merge(synchy_get_ajcore_static_protected_option_names(), array_map('strval', (array) apply_filters('synchy_ajcore_protected_option_names', [])))));
+}
+
+function synchy_get_ajcore_static_protected_option_names(): array
 {
 	// AJ Core rebuilds portal and Stripe cache from live Stripe and the shared DB.
 	// Sentinel deploys code only; live site identity, shared DB settings, mappings,
@@ -846,10 +884,17 @@ function synchy_get_ajcore_protected_option_names(): array
 		'ajforms_asana_reference_cache',
 		'ajforms_developer_updates_enabled',
 		'ajforms_last_portal_db_error',
+		// Storage endpoint, credentials and bucket differ per site (local: ncllc.ddev.site, live: ncllcagents).
+		'ajcore_storage_settings',
 	];
 }
 
 function synchy_get_ajcore_protected_table_suffixes(): array
+{
+	return array_values(array_unique(array_merge(synchy_get_ajcore_static_protected_table_suffixes(), array_map('strval', (array) apply_filters('synchy_ajcore_protected_table_suffixes', [])))));
+}
+
+function synchy_get_ajcore_static_protected_table_suffixes(): array
 {
 	return [
 		'aj_portal_stripe_customers',
@@ -873,6 +918,8 @@ function synchy_get_ajcore_protected_table_suffixes(): array
 		'aj_auth_user_mappings',
 		'aj_portal_files',
 		'aj_portal_file_users',
+		'aj_portal_file_tags',
+		'aj_storage_objects',
 		'aj_forms_leads',
 		// Not AJCore, but caught by this same filter (it's the only gate the Forms scope's table
 		// list runs through): WP Formy and Fluent Forms submission/log/analytics data. The Forms
@@ -2848,11 +2895,75 @@ function synchy_get_sync_file_targets(array $selected_scope_ids = []): array
 	return $targets;
 }
 
+/**
+ * Upload sub-folders the destination owns (e.g. a plugin's own database backups, signed documents).
+ * AJ Core declares them through this filter; Synchy never sends files into them and never deletes
+ * from them. Empty until a plugin declares its folders -- Synchy keeps no list of other plugins' paths.
+ */
+function synchy_get_live_owned_upload_dirs(): array
+{
+	$dirs = [];
+
+	foreach ((array) apply_filters('synchy_live_owned_upload_dirs', []) as $dir) {
+		$dir = trim(wp_normalize_path((string) $dir), '/');
+
+		if ($dir !== '' && !str_contains($dir, '..')) {
+			$dirs[] = $dir;
+		}
+	}
+
+	return array_values(array_unique($dirs));
+}
+
+/** Dry-run listing: each declared live-owned upload folder, whether it exists here and how many files it holds (capped). */
+function synchy_describe_live_owned_upload_dirs(): array
+{
+	$uploads = wp_get_upload_dir();
+	$base = trailingslashit((string) ($uploads['basedir'] ?? WP_CONTENT_DIR . '/uploads'));
+	$out = [];
+
+	foreach (synchy_get_live_owned_upload_dirs() as $dir) {
+		$path = $base . $dir;
+		$count = 0;
+
+		if (is_dir($path)) {
+			$iterator = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($path, FilesystemIterator::SKIP_DOTS));
+
+			foreach ($iterator as $file) {
+				if ($file->isFile() && ++$count >= 5000) {
+					break;
+				}
+			}
+		}
+
+		$out[] = ['dir' => $dir, 'exists' => is_dir($path), 'files' => $count];
+	}
+
+	return $out;
+}
+
+function synchy_is_live_owned_upload_path(string $archive_path, array $owned_dirs): bool
+{
+	$archive_path = ltrim(wp_normalize_path($archive_path), '/');
+
+	foreach ($owned_dirs as $dir) {
+		if (str_starts_with($archive_path, 'uploads/' . trim((string) $dir, '/') . '/')) {
+			return true;
+		}
+	}
+
+	return false;
+}
+
 function synchy_is_sync_file_excluded(string $archive_path): bool
 {
 	$archive_path = ltrim(wp_normalize_path($archive_path), '/');
 
 	if ($archive_path === '') {
+		return true;
+	}
+
+	if (synchy_is_live_owned_upload_path($archive_path, synchy_get_live_owned_upload_dirs())) {
 		return true;
 	}
 
@@ -3087,7 +3198,7 @@ function synchy_should_sync_option_name(string $option_name): bool
 		return false;
 	}
 
-	if (in_array($option_name, synchy_get_ajcore_protected_option_names(), true)) {
+	if (in_array($option_name, synchy_get_ajcore_protected_option_names(), true) || synchy_is_ajcore_owned_option($option_name)) {
 		return false;
 	}
 
@@ -3552,25 +3663,326 @@ function synchy_merge_forced_nav_menu_sync_rows(string $table, array $all_rows, 
 	return array_values($merged);
 }
 
+/**
+ * Rule A: a customer / S3 file is an attachment whose ID appears in aj_portal_files.attachment_id
+ * or aj_storage_objects.attachment_id on THIS site. Never "ID >= 1e9": after a site's first
+ * customer upload its AUTO_INCREMENT jumps into that range, so ordinary blog posts and images get
+ * high IDs too and must keep syncing. Returns the customer-file IDs (all of them, or only those
+ * among $only_ids).
+ */
+function synchy_get_customer_file_ids(array $only_ids = []): array
+{
+	global $wpdb;
+
+	$found = [];
+	$only = array_map('intval', $only_ids);
+	$collect = static function (array $ids) use (&$found, $only): void {
+		foreach ($ids as $id) {
+			$id = (int) $id;
+
+			if ($id > 0 && ($only === [] || in_array($id, $only, true))) {
+				$found[$id] = true;
+			}
+		}
+	};
+
+	// 1. Table membership (works with or without AJ Core loaded on this request).
+	foreach (['aj_portal_files', 'aj_storage_objects'] as $suffix) {
+		$table = $wpdb->prefix . $suffix;
+
+		if ($wpdb->get_var($wpdb->prepare('SHOW TABLES LIKE %s', $wpdb->esc_like($table))) !== $table) {
+			continue;
+		}
+
+		if ($only === []) {
+			$collect((array) $wpdb->get_col('SELECT DISTINCT `attachment_id` FROM `' . str_replace('`', '``', $table) . '` WHERE `attachment_id` > 0'));
+		} else {
+			foreach (array_chunk($only, 500) as $chunk) {
+				$placeholders = implode(', ', array_fill(0, count($chunk), '%d'));
+				$collect((array) $wpdb->get_col($wpdb->prepare('SELECT DISTINCT `attachment_id` FROM `' . str_replace('`', '``', $table) . '` WHERE `attachment_id` IN (' . $placeholders . ')', $chunk)));
+			}
+		}
+	}
+
+	// 2. AJ Core's explicit marker: postmeta written when the customer attachment is created.
+	foreach (synchy_get_protected_postmeta_keys() as $meta_key) {
+		$collect((array) $wpdb->get_col($wpdb->prepare("SELECT `post_id` FROM `{$wpdb->postmeta}` WHERE `meta_key` = %s", $meta_key)));
+	}
+
+	// 3. AJ Core's own answer and anything else that declares customer files through its filter.
+	$known = array_keys($found);
+
+	if (class_exists('AJCore_Customer_Files') && method_exists('AJCore_Customer_Files', 'ids')) {
+		$collect((array) AJCore_Customer_Files::ids());
+	}
+
+	$collect((array) apply_filters('ajcore_customer_file_ids', $known));
+
+	return array_keys($found);
+}
+
+/**
+ * Post meta keys that mark live-owned records. They are never sent, never pruned and never written
+ * by a Sync: the flag must only ever be set by the site that owns the file.
+ */
+function synchy_get_protected_postmeta_keys(): array
+{
+	return array_values(array_unique(array_map('strval', (array) apply_filters('synchy_protected_postmeta_keys', ['_ajcore_customer_file']))));
+}
+
+/**
+ * Pure rule check (E1, E3, E4, E5), free of database calls so it can be tested with plain arrays.
+ * Returns human-readable violations; empty means the push may proceed.
+ *  - $incoming_posts: [ID => ['post_type', 'post_mime_type', 'guid_key']]
+ *  - $incoming_child_ids: post IDs that incoming postmeta / term-link rows would be written to
+ *  - $live_customer_ids: this site's customer-file IDs (table membership, never an ID range)
+ *  - $live_attachments: [ID => ['mime', 'guid_key']] of this site's attachments at those IDs
+ *  - $manifest_tables: [table => row count] the package says it will write
+ *  - $protected_option_names: option names in the package that this site owns (E3)
+ *  - $incoming_terms / $live_terms: [term_id => ['name', 'slug']]
+ *  - $incoming_meta_keys / $protected_meta_keys: post meta keys in the package vs keys only the owner may set
+ *
+ * E4 identity: an attachment that is the SAME record (same upload path/guid) may change type -- a
+ * file replaced by a PNG-to-JPEG re-upload keeps its ID, guid and place in content, and its new
+ * metadata arrives with the post and postmeta rows. A DIFFERENT record (different guid) landing on
+ * an ID that holds an attachment of another type is a collision and stops the push.
+ */
+function synchy_evaluate_customer_file_rules(array $incoming_posts, array $incoming_child_ids, array $live_customer_ids, array $live_attachments, array $manifest_tables, array $protected_option_names, array $incoming_terms = [], array $live_terms = [], array $incoming_meta_keys = [], array $protected_meta_keys = []): array
+{
+	$violations = [];
+	$customer = array_flip(array_map('intval', $live_customer_ids));
+
+	foreach ($incoming_posts as $id => $row) {
+		$id = (int) $id;
+
+		if (isset($customer[$id])) {
+			$violations[] = sprintf('row for post ID %d would be written over this site\'s customer file (rule E1)', $id);
+			continue;
+		}
+
+		if (!isset($live_attachments[$id]) || (string) ($row['post_type'] ?? '') !== 'attachment') {
+			continue;
+		}
+
+		$live = $live_attachments[$id];
+		$same_record = (string) ($live['guid_key'] ?? '') !== '' && (string) ($live['guid_key'] ?? '') === (string) ($row['guid_key'] ?? '');
+		$mime_changed = strtolower((string) ($live['mime'] ?? '')) !== strtolower((string) ($row['post_mime_type'] ?? ''));
+
+		if ($mime_changed && !$same_record) {
+			$violations[] = sprintf('attachment ID %d is a different %s file here; the package carries a different record of type %s (rule E4)', $id, (string) ($live['mime'] ?? ''), (string) ($row['post_mime_type'] ?? ''));
+		}
+	}
+
+	foreach (array_unique(array_map('intval', $incoming_child_ids)) as $id) {
+		if (isset($customer[$id]) && !isset($incoming_posts[$id])) {
+			$violations[] = sprintf('post meta or term links would be written to customer file ID %d (rule E1)', $id);
+		}
+	}
+
+	foreach ($manifest_tables as $table => $row_count) {
+		foreach (['aj_portal_files', 'aj_portal_file_users', 'aj_portal_file_tags', 'aj_storage_objects'] as $suffix) {
+			if ((int) $row_count > 0 && str_ends_with((string) $table, $suffix)) {
+				$violations[] = sprintf('package would change protected table %s (rule E3)', (string) $table);
+			}
+		}
+	}
+
+	foreach ($protected_option_names as $name) {
+		$violations[] = sprintf('package would change option %s, which this site owns (rule E3)', (string) $name);
+	}
+
+	foreach (array_unique(array_intersect(array_map('strval', $incoming_meta_keys), array_map('strval', $protected_meta_keys))) as $key) {
+		$violations[] = sprintf('package would write post meta %s, which marks live-owned records (rule E3)', $key);
+	}
+
+	foreach ($incoming_terms as $term_id => $term) {
+		if (isset($live_terms[$term_id]) && (string) $live_terms[$term_id]['slug'] !== (string) $term['slug'] && (string) $live_terms[$term_id]['name'] !== (string) $term['name']) {
+			$violations[] = sprintf('term ID %d is "%s" here but the package carries a different term "%s" (rule E5)', (int) $term_id, (string) $live_terms[$term_id]['name'], (string) $term['name']);
+		}
+	}
+
+	return $violations;
+}
+
+/** Stable identity of an attachment across sites: its guid path, ignoring the domain. */
+function synchy_guid_identity_key(string $guid): string
+{
+	$path = (string) wp_parse_url($guid, PHP_URL_PATH);
+	$query = (string) wp_parse_url($guid, PHP_URL_QUERY);
+
+	return $path . ($query !== '' ? '?' . $query : '');
+}
+
+/** Destination-side wrapper: gathers this site's data and runs the pure rule check. */
+function synchy_find_customer_file_violations(array $prepared_tables, array $manifest): array
+{
+	global $wpdb;
+
+	$incoming_posts = [];
+
+	foreach ((array) ($prepared_tables[$wpdb->posts]['rows'] ?? []) as $row) {
+		if (is_array($row) && (int) ($row['ID'] ?? 0) > 0) {
+			$incoming_posts[(int) $row['ID']] = [
+				'post_type' => (string) ($row['post_type'] ?? ''),
+				'post_mime_type' => (string) ($row['post_mime_type'] ?? ''),
+				'guid_key' => synchy_guid_identity_key((string) ($row['guid'] ?? '')),
+			];
+		}
+	}
+
+	$child_ids = [];
+	$meta_keys = [];
+
+	foreach ((array) ($prepared_tables[$wpdb->postmeta]['rows'] ?? []) as $row) {
+		$child_ids[] = (int) ($row['post_id'] ?? 0);
+		$meta_keys[] = (string) ($row['meta_key'] ?? '');
+	}
+
+	foreach ((array) ($prepared_tables[$wpdb->term_relationships]['rows'] ?? []) as $row) {
+		$child_ids[] = (int) ($row['object_id'] ?? 0);
+	}
+
+	$candidate_ids = array_values(array_unique(array_merge(array_keys($incoming_posts), $child_ids)));
+	$live_customer_ids = synchy_get_customer_file_ids(array_filter($candidate_ids));
+	$live_attachments = [];
+
+	foreach (array_chunk(array_keys($incoming_posts), 250) as $chunk) {
+		foreach (synchy_fetch_rows_by_ids($wpdb->posts, 'ID', $chunk, ['ID', 'post_type', 'post_mime_type', 'guid']) as $existing) {
+			if ((string) $existing['post_type'] === 'attachment') {
+				$live_attachments[(int) $existing['ID']] = ['mime' => (string) $existing['post_mime_type'], 'guid_key' => synchy_guid_identity_key((string) $existing['guid'])];
+			}
+		}
+	}
+
+	$tables = [];
+
+	foreach ((array) ($manifest['database']['tables'] ?? []) as $table => $data) {
+		$tables[(string) $table] = is_array($data) ? count((array) ($data['rows'] ?? [])) : 0;
+	}
+
+	$protected_options = [];
+
+	foreach ((array) synchy_get_manifest_table_rows_by_suffix($manifest, 'options') as $row) {
+		$name = (string) ($row['option_name'] ?? '');
+
+		if ($name !== '' && (in_array($name, synchy_get_ajcore_protected_option_names(), true) || synchy_is_ajcore_owned_option($name))) {
+			$protected_options[] = $name;
+		}
+	}
+
+	$incoming_terms = [];
+
+	foreach ((array) ($prepared_tables[$wpdb->terms]['rows'] ?? []) as $row) {
+		if (is_array($row) && (int) ($row['term_id'] ?? 0) > 0) {
+			$incoming_terms[(int) $row['term_id']] = ['name' => (string) ($row['name'] ?? ''), 'slug' => (string) ($row['slug'] ?? '')];
+		}
+	}
+
+	$live_terms = [];
+
+	foreach (array_chunk(array_keys($incoming_terms), 250) as $chunk) {
+		foreach (synchy_fetch_rows_by_ids($wpdb->terms, 'term_id', $chunk, ['term_id', 'name', 'slug']) as $existing) {
+			$live_terms[(int) $existing['term_id']] = ['name' => (string) $existing['name'], 'slug' => (string) $existing['slug']];
+		}
+	}
+
+	return synchy_evaluate_customer_file_rules($incoming_posts, $child_ids, $live_customer_ids, $live_attachments, $tables, $protected_options, $incoming_terms, $live_terms, $meta_keys, synchy_get_protected_postmeta_keys());
+}
+
+/** Source-side E2 check: IDs in the outgoing tables that are customer files on THIS site. */
+function synchy_find_customer_files_in_payload(array $tables): array
+{
+	global $wpdb;
+
+	$ids = [];
+
+	foreach ((array) ($tables[$wpdb->posts]['rows'] ?? []) as $row) {
+		$ids[] = (int) ($row['ID'] ?? 0);
+	}
+
+	foreach ((array) ($tables[$wpdb->postmeta]['rows'] ?? []) as $row) {
+		$ids[] = (int) ($row['post_id'] ?? 0);
+	}
+
+	foreach ((array) ($tables[$wpdb->term_relationships]['rows'] ?? []) as $row) {
+		$ids[] = (int) ($row['object_id'] ?? 0);
+	}
+
+	$ids = array_values(array_unique(array_filter($ids)));
+
+	return $ids === [] ? [] : synchy_get_customer_file_ids($ids);
+}
+
+/**
+ * Rule F: read-only health numbers. Uses AJ Core's own orphan report when it is loaded, the same
+ * queries otherwise. Baselines differ per site and change over time, so a push is judged against
+ * the numbers measured just before it (see synchy_customer_file_health_increases()), never "!= N".
+ */
+function synchy_get_customer_file_health(): array
+{
+	global $wpdb;
+
+	$objects = $wpdb->prefix . 'aj_storage_objects';
+	$files = $wpdb->prefix . 'aj_portal_files';
+	$has = static fn(string $table): bool => $wpdb->get_var($wpdb->prepare('SHOW TABLES LIKE %s', $wpdb->esc_like($table))) === $table;
+	$health = [];
+
+	if (class_exists('AJCore_Customer_Files') && method_exists('AJCore_Customer_Files', 'orphans')) {
+		$orphans = (array) AJCore_Customer_Files::orphans();
+		$health['orphanMappings'] = count((array) ($orphans['mappings'] ?? []));
+		$health['orphanPortalRows'] = count((array) ($orphans['portal_rows'] ?? []));
+	} else {
+		if ($has($objects)) {
+			$health['orphanMappings'] = (int) $wpdb->get_var("SELECT COUNT(*) FROM `{$objects}` o LEFT JOIN `{$wpdb->posts}` p ON p.`ID` = o.`attachment_id` AND p.`post_type` = 'attachment' WHERE p.`ID` IS NULL");
+		}
+
+		if ($has($files)) {
+			$health['orphanPortalRows'] = (int) $wpdb->get_var("SELECT COUNT(*) FROM `{$files}` f LEFT JOIN `{$wpdb->posts}` p ON p.`ID` = f.`attachment_id` AND p.`post_type` = 'attachment' WHERE p.`ID` IS NULL");
+		}
+	}
+
+	if ($has($objects)) {
+		$health['mappingMismatch'] = (int) $wpdb->get_var("SELECT COUNT(*) FROM `{$objects}` o JOIN `{$wpdb->posts}` p ON p.`ID` = o.`attachment_id` WHERE o.`content_type` <> '' AND o.`content_type` <> p.`post_mime_type`");
+	}
+
+	return $health;
+}
+
+/** Pure: which health numbers went up between two readings. Anything in the result is an alert. */
+function synchy_customer_file_health_increases(array $before, array $after): array
+{
+	$increased = [];
+
+	foreach ($after as $metric => $value) {
+		if ((int) $value > (int) ($before[$metric] ?? 0)) {
+			$increased[(string) $metric] = ['before' => (int) ($before[$metric] ?? 0), 'after' => (int) $value];
+		}
+	}
+
+	return $increased;
+}
+
 function synchy_get_changed_post_ids_for_sync(int $last_sync_time): array
 {
 	global $wpdb;
 
 	if ($last_sync_time <= 0) {
 		$rows = $wpdb->get_col('SELECT `ID` FROM `' . str_replace('`', '``', $wpdb->posts) . '`');
-
-		return is_array($rows) ? array_values(array_map('intval', $rows)) : [];
+	} else {
+		$since = gmdate('Y-m-d H:i:s', $last_sync_time);
+		$rows = $wpdb->get_col($wpdb->prepare(
+			'SELECT `ID` FROM `' . str_replace('`', '``', $wpdb->posts) . '` WHERE `post_modified_gmt` > %s OR `post_date_gmt` > %s',
+			$since,
+			$since
+		));
 	}
 
-	$since = gmdate('Y-m-d H:i:s', $last_sync_time);
-	$sql = $wpdb->prepare(
-		'SELECT `ID` FROM `' . str_replace('`', '``', $wpdb->posts) . '` WHERE `post_modified_gmt` > %s OR `post_date_gmt` > %s',
-		$since,
-		$since
-	);
-	$rows = $wpdb->get_col($sql);
+	$ids = is_array($rows) ? array_values(array_map('intval', $rows)) : [];
 
-	return is_array($rows) ? array_values(array_map('intval', $rows)) : [];
+	// Rules A/B: customer files belong to the live site -- never part of what a sync sends.
+	$customer = array_flip(synchy_get_customer_file_ids());
+
+	return $customer === [] ? $ids : array_values(array_filter($ids, static fn(int $id): bool => !isset($customer[$id])));
 }
 
 /**
@@ -3913,6 +4325,12 @@ function synchy_build_sync_database_delta(array $state, array $selected_scope_id
 
 		foreach ([$wpdb->terms, $wpdb->term_taxonomy, $wpdb->term_relationships] as $table) {
 			$all_rows = synchy_fetch_all_rows_from_table($table);
+
+			if ($table === $wpdb->term_relationships) {
+				$customer_ids = array_flip(synchy_get_customer_file_ids());
+				$all_rows = $customer_ids === [] ? $all_rows : array_values(array_filter($all_rows, static fn(array $row): bool => !isset($customer_ids[(int) ($row['object_id'] ?? 0)])));
+			}
+
 			$delta = synchy_build_sync_snapshot_delta(
 				$all_rows,
 				isset($previous_fingerprints[$table]) && is_array($previous_fingerprints[$table]) ? $previous_fingerprints[$table] : [],
@@ -3980,6 +4398,8 @@ function synchy_build_sync_database_delta(array $state, array $selected_scope_id
 		}
 
 		$postmeta_rows = $post_ids === [] ? [] : synchy_fetch_rows_by_ids($wpdb->postmeta, 'post_id', $post_ids);
+		$postmeta_protected = array_flip(synchy_get_protected_postmeta_keys());
+		$postmeta_rows = array_values(array_filter($postmeta_rows, static fn(array $row): bool => !isset($postmeta_protected[(string) ($row['meta_key'] ?? '')])));
 
 		if ($postmeta_rows !== []) {
 			$tables[$wpdb->postmeta] = [
@@ -4247,7 +4667,8 @@ function synchy_build_sync_upsert_statements(string $table, array $rows, array $
  */
 function synchy_build_sync_postmeta_statements(string $table, array $rows): array
 {
-	$rows = array_values(array_filter($rows, static fn($row): bool => is_array($row) && (int) ($row['post_id'] ?? 0) > 0 && (string) ($row['meta_key'] ?? '') !== ''));
+	$protected_keys = array_flip(synchy_get_protected_postmeta_keys());
+	$rows = array_values(array_filter($rows, static fn($row): bool => is_array($row) && (int) ($row['post_id'] ?? 0) > 0 && (string) ($row['meta_key'] ?? '') !== '' && !isset($protected_keys[(string) $row['meta_key']])));
 
 	if ($rows === []) {
 		return [];
@@ -4375,8 +4796,21 @@ function synchy_build_sync_manifest(array $file_delta, array $db_delta, int $syn
 		];
 	}
 
+	// Users are never synced and their IDs differ per site: tell the destination who each author is.
+	$authors = [];
+
+	foreach ((array) ($tables[$wpdb->posts]['rows'] ?? []) as $post_row) {
+		$author_id = (int) ($post_row['post_author'] ?? 0);
+
+		if ($author_id > 0 && !isset($authors[$author_id])) {
+			$user = get_userdata($author_id);
+			$authors[$author_id] = $user ? ['login' => (string) $user->user_login, 'email' => (string) $user->user_email] : [];
+		}
+	}
+
 	return [
 		'plugin' => 'Backup & Restore',
+		'authors' => $authors,
 		'pluginVersion' => synchy_get_display_version(),
 		'mode' => (string) ($db_delta['mode'] ?? $file_delta['mode'] ?? 'delta'),
 		'syncedAt' => $sync_time,
@@ -4728,6 +5162,10 @@ function synchy_prepare_sync_payload(array $options, array $selection = [], bool
 		'dbSyncDisabled' => (int) ($manifest['database']['totalRows'] ?? 0) === 0 && !synchy_has_selected_database_sync_scope($options),
 		'protectedOptionsCount' => count(synchy_get_ajcore_protected_option_names()),
 		'protectedTablesCount' => count(synchy_get_ajcore_protected_table_suffixes()),
+		// Dry-run info: customer files on this site (rule A) are never sent; say how many are skipped.
+		'customerFilesSkipped' => count(synchy_get_customer_file_ids()),
+		'customerFilesSkippedIds' => array_slice(synchy_get_customer_file_ids(), 0, 20),
+		'liveOwnedUploadDirs' => synchy_describe_live_owned_upload_dirs(),
 		'tableCounts' => (array) ($manifest['database']['tableCounts'] ?? []),
 		'lastSyncTime' => synchy_get_sync_last_time(),
 		'syncedAt' => $sync_time,
@@ -4750,6 +5188,21 @@ function synchy_prepare_sync_payload(array $options, array $selection = [], bool
 
 function synchy_write_sync_package_from_parts(array $file_delta, array $db_delta, int $sync_time, array $options, string $temp_dir)
 {
+	// Rule E2 tripwire: customer files are filtered out when posts are selected, so none can reach
+	// here. If one does, that filter has a bug -- stop and say so rather than send it.
+	$leaked = synchy_find_customer_files_in_payload((array) ($db_delta['tables'] ?? []));
+
+	if ($leaked !== []) {
+		return new WP_Error(
+			'synchy_customer_file_in_payload',
+			sprintf(
+				/* translators: %s: comma-separated post IDs */
+				__('Sync stopped before sending: the package contained customer file records (IDs %s). The live site owns them, so none may be sent. This is a bug in the sync selection, not something to override.', 'synchy'),
+				implode(', ', array_slice($leaked, 0, 10))
+			)
+		);
+	}
+
 	$manifest = synchy_build_sync_manifest($file_delta, $db_delta, $sync_time, $options);
 	$manifest_path = wp_normalize_path(trailingslashit($temp_dir) . 'manifest.json');
 	$sql_path = wp_normalize_path(trailingslashit($temp_dir) . 'delta.sql');
@@ -8581,6 +9034,11 @@ function synchy_finalize_full_sync_success(array $job, array $options, float $st
 		(int) ($job['total_batches'] ?? 0),
 		synchy_format_sync_duration($duration)
 	);
+
+	if (!empty($job['mirror_note'])) {
+		$job['message'] .= ' ' . (string) $job['mirror_note'];
+	}
+
 	synchy_update_sync_job($job);
 
 	$status = [
@@ -8706,6 +9164,20 @@ function synchy_process_full_sync_job(array $job, array $options)
 		$job['message'] = __('Reconciling destination post meta with this site.', 'synchy');
 		synchy_update_sync_job($job);
 		$mirrored = synchy_send_full_sync_postmeta_mirror($options, in_array('db_taxonomies', (array) ($job['selected_scope_ids'] ?? []), true));
+
+		if (is_array($mirrored)) {
+			$job['mirror_report'] = $mirrored;
+			$job['mirror_note'] = sprintf(
+				$mirrored['applied']
+					? 'Removed from the destination: %1$d posts/pages/styles, %2$d meta rows, %3$d term links, %4$d orphan terms.'
+					: 'Found on the destination but NOT removed (report only): %1$d posts/pages/styles, %2$d meta rows, %3$d term links, %4$d orphan terms.',
+				(int) $mirrored['postsTotal'],
+				(int) $mirrored['metaRows'],
+				(int) $mirrored['termLinks'],
+				(int) $mirrored['orphanTerms']
+			);
+			$job = synchy_update_sync_job($job);
+		}
 
 		if (is_wp_error($mirrored)) {
 			$job['status'] = 'failed_partial';
@@ -9060,6 +9532,26 @@ function synchy_build_sync_sql_from_manifest(array $manifest, string $sql_path)
 			continue;
 		}
 
+		if ($table === $wpdb->posts && $prepared_rows !== []) {
+			$existing_authors = [];
+
+			foreach (synchy_fetch_rows_by_ids($wpdb->posts, 'ID', array_map(static fn(array $row): int => (int) ($row['ID'] ?? 0), $prepared_rows), ['ID', 'post_author']) as $existing) {
+				$existing_authors[(int) $existing['ID']] = (int) $existing['post_author'];
+			}
+
+			$prepared_rows = synchy_remap_post_authors(
+				$prepared_rows,
+				(array) ($manifest['authors'] ?? []),
+				$existing_authors,
+				static function (string $login, string $email): int {
+					$user = $login !== '' ? get_user_by('login', $login) : false;
+					$user = $user ?: ($email !== '' ? get_user_by('email', $email) : false);
+
+					return $user ? (int) $user->ID : 0;
+				}
+			);
+		}
+
 		$prepared_tables[$table] = [
 			'rows' => $prepared_rows,
 			'key_columns' => array_values((array) ($data['keyColumns'] ?? [])),
@@ -9111,6 +9603,30 @@ function synchy_normalize_sync_option_autoload($autoload)
 	}
 
 	return null;
+}
+
+/**
+ * Post authors: posts carry the SOURCE site's user ID, but users are never synced and IDs differ per
+ * site, so a copied post pointed at nobody -- or at somebody else (a customer). The package now
+ * carries [source user ID => login/email]; the destination maps each author to its own user with the
+ * same login (then email). With no match, an existing post keeps the author it already has on this
+ * site, and a new post gets 0. Pure; $resolve(login, email) returns a destination user ID or 0.
+ */
+function synchy_remap_post_authors(array $rows, array $authors, array $existing_authors, callable $resolve): array
+{
+	foreach ($rows as $index => $row) {
+		if (!is_array($row) || !array_key_exists('post_author', $row)) {
+			continue;
+		}
+
+		$source_id = (int) $row['post_author'];
+		$known = $authors[$source_id] ?? null;
+		$mapped = is_array($known) ? (int) $resolve((string) ($known['login'] ?? ''), (string) ($known['email'] ?? '')) : 0;
+		$post_id = (int) ($row['ID'] ?? 0);
+		$rows[$index]['post_author'] = $mapped > 0 ? $mapped : (int) ($existing_authors[$post_id] ?? 0);
+	}
+
+	return $rows;
 }
 
 function synchy_apply_sync_option_rows(array $rows)
@@ -9266,6 +9782,31 @@ function synchy_iterate_sync_sql_statements(string $sql_path, callable $callback
 	return $statement_count;
 }
 
+/**
+ * "Merge, never replace" enforced where SQL actually runs. The only statements a Sync may execute
+ * on a destination are: INSERT INTO <sync table> (...) VALUES ... [ON DUPLICATE KEY UPDATE ...], and
+ * DELETE FROM <postmeta> for exact (post_id, meta_key) pairs. Anything else -- TRUNCATE, DROP,
+ * REPLACE, UPDATE, INSERT ... SELECT, or a DELETE on any other table or without exact pairs -- is
+ * refused, so a package can never replace wp_posts or wp_postmeta wholesale.
+ */
+function synchy_sync_statement_allowed(string $statement, array $allowed_tables, string $postmeta_table): bool
+{
+	$statement = trim($statement);
+
+	if (preg_match('/^INSERT\s+INTO\s+`([^`]+)`\s*\(/i', $statement, $m)) {
+		return in_array($m[1], $allowed_tables, true)
+			&& stripos($statement, ') VALUES') !== false
+			&& !preg_match('/\)\s*SELECT\s/i', $statement);
+	}
+
+	if (preg_match('/^DELETE\s+FROM\s+`([^`]+)`\s+WHERE\s+\(`post_id`\s*=\s*\d+\s+AND\s+`meta_key`\s*=\s*\'/i', $statement, $m)) {
+		return $m[1] === $postmeta_table
+			&& preg_match('/^DELETE\s+FROM\s+`[^`]+`\s+WHERE\s+\(`post_id`\s*=\s*\d+\s+AND\s+`meta_key`\s*=\s*\'.+\'\)(\s+OR\s+\(`post_id`\s*=\s*\d+\s+AND\s+`meta_key`\s*=\s*\'.+\'\))*;?$/is', $statement) === 1;
+	}
+
+	return false;
+}
+
 function synchy_execute_sync_sql_file(string $sql_path)
 {
 	global $wpdb;
@@ -9278,6 +9819,10 @@ function synchy_execute_sync_sql_file(string $sql_path)
 			static function (string $statement) use ($wpdb): void {
 				if (preg_match('/^\s*INSERT\s+INTO\s+`?([^`\s(]+)`?/i', $statement, $matches) && synchy_is_ajcore_protected_table((string) $matches[1])) {
 					throw new RuntimeException('Refusing to write protected AJ Core runtime table.');
+				}
+
+				if (!synchy_sync_statement_allowed($statement, array_keys(synchy_get_sync_table_specs()), $wpdb->postmeta)) {
+					throw new RuntimeException('Refusing a statement that is not an INSERT into a sync table or an exact postmeta pair delete (merge, never replace).');
 				}
 
 				$result = $wpdb->query($statement);
@@ -9310,7 +9855,7 @@ function synchy_execute_sync_sql_file(string $sql_path)
  * longer has for it (e.g. a different record's leftover attachment meta). $post_keys is
  * [post_id => [meta_key, ...]]. Posts that don't exist here are skipped.
  */
-function synchy_apply_sync_postmeta_mirror(array $post_keys): int
+function synchy_apply_sync_postmeta_mirror(array $post_keys, bool $apply = false): int
 {
 	global $wpdb;
 
@@ -9325,17 +9870,18 @@ function synchy_apply_sync_postmeta_mirror(array $post_keys): int
 			continue;
 		}
 
-		if ($keys === []) {
-			$result = $wpdb->query($wpdb->prepare('DELETE FROM ' . $table . ' WHERE `post_id` = %d', $post_id));
-		} else {
-			$keys = array_values(array_unique(array_map('strval', $keys)));
-			$placeholders = implode(', ', array_fill(0, count($keys), '%s'));
-			$result = $wpdb->query($wpdb->prepare(
-				'DELETE FROM ' . $table . ' WHERE `post_id` = %d AND `meta_key` NOT IN (' . $placeholders . ')',
-				array_merge([$post_id], $keys)
-			));
-		}
+		// Report-only unless the source explicitly asked to remove extras: nothing on the live site is
+		// deleted automatically. $deleted counts rows removed (apply) or rows that WOULD be removed.
+		// Protected keys (live-owned markers) are always kept.
+		$verb = $apply ? 'DELETE FROM ' : 'SELECT COUNT(*) FROM ';
+		$keys = array_values(array_unique(array_merge(array_map('strval', $keys), synchy_get_protected_postmeta_keys())));
+		$placeholders = implode(', ', array_fill(0, count($keys), '%s'));
+		$sql = $wpdb->prepare(
+			$verb . $table . ' WHERE `post_id` = %d AND `meta_key` NOT IN (' . $placeholders . ')',
+			array_merge([$post_id], $keys)
+		);
 
+		$result = $apply ? $wpdb->query($sql) : (int) $wpdb->get_var($sql);
 		$deleted += is_int($result) ? $result : 0;
 	}
 
@@ -9349,7 +9895,7 @@ function synchy_apply_sync_postmeta_mirror(array $post_keys): int
  * posts page and privacy page are kept, and a run that would remove more than half of what is
  * here (min 10) is refused so a bad payload can never wipe the site.
  */
-function synchy_apply_sync_post_mirror(array $source_ids)
+function synchy_apply_sync_post_mirror(array $source_ids, bool $apply = false)
 {
 	global $wpdb;
 
@@ -9389,6 +9935,19 @@ function synchy_apply_sync_post_mirror(array $source_ids)
 		if (!isset($keep_source[(string) $row['post_type']][$id]) && !in_array($id, $protected, true)) {
 			$extra[] = $id;
 		}
+	}
+
+	if (!$apply) {
+		// Report only: nothing is deleted. Orphan terms are counted for the same reason.
+		$report = [];
+
+		foreach (array_slice($extra, 0, 200) as $id) {
+			$report[] = ['id' => $id, 'type' => (string) get_post_type($id), 'title' => (string) get_the_title($id)];
+		}
+
+		$orphan_count = (int) $wpdb->get_var("SELECT COUNT(*) FROM `{$wpdb->terms}` t LEFT JOIN `{$wpdb->term_taxonomy}` tt ON tt.`term_id` = t.`term_id` WHERE tt.`term_id` IS NULL");
+
+		return ['deleted' => 0, 'ids' => [], 'orphanTerms' => 0, 'wouldDelete' => $report, 'wouldDeleteTotal' => count($extra), 'wouldDeleteOrphanTerms' => $orphan_count];
 	}
 
 	if (count($extra) > max(10, (int) ceil(count((array) $rows) / 2))) {
@@ -9452,7 +10011,7 @@ function synchy_apply_sync_post_mirror(array $source_ids)
  * Without this a post (or nav menu item) kept stale links from earlier overwrites, e.g. a menu
  * item also related to an unrelated taxonomy term. Term counts are recalculated afterwards.
  */
-function synchy_apply_sync_term_relationship_mirror(array $map): int
+function synchy_apply_sync_term_relationship_mirror(array $map, bool $apply = false): int
 {
 	global $wpdb;
 
@@ -9472,13 +10031,16 @@ function synchy_apply_sync_term_relationship_mirror(array $map): int
 		$existing = array_map('intval', (array) $wpdb->get_col($wpdb->prepare($sql, $object_id)));
 
 		foreach (array_diff($existing, $keep) as $term_taxonomy_id) {
-			$wpdb->delete($wpdb->term_relationships, ['object_id' => $object_id, 'term_taxonomy_id' => $term_taxonomy_id], ['%d', '%d']);
+			if ($apply) {
+				$wpdb->delete($wpdb->term_relationships, ['object_id' => $object_id, 'term_taxonomy_id' => $term_taxonomy_id], ['%d', '%d']);
+			}
+
 			$affected[$term_taxonomy_id] = true;
 			$deleted++;
 		}
 	}
 
-	foreach (array_keys($affected) as $term_taxonomy_id) {
+	foreach ($apply ? array_keys($affected) : [] as $term_taxonomy_id) {
 		$taxonomy = (string) $wpdb->get_var($wpdb->prepare("SELECT `taxonomy` FROM `{$wpdb->term_taxonomy}` WHERE `term_taxonomy_id` = %d", $term_taxonomy_id));
 
 		if ($taxonomy !== '') {
@@ -9493,19 +10055,30 @@ function synchy_apply_sync_term_relationship_mirror(array $map): int
  * Source side of the Full Sync tail: sends every synced post's complete meta-key list so the
  * destination can prune stale meta. Chunked to keep each request small.
  */
+/** Nothing on the destination is removed unless this is switched on: wp option update synchy_full_sync_remove_extras 1 */
+function synchy_full_sync_removes_extras(): bool
+{
+	return (bool) get_option('synchy_full_sync_remove_extras', 0);
+}
+
 function synchy_send_full_sync_postmeta_mirror(array $options, bool $with_term_links = false)
 {
 	global $wpdb;
 
 	$rows = $wpdb->get_results('SELECT `post_id`, `meta_key` FROM `' . str_replace('`', '``', $wpdb->postmeta) . '`', ARRAY_A);
+	$customer = array_flip(synchy_get_customer_file_ids());
 	$by_post = [];
 
 	foreach ((array) $rows as $row) {
-		$by_post[(int) $row['post_id']][] = (string) $row['meta_key'];
+		if (!isset($customer[(int) $row['post_id']])) {
+			$by_post[(int) $row['post_id']][] = (string) $row['meta_key'];
+		}
 	}
 
 	foreach ($wpdb->get_col('SELECT `ID` FROM `' . str_replace('`', '``', $wpdb->posts) . '`') as $post_id) {
-		$by_post[(int) $post_id] = $by_post[(int) $post_id] ?? [];
+		if (!isset($customer[(int) $post_id])) {
+			$by_post[(int) $post_id] = $by_post[(int) $post_id] ?? [];
+		}
 	}
 
 	$source_ids = ['post' => [], 'page' => [], 'wp_global_styles' => []];
@@ -9514,16 +10087,22 @@ function synchy_send_full_sync_postmeta_mirror(array $options, bool $with_term_l
 		$source_ids[(string) $row['post_type']][] = (int) $row['ID'];
 	}
 
+	$apply = synchy_full_sync_removes_extras();
+	$report = ['applied' => $apply, 'posts' => [], 'postsTotal' => 0, 'metaRows' => 0, 'termLinks' => 0, 'orphanTerms' => 0];
 	$result = synchy_site_sync_remote_request(
 		$options,
 		'sync/mirror',
 		'POST',
-		['timeout' => 60, 'body' => wp_json_encode(['source_post_ids' => $source_ids]), 'headers' => ['Content-Type' => 'application/json']]
+		['timeout' => 60, 'body' => wp_json_encode(['source_post_ids' => $source_ids, 'apply' => $apply]), 'headers' => ['Content-Type' => 'application/json']]
 	);
 
 	if (is_wp_error($result)) {
 		return $result;
 	}
+
+	$report['posts'] = (array) ($result['wouldDelete'] ?? []);
+	$report['postsTotal'] = $apply ? (int) ($result['deletedPosts'] ?? $result['deleted'] ?? 0) : (int) ($result['wouldDeleteTotal'] ?? 0);
+	$report['orphanTerms'] = $apply ? (int) ($result['orphanTerms'] ?? 0) : (int) ($result['wouldDeleteOrphanTerms'] ?? 0);
 
 	$by_object = [];
 
@@ -9534,7 +10113,7 @@ function synchy_send_full_sync_postmeta_mirror(array $options, bool $with_term_l
 	}
 
 	foreach (array_chunk($by_post, 400, true) as $chunk) {
-		$payload = ['post_keys' => $chunk];
+		$payload = ['post_keys' => $chunk, 'apply' => $apply];
 
 		if ($with_term_links) {
 			$payload['term_links'] = array_intersect_key($by_object, $chunk) + array_fill_keys(array_keys($chunk), []);
@@ -9551,9 +10130,12 @@ function synchy_send_full_sync_postmeta_mirror(array $options, bool $with_term_l
 		if (is_wp_error($result)) {
 			return $result;
 		}
+
+		$report['metaRows'] += (int) ($result['metaRows'] ?? 0);
+		$report['termLinks'] += (int) ($result['termLinks'] ?? 0);
 	}
 
-	return true;
+	return $report;
 }
 
 function synchy_get_manifest_table_rows_by_suffix(array $manifest, string $suffix): array
@@ -10087,6 +10669,14 @@ function synchy_validate_sync_zip_entries(ZipArchive $zip)
 			}
 		}
 
+		if (synchy_is_live_owned_upload_path($name, synchy_get_live_owned_upload_dirs())) {
+			return new WP_Error('synchy_sync_zip_live_owned_dir', sprintf(
+				/* translators: %s: zip entry path */
+				__('The Sync package contains a file inside an upload folder this site owns: %s', 'synchy'),
+				$name
+			));
+		}
+
 		if (str_starts_with($name, 'plugins/ajcore/') && !synchy_is_ajcore_code_path($name)) {
 			return new WP_Error('synchy_sync_zip_ajcore_runtime_disallowed', __('The Sync package contains AJ Core runtime or environment files, which are protected on the destination site.', 'synchy'));
 		}
@@ -10109,12 +10699,19 @@ function synchy_validate_sync_zip_entries(ZipArchive $zip)
 	return $allowed;
 }
 
-function synchy_extract_sync_package_to_content(string $zip_path)
+/**
+ * Phase 1 of applying a package: unpack only the manifest and SQL into a folder unique to this
+ * request (they used to share one fixed wp-content/.synchy-sync/ folder that every request also
+ * deleted, so overlapping requests clobbered each other -- the intermittent "could not extract" /
+ * "could not decode manifest" errors). Nothing is written to plugins, themes, uploads or
+ * mu-plugins yet: the database rules run first, and only then does phase 2 write the files, so a
+ * push the rules stop leaves the site exactly as it was.
+ */
+function synchy_extract_sync_package_meta(string $zip_path)
 {
 	$zip = new ZipArchive();
-	$result = $zip->open($zip_path);
 
-	if ($result !== true) {
+	if ($zip->open($zip_path) !== true) {
 		return new WP_Error('synchy_sync_zip_open_failed', __('Synchy could not open the uploaded Sync package.', 'synchy'));
 	}
 
@@ -10125,11 +10722,6 @@ function synchy_extract_sync_package_to_content(string $zip_path)
 		return $entries;
 	}
 
-	// The manifest/SQL go to a folder unique to this request. They used to share one fixed
-	// wp-content/.synchy-sync/ folder that every request also deleted when it finished, so two
-	// overlapping requests (e.g. a source retry while the destination was still finishing the
-	// previous batch) could delete or overwrite each other's manifest mid-read -- the intermittent
-	// "could not extract" / "could not decode the uploaded Sync manifest" errors.
 	$meta_root = wp_normalize_path(WP_CONTENT_DIR . '/.synchy-sync-' . wp_generate_password(12, false, false));
 	$content_entries = [];
 	$meta_entries = [];
@@ -10148,11 +10740,6 @@ function synchy_extract_sync_package_to_content(string $zip_path)
 	}
 
 	$extracted = $zip->extractTo($meta_root, $meta_entries);
-
-	if ($extracted && $content_entries !== []) {
-		$extracted = $zip->extractTo(WP_CONTENT_DIR, $content_entries);
-	}
-
 	$status = $extracted ? '' : (string) $zip->getStatusString();
 	$zip->close();
 
@@ -10173,7 +10760,35 @@ function synchy_extract_sync_package_to_content(string $zip_path)
 		'manifest_path' => wp_normalize_path($meta_root . '/.synchy-sync/db/manifest.json'),
 		'sql_path' => wp_normalize_path($meta_root . '/.synchy-sync/db/delta.sql'),
 		'meta_root' => $meta_root,
+		'content_entries' => $content_entries,
 	];
+}
+
+/** Phase 2: write the package's files (plugins, themes, uploads, mu-plugins) into wp-content. */
+function synchy_extract_sync_package_content(string $zip_path, array $content_entries)
+{
+	if ($content_entries === []) {
+		return true;
+	}
+
+	$zip = new ZipArchive();
+
+	if ($zip->open($zip_path) !== true) {
+		return new WP_Error('synchy_sync_zip_open_failed', __('Synchy could not open the uploaded Sync package.', 'synchy'));
+	}
+
+	$extracted = $zip->extractTo(WP_CONTENT_DIR, $content_entries);
+	$status = $extracted ? '' : (string) $zip->getStatusString();
+	$zip->close();
+
+	return $extracted ? true : new WP_Error(
+		'synchy_sync_extract_failed',
+		sprintf(
+			/* translators: %s: ZipArchive status */
+			__('Synchy could not extract the Sync package into wp-content. %s', 'synchy'),
+			$status
+		)
+	);
 }
 
 function synchy_clear_sync_caches(): void
@@ -10519,6 +11134,17 @@ function synchy_apply_sync_deleted_paths(array $manifest): array|WP_Error
 	];
 }
 
+/**
+ * Rule B for deletions: an ID the source says was deleted locally must never delete a customer file
+ * that this site owns. Pure so it can be tested; $customer_ids come from table membership.
+ */
+function synchy_filter_deletable_post_ids(array $post_ids, array $customer_ids): array
+{
+	$customer = array_flip(array_map('intval', $customer_ids));
+
+	return array_values(array_filter(array_map('intval', $post_ids), static fn(int $id): bool => $id > 0 && !isset($customer[$id])));
+}
+
 function synchy_apply_sync_deleted_posts(array $manifest): array
 {
 	$post_ids = array_values(array_unique(array_filter(
@@ -10531,6 +11157,8 @@ function synchy_apply_sync_deleted_posts(array $manifest): array
 	}
 
 	$deleted = 0;
+
+	$post_ids = synchy_filter_deletable_post_ids($post_ids, synchy_get_customer_file_ids($post_ids));
 
 	foreach ($post_ids as $post_id) {
 		if (get_post($post_id) === null) {
@@ -10691,7 +11319,7 @@ function synchy_handle_remote_sync_request(WP_REST_Request $request)
 			return new WP_Error('synchy_sync_request_write_failed', __('Synchy could not save the uploaded Sync package on the destination site.', 'synchy'), ['status' => 500]);
 		}
 
-		$extract = synchy_extract_sync_package_to_content($zip_path);
+		$extract = synchy_extract_sync_package_meta($zip_path);
 
 		if (is_wp_error($extract)) {
 			return new WP_Error($extract->get_error_code(), $extract->get_error_message(), ['status' => 400]);
@@ -10715,6 +11343,31 @@ function synchy_handle_remote_sync_request(WP_REST_Request $request)
 
 		if (is_wp_error($prepared_sql)) {
 			return new WP_Error($prepared_sql->get_error_code(), $prepared_sql->get_error_message(), ['status' => 500]);
+		}
+
+		// Customer-file rules (E1, E3, E4): abort before anything is written.
+		$violations = synchy_find_customer_file_violations((array) ($prepared_sql['tables'] ?? []), $manifest);
+
+		if ($violations !== []) {
+			return new WP_Error(
+				'synchy_customer_file_protected',
+				sprintf(
+					/* translators: 1: violation count, 2: first violations */
+					__('Sync stopped: %1$d row(s) would touch customer files or protected storage data on this site. Nothing was applied. %2$s', 'synchy'),
+					count($violations),
+					implode('; ', array_slice($violations, 0, 6))
+				),
+				['status' => 409]
+			);
+		}
+
+		$health_before = synchy_get_customer_file_health();
+
+		// Rules passed: only now are the package's files written (phase 2 of the extraction).
+		$content_written = synchy_extract_sync_package_content($zip_path, (array) ($extract['content_entries'] ?? []));
+
+		if (is_wp_error($content_written)) {
+			return new WP_Error($content_written->get_error_code(), $content_written->get_error_message(), ['status' => 400]);
 		}
 
 		// Rows are written by ID and simply overwrite whatever this site has at that ID.
@@ -10760,7 +11413,19 @@ function synchy_handle_remote_sync_request(WP_REST_Request $request)
 		}
 
 		$deleted_posts_result = synchy_apply_sync_deleted_posts($manifest);
+		$health_after = synchy_get_customer_file_health();
+		$health_increases = synchy_customer_file_health_increases($health_before, $health_after);
+		$customer_file_health = ['before' => $health_before, 'after' => $health_after, 'increased' => $health_increases];
 		$skipped_deletions_note = '';
+
+		if ($health_increases !== []) {
+			// Any increase is a bug to investigate, so say it in the receipt the source shows.
+			$skipped_deletions_note .= ' ' . sprintf(
+				/* translators: %s: metric names with before and after counts */
+				__('WARNING: customer file health got worse: %s.', 'synchy'),
+				implode(', ', array_map(static fn(string $metric, array $change): string => $metric . ' ' . $change['before'] . ' -> ' . $change['after'], array_keys($health_increases), $health_increases))
+			);
+		}
 
 		if ((int) ($deleted_result['skippedProtectedCount'] ?? 0) > 0) {
 			$skipped_deletions_note .= ' ' . sprintf(
@@ -10815,6 +11480,7 @@ function synchy_handle_remote_sync_request(WP_REST_Request $request)
 			) . $skipped_deletions_note,
 			'optionRowsApplied' => $applied_option_rows,
 			'navMenuRepair' => $nav_menu_repair,
+			'customerFileHealth' => $customer_file_health,
 			'deletedFiles' => (int) ($deleted_result['deletedFiles'] ?? 0),
 			'deletedDirs' => (int) ($deleted_result['deletedDirs'] ?? 0),
 			'deletedPosts' => (int) ($deleted_posts_result['deletedPosts'] ?? 0),
@@ -10861,6 +11527,7 @@ function synchy_handle_remote_sync_request(WP_REST_Request $request)
 			'skippedNonFileDeletions' => (int) ($deleted_result['skippedNonFileCount'] ?? 0),
 			'skippedNonFileDeletionPaths' => (array) ($deleted_result['skippedNonFilePaths'] ?? []),
 			'navMenuRepair' => $nav_menu_repair,
+			'customerFileHealth' => $customer_file_health,
 		]);
 	} finally {
 		if ($meta_root !== '' && is_dir($meta_root)) {
@@ -14585,16 +15252,18 @@ add_action('rest_api_init', function (): void {
 
 				$params = $request->get_json_params();
 
-				if (is_array($params['source_post_ids'] ?? null)) {
-					$mirrored = synchy_apply_sync_post_mirror($params['source_post_ids']);
+				$apply = !empty($params['apply']);
 
-					return is_wp_error($mirrored) ? $mirrored : rest_ensure_response(['success' => true, 'deletedPosts' => $mirrored['deleted'], 'orphanTerms' => $mirrored['orphanTerms']]);
+				if (is_array($params['source_post_ids'] ?? null)) {
+					$mirrored = synchy_apply_sync_post_mirror($params['source_post_ids'], $apply);
+
+					return is_wp_error($mirrored) ? $mirrored : rest_ensure_response(['success' => true, 'applied' => $apply] + $mirrored);
 				}
 
-				$deleted = synchy_apply_sync_postmeta_mirror(is_array($params['post_keys'] ?? null) ? $params['post_keys'] : []);
-				$deleted_links = is_array($params['term_links'] ?? null) ? synchy_apply_sync_term_relationship_mirror($params['term_links']) : 0;
+				$deleted = synchy_apply_sync_postmeta_mirror(is_array($params['post_keys'] ?? null) ? $params['post_keys'] : [], $apply);
+				$deleted_links = is_array($params['term_links'] ?? null) ? synchy_apply_sync_term_relationship_mirror($params['term_links'], $apply) : 0;
 
-				return rest_ensure_response(['success' => true, 'deletedMeta' => $deleted, 'deletedTermLinks' => $deleted_links]);
+				return rest_ensure_response(['success' => true, 'applied' => $apply, 'metaRows' => $deleted, 'termLinks' => $deleted_links]);
 			},
 			'permission_callback' => $sync_permission,
 		]
