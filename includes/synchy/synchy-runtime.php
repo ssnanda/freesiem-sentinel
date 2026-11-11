@@ -9387,8 +9387,8 @@ function synchy_apply_sync_postmeta_mirror(array $post_keys): int
 }
 
 /**
- * Full Sync tail: this site's posts and pages must equal the source's. $source_ids is
- * ['post' => [ids], 'page' => [ids]] -- every post/page the source has. Destination posts and
+ * Full Sync tail: this site's posts, pages and global-styles records must equal the source's.
+ * $source_ids is ['post' => [ids], 'page' => [ids], 'wp_global_styles' => [ids]] -- every one the source has. Destination posts and
  * pages not in that list are force-deleted. Guards: an empty list is refused, the front page,
  * posts page and privacy page are kept, and a run that would remove more than half of what is
  * here (min 10) is refused so a bad payload can never wipe the site.
@@ -9399,7 +9399,9 @@ function synchy_apply_sync_post_mirror(array $source_ids)
 
 	$keep_source = [];
 
-	foreach (['post', 'page'] as $type) {
+	$mirrored_types = ['post', 'page', 'wp_global_styles'];
+
+	foreach ($mirrored_types as $type) {
 		$keep_source[$type] = array_flip(array_map('intval', (array) ($source_ids[$type] ?? [])));
 	}
 
@@ -9414,13 +9416,19 @@ function synchy_apply_sync_post_mirror(array $source_ids)
 	]);
 
 	$rows = $wpdb->get_results(
-		"SELECT `ID`, `post_type` FROM `{$wpdb->posts}` WHERE `post_type` IN ('post','page') AND `post_status` <> 'auto-draft'",
+		"SELECT `ID`, `post_type`, `post_name` FROM `{$wpdb->posts}` WHERE `post_type` IN ('post','page','wp_global_styles') AND `post_status` <> 'auto-draft'",
 		ARRAY_A
 	);
 	$extra = [];
+	// The active theme's own global-styles record is never removed, even if the source lacks it.
+	$active_styles_slug = 'wp-global-styles-' . urlencode(get_stylesheet());
 
 	foreach ((array) $rows as $row) {
 		$id = (int) $row['ID'];
+
+		if ((string) $row['post_type'] === 'wp_global_styles' && (string) $row['post_name'] === $active_styles_slug) {
+			continue;
+		}
 
 		if (!isset($keep_source[(string) $row['post_type']][$id]) && !in_array($id, $protected, true)) {
 			$extra[] = $id;
@@ -9452,7 +9460,18 @@ function synchy_apply_sync_post_mirror(array $source_ids)
 		}
 	}
 
-	return ['deleted' => $deleted, 'ids' => $extra];
+	// Terms with no taxonomy row can't be referenced by anything; they are leftovers of earlier
+	// overwrites. Remove them (and their term meta) so the destination's term list matches.
+	$orphans = array_map('intval', (array) $wpdb->get_col(
+		"SELECT t.`term_id` FROM `{$wpdb->terms}` t LEFT JOIN `{$wpdb->term_taxonomy}` tt ON tt.`term_id` = t.`term_id` WHERE tt.`term_id` IS NULL"
+	));
+
+	foreach ($orphans as $term_id) {
+		$wpdb->delete($wpdb->termmeta, ['term_id' => $term_id], ['%d']);
+		$wpdb->delete($wpdb->terms, ['term_id' => $term_id], ['%d']);
+	}
+
+	return ['deleted' => $deleted, 'ids' => $extra, 'orphanTerms' => count($orphans)];
 }
 
 /**
@@ -9517,9 +9536,9 @@ function synchy_send_full_sync_postmeta_mirror(array $options, bool $with_term_l
 		$by_post[(int) $post_id] = $by_post[(int) $post_id] ?? [];
 	}
 
-	$source_ids = ['post' => [], 'page' => []];
+	$source_ids = ['post' => [], 'page' => [], 'wp_global_styles' => []];
 
-	foreach ((array) $wpdb->get_results("SELECT `ID`, `post_type` FROM `{$wpdb->posts}` WHERE `post_type` IN ('post','page') AND `post_status` <> 'auto-draft'", ARRAY_A) as $row) {
+	foreach ((array) $wpdb->get_results("SELECT `ID`, `post_type` FROM `{$wpdb->posts}` WHERE `post_type` IN ('post','page','wp_global_styles') AND `post_status` <> 'auto-draft'", ARRAY_A) as $row) {
 		$source_ids[(string) $row['post_type']][] = (int) $row['ID'];
 	}
 
@@ -14734,7 +14753,7 @@ add_action('rest_api_init', function (): void {
 				if (is_array($params['source_post_ids'] ?? null)) {
 					$mirrored = synchy_apply_sync_post_mirror($params['source_post_ids']);
 
-					return is_wp_error($mirrored) ? $mirrored : rest_ensure_response(['success' => true, 'deletedPosts' => $mirrored['deleted']]);
+					return is_wp_error($mirrored) ? $mirrored : rest_ensure_response(['success' => true, 'deletedPosts' => $mirrored['deleted'], 'orphanTerms' => $mirrored['orphanTerms']]);
 				}
 
 				$deleted = synchy_apply_sync_postmeta_mirror(is_array($params['post_keys'] ?? null) ? $params['post_keys'] : []);
