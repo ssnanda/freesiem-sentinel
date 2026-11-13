@@ -932,6 +932,10 @@ function synchy_get_ajcore_static_protected_table_suffixes(): array
 		'fluentform_logs',
 		'fluentform_form_analytics',
 		'aj_forms_lead_notes',
+		// Pipeline (Gmail/Zoho intake): per-site queue and the shared settings row hold OAuth Client IDs,
+		// tokens and mailbox config. Syncing them overwrites each site's own registered Google client.
+		'aj_gmail_intake_log',
+		'aj_shared_settings',
 	];
 }
 
@@ -3299,6 +3303,9 @@ function synchy_should_sync_option_name(string $option_name): bool
 		// Local cron bookkeeping and the connected-sites cache (lists this environment's own domains/UUIDs).
 		'ajcore_local_',
 		'ajcore_connected_sites_',
+		// Site Kit by Google: connection state (connected proxy URL, credentials, site ID) is bound
+		// to each environment's URL. Syncing it makes the destination show "URL of your site has changed".
+		'googlesitekit_',
 	];
 
 	foreach ($excluded_prefixes as $prefix) {
