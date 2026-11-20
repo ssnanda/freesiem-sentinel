@@ -3921,6 +3921,136 @@ function synchy_find_customer_files_in_payload(array $tables): array
 }
 
 /**
+ * Post ID ownership (rules E6, E7). Sync writes posts by raw ID, so the two sites must never create
+ * the same IDs. MySQL keeps wp_posts' AUTO_INCREMENT above the highest ID in the table, so ONE
+ * row written at a high ID drags every later post, revision and upload on that site up after it.
+ * That is how ncllc's DDEV blog content (1.5e9+, after AJ Core renumbered 4 test customer files)
+ * moved live's counter into DDEV's range in Nov 2026, and live's next customer PDF then took an
+ * ID DDEV reused for a page revision.
+ *
+ * Model: the site that receives pushes (live) declares a floor with
+ *   wp option update synchy_post_id_floor 3000000000
+ * and raises its own counter to it once (ALTER TABLE wp_posts AUTO_INCREMENT = <floor>). Every
+ * ID it creates is then >= floor; every ID the pushing site creates stays below. Synchy options
+ * are never synced, so each site keeps its own value.
+ *
+ *  E6a floor declared, but this site's counter is below it: separation not in effect yet.
+ *  E6b an incoming row is at/above this site's floor: it belongs to this site's own range.
+ *  E6c a NEW incoming row would push this site's counter up by more than $max_jump at once.
+ *  E7  an incoming row lands on an ID that holds a different record here (other post type, or a
+ *      revision of another parent / time -- revisions never change, so same ID + different
+ *      post_date means two different revisions). Attachments are E4's job.
+ *
+ * Pure: $incoming / $existing are [ID => ['post_type', 'post_date', 'post_parent']].
+ */
+function synchy_evaluate_post_id_rules(array $incoming, array $existing, int $counter, int $floor, int $max_jump = 1000000): array
+{
+	$violations = [];
+	$hits = ['E6b' => [], 'E6c' => [], 'E7' => []];
+
+	if ($floor > 0 && $counter > 0 && $counter < $floor) {
+		$violations[] = sprintf('this site declares post ID floor %d but its wp_posts counter is %d, so it still creates IDs in the other site\'s range; raise the counter first (rule E6a)', $floor, $counter);
+	}
+
+	foreach ($incoming as $id => $row) {
+		$id = (int) $id;
+
+		if ($floor > 0 && $id >= $floor) {
+			$hits['E6b'][] = $id;
+			continue;
+		}
+
+		if (!isset($existing[$id])) {
+			if ($counter > 0 && $id >= $counter && ($id - $counter) > $max_jump) {
+				$hits['E6c'][] = $id;
+			}
+			continue;
+		}
+
+		$here = $existing[$id];
+		$type_in = (string) ($row['post_type'] ?? '');
+		$type_here = (string) ($here['post_type'] ?? '');
+
+		if ($type_in === 'attachment' || $type_here === 'attachment') {
+			continue;
+		}
+
+		if ($type_in !== $type_here) {
+			$hits['E7'][] = $id;
+			continue;
+		}
+
+		if ($type_in === 'revision' && ((int) ($row['post_parent'] ?? 0) !== (int) ($here['post_parent'] ?? 0) || (string) ($row['post_date'] ?? '') !== (string) ($here['post_date'] ?? ''))) {
+			$hits['E7'][] = $id;
+		}
+	}
+
+	$list = static fn(array $ids): string => implode(', ', array_slice($ids, 0, 5)) . (count($ids) > 5 ? ', ...' : '');
+
+	if ($hits['E6b'] !== []) {
+		$violations[] = sprintf('%d post row(s) at or above this site\'s ID floor %d, which only this site may create (IDs %s) (rule E6b)', count($hits['E6b']), $floor, $list($hits['E6b']));
+	}
+
+	if ($hits['E6c'] !== []) {
+		$violations[] = sprintf('%d new post row(s) would jump this site\'s ID counter from %d to %d+, into the other site\'s range (IDs %s) (rule E6c)', count($hits['E6c']), $counter, max($hits['E6c']) + 1, $list($hits['E6c']));
+	}
+
+	if ($hits['E7'] !== []) {
+		$violations[] = sprintf('%d post row(s) would overwrite a different record at the same ID on this site (IDs %s) (rule E7)', count($hits['E7']), $list($hits['E7']));
+	}
+
+	return $violations;
+}
+
+/** This site's declared post ID floor (0 = none). Never synced: synchy_* options stay per site. */
+function synchy_get_post_id_floor(): int
+{
+	return max(0, (int) apply_filters('synchy_post_id_floor', (int) get_option('synchy_post_id_floor', 0)));
+}
+
+/** Next ID wp_posts will hand out (never below MAX(ID) + 1). */
+function synchy_get_post_id_counter(): int
+{
+	global $wpdb;
+
+	// MySQL 8 caches information_schema.AUTO_INCREMENT for up to a day; MariaDB has no such setting.
+	$suppress = $wpdb->suppress_errors(true);
+	$wpdb->query('SET SESSION information_schema_stats_expiry = 0');
+	$wpdb->suppress_errors($suppress);
+
+	$auto = (int) $wpdb->get_var($wpdb->prepare('SELECT AUTO_INCREMENT FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s', $wpdb->posts));
+	$max = (int) $wpdb->get_var("SELECT MAX(ID) FROM {$wpdb->posts}"); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+
+	return max($auto, $max + 1);
+}
+
+/** Destination-side wrapper for E6/E7: reads this site's rows at the incoming IDs, read-only. */
+function synchy_find_post_id_violations(array $prepared_tables): array
+{
+	global $wpdb;
+
+	$incoming = [];
+
+	foreach ((array) ($prepared_tables[$wpdb->posts]['rows'] ?? []) as $row) {
+		if (is_array($row) && (int) ($row['ID'] ?? 0) > 0) {
+			$incoming[(int) $row['ID']] = ['post_type' => (string) ($row['post_type'] ?? ''), 'post_date' => (string) ($row['post_date'] ?? ''), 'post_parent' => (int) ($row['post_parent'] ?? 0)];
+		}
+	}
+
+	if ($incoming === []) {
+		return [];
+	}
+
+	$existing = [];
+
+	foreach (synchy_fetch_rows_by_ids($wpdb->posts, 'ID', array_keys($incoming), ['ID', 'post_type', 'post_date', 'post_parent']) as $row) {
+		$existing[(int) $row['ID']] = ['post_type' => (string) $row['post_type'], 'post_date' => (string) $row['post_date'], 'post_parent' => (int) $row['post_parent']];
+	}
+
+	return synchy_evaluate_post_id_rules($incoming, $existing, synchy_get_post_id_counter(), synchy_get_post_id_floor(), (int) apply_filters('synchy_post_id_max_counter_jump', 1000000));
+}
+
+/**
  * Rule F: read-only health numbers. Uses AJ Core's own orphan report when it is loaded, the same
  * queries otherwise. Baselines differ per site and change over time, so a push is judged against
  * the numbers measured just before it (see synchy_customer_file_health_increases()), never "!= N".
@@ -11363,6 +11493,21 @@ function synchy_handle_remote_sync_request(WP_REST_Request $request)
 					__('Sync stopped: %1$d row(s) would touch customer files or protected storage data on this site. Nothing was applied. %2$s', 'synchy'),
 					count($violations),
 					implode('; ', array_slice($violations, 0, 6))
+				),
+				['status' => 409]
+			);
+		}
+
+		// Post ID ownership (E6, E7): abort before anything is written.
+		$id_violations = synchy_find_post_id_violations((array) ($prepared_sql['tables'] ?? []));
+
+		if ($id_violations !== []) {
+			return new WP_Error(
+				'synchy_post_id_collision',
+				sprintf(
+					/* translators: 1: first violations */
+					__('Sync stopped: post IDs from the other site would collide with this site\'s records or move its ID counter into the other site\'s range. Nothing was applied. %s', 'synchy'),
+					implode('; ', array_slice($id_violations, 0, 4))
 				),
 				['status' => 409]
 			);

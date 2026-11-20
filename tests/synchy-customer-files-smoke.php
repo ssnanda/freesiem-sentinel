@@ -126,6 +126,27 @@ $owned = ['ajcore-backups', 'ajphone-rules'];
 $assert(synchy_is_live_owned_upload_path('uploads/ajcore-backups/db.sql.gz', $owned), 'A file inside a declared live-owned folder must be treated as owned.');
 $assert(!synchy_is_live_owned_upload_path('uploads/ajcore-backups-old/x', $owned) && !synchy_is_live_owned_upload_path('uploads/2026/11/a.jpg', $owned), 'Similar names and ordinary uploads must not be treated as owned.');
 
+// 8b. Post ID ownership (E6/E7). Real case, Nov 2026: DDEV page revisions at 1500004046-48 hit live's
+// customer PDF (1500004046) and two live revisions of the same page; live's counter was 1500004049.
+$r = static fn(string $type, string $date, int $parent = 0): array => ['post_type' => $type, 'post_date' => $date, 'post_parent' => $parent];
+$v = synchy_evaluate_post_id_rules(
+	[1500004047 => $r('revision', '2026-11-19 22:56:44', 3885), 1500004049 => $r('revision', '2026-11-19 23:02:53', 3885)],
+	[1500004047 => $r('revision', '2026-11-17 17:15:26', 3885)],
+	1500004049,
+	0
+);
+$assert(count($v) === 1 && str_contains($v[0], 'E7'), 'E7: a different revision at the same ID must be flagged; a new row just above the counter must pass.');
+$assert(count(synchy_evaluate_post_id_rules([10 => $r('page', '2026-01-01 00:00:00')], [10 => $r('post', '2026-01-01 00:00:00')], 11, 0)) === 1, 'E7: another post type at the same ID must be flagged.');
+$assert(synchy_evaluate_post_id_rules([10 => $r('post', '2026-01-01 00:00:00'), 11 => $r('revision', '2026-01-02 00:00:00', 10)], [10 => $r('post', '2025-12-01 00:00:00'), 11 => $r('revision', '2026-01-02 00:00:00', 10)], 12, 0) === [], 'The same post (date edited) and the same revision must pass.');
+// The Nov 11 push: DDEV blog content at 1.5e9 onto a live counter of 4202.
+$v = synchy_evaluate_post_id_rules([1500004014 => $r('post', '2026-09-22 10:14:37')], [], 4202, 0);
+$assert(count($v) === 1 && str_contains($v[0], 'E6c'), 'E6c: a new row far above the counter must be flagged.');
+$v = synchy_evaluate_post_id_rules([3000000005 => $r('post', '2026-11-20 00:00:00'), 1500004060 => $r('post', '2026-11-20 00:00:00')], [], 3000000010, 3000000000);
+$assert(count($v) === 1 && str_contains($v[0], 'E6b') && str_contains($v[0], '3000000005'), 'E6b: rows in this site\'s own range must be flagged; rows below the floor must pass.');
+$v = synchy_evaluate_post_id_rules([], [], 1500004049, 3000000000);
+$assert(count($v) === 1 && str_contains($v[0], 'E6a'), 'E6a: a declared floor above the counter must stop every sync.');
+$assert(synchy_get_post_id_counter() > 0, 'The post ID counter must be readable.');
+
 // 9. Dry run (read-only): this site's customer files are flagged, and none are in the send list.
 $customer = synchy_get_customer_file_ids();
 $sent = synchy_get_changed_post_ids_for_sync(0);
