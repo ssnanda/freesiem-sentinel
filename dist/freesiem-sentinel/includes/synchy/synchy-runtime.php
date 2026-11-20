@@ -4002,14 +4002,75 @@ function synchy_evaluate_post_id_rules(array $incoming, array $existing, int $co
 	return $violations;
 }
 
-/** This site's declared post ID floor (0 = none). Never synced: synchy_* options stay per site. */
+/**
+ * The same ownership rules for the other tables Sync writes by a raw numeric ID: terms,
+ * term_taxonomy and form definitions (form entries/leads are protected and never sent).
+ *  E6a/E6b/E6c as for posts, judged against THIS table's counter. E6a only fires for a table the
+ *      package actually writes, so a site raises each counter once, when it first matters.
+ *  E8  an incoming row lands on an ID that holds a different record here. $incoming / $existing
+ *      are [id => identity|null]; null = no reliable identity (terms: E5 compares name/slug).
+ */
+function synchy_evaluate_table_id_rules(string $table, array $incoming, array $existing, int $counter, int $floor, int $max_jump = 1000000): array
+{
+	if ($incoming === []) {
+		return [];
+	}
+
+	$violations = [];
+	$hits = ['E6b' => [], 'E6c' => [], 'E8' => []];
+
+	if ($floor > 0 && $counter > 0 && $counter < $floor) {
+		$violations[] = sprintf('this site declares ID floor %d but %s\'s counter is %d, so it still creates IDs the other site uses; raise it first (rule E6a)', $floor, $table, $counter);
+	}
+
+	foreach ($incoming as $id => $identity) {
+		$id = (int) $id;
+
+		if ($floor > 0 && $id >= $floor) {
+			$hits['E6b'][] = $id;
+		} elseif (!array_key_exists($id, $existing)) {
+			if ($counter > 0 && $id >= $counter && ($id - $counter) > $max_jump) {
+				$hits['E6c'][] = $id;
+			}
+		} elseif ($identity !== null && $existing[$id] !== null && (string) $identity !== (string) $existing[$id]) {
+			$hits['E8'][] = $id;
+		}
+	}
+
+	$list = static fn(array $ids): string => implode(', ', array_slice($ids, 0, 5)) . (count($ids) > 5 ? ', ...' : '');
+
+	if ($hits['E6b'] !== []) {
+		$violations[] = sprintf('%d %s row(s) at or above this site\'s ID floor %d (IDs %s) (rule E6b)', count($hits['E6b']), $table, $floor, $list($hits['E6b']));
+	}
+
+	if ($hits['E6c'] !== []) {
+		$violations[] = sprintf('%d new %s row(s) would jump its counter from %d to %d+ (IDs %s) (rule E6c)', count($hits['E6c']), $table, $counter, max($hits['E6c']) + 1, $list($hits['E6c']));
+	}
+
+	if ($hits['E8'] !== []) {
+		$violations[] = sprintf('%d %s row(s) would overwrite a different record at the same ID on this site (IDs %s) (rule E8)', count($hits['E8']), $table, $list($hits['E8']));
+	}
+
+	return $violations;
+}
+
+/**
+ * This site's declared ID floor (0 = none), applied to posts and every other ID-keyed table Sync
+ * writes. Option name kept from the posts-only version. Never synced: synchy_* options stay per
+ * site. Per-table override: filter synchy_table_id_floor ($floor, $table); 0 turns it off.
+ */
 function synchy_get_post_id_floor(): int
 {
 	return max(0, (int) apply_filters('synchy_post_id_floor', (int) get_option('synchy_post_id_floor', 0)));
 }
 
-/** Next ID wp_posts will hand out (never below MAX(ID) + 1). */
-function synchy_get_post_id_counter(): int
+function synchy_get_table_id_floor(string $table): int
+{
+	return max(0, (int) apply_filters('synchy_table_id_floor', synchy_get_post_id_floor(), $table));
+}
+
+/** Next ID $table will hand out (never below MAX($column) + 1). */
+function synchy_get_table_id_counter(string $table, string $column): int
 {
 	global $wpdb;
 
@@ -4018,10 +4079,88 @@ function synchy_get_post_id_counter(): int
 	$wpdb->query('SET SESSION information_schema_stats_expiry = 0');
 	$wpdb->suppress_errors($suppress);
 
-	$auto = (int) $wpdb->get_var($wpdb->prepare('SELECT AUTO_INCREMENT FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s', $wpdb->posts));
-	$max = (int) $wpdb->get_var("SELECT MAX(ID) FROM {$wpdb->posts}"); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+	$auto = (int) $wpdb->get_var($wpdb->prepare('SELECT AUTO_INCREMENT FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s', $table));
+	$max = (int) $wpdb->get_var('SELECT MAX(`' . str_replace('`', '``', $column) . '`) FROM `' . str_replace('`', '``', $table) . '`'); // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared
 
 	return max($auto, $max + 1);
+}
+
+function synchy_get_post_id_counter(): int
+{
+	global $wpdb;
+
+	return synchy_get_table_id_counter($wpdb->posts, 'ID');
+}
+
+/**
+ * ID-keyed tables (other than posts) that Sync writes, with how to tell two records apart:
+ * [table => ['column' => id column, 'identity' => columns that never change for one record, or []]].
+ */
+function synchy_get_id_keyed_sync_tables(): array
+{
+	global $wpdb;
+
+	$tables = [
+		$wpdb->terms => ['column' => 'term_id', 'identity' => []],
+		$wpdb->term_taxonomy => ['column' => 'term_taxonomy_id', 'identity' => ['taxonomy', 'term_id']],
+	];
+
+	foreach (synchy_get_form_plugin_sync_table_specs() as $table => $spec) {
+		if (!synchy_is_ajcore_protected_table($table) && (array) ($spec['key_columns'] ?? []) === ['id']) {
+			// created_at is set once when a form is made; a different value means a different form.
+			$tables[$table] = ['column' => 'id', 'identity' => ['created_at']];
+		}
+	}
+
+	return (array) apply_filters('synchy_id_keyed_sync_tables', $tables);
+}
+
+/** Destination-side E6/E8 for terms, term_taxonomy and form definitions. Read-only. */
+function synchy_find_table_id_violations(array $prepared_tables): array
+{
+	$violations = [];
+	$identity_of = static function (array $row, array $columns): ?string {
+		if ($columns === []) {
+			return null;
+		}
+
+		$parts = [];
+
+		foreach ($columns as $column) {
+			if (!array_key_exists($column, $row)) {
+				return null;
+			}
+			$parts[] = (string) $row[$column];
+		}
+
+		return implode('|', $parts);
+	};
+
+	foreach (synchy_get_id_keyed_sync_tables() as $table => $spec) {
+		$column = (string) $spec['column'];
+		$identity = (array) $spec['identity'];
+		$incoming = [];
+
+		foreach ((array) ($prepared_tables[$table]['rows'] ?? []) as $row) {
+			if (is_array($row) && (int) ($row[$column] ?? 0) > 0) {
+				$incoming[(int) $row[$column]] = $identity_of($row, $identity);
+			}
+		}
+
+		if ($incoming === []) {
+			continue;
+		}
+
+		$existing = [];
+
+		foreach (synchy_fetch_rows_by_ids($table, $column, array_keys($incoming), array_merge([$column], $identity)) as $row) {
+			$existing[(int) $row[$column]] = $identity_of($row, $identity);
+		}
+
+		$violations = array_merge($violations, synchy_evaluate_table_id_rules($table, $incoming, $existing, synchy_get_table_id_counter($table, $column), synchy_get_table_id_floor($table), (int) apply_filters('synchy_post_id_max_counter_jump', 1000000)));
+	}
+
+	return $violations;
 }
 
 /** Destination-side wrapper for E6/E7: reads this site's rows at the incoming IDs, read-only. */
@@ -4047,7 +4186,7 @@ function synchy_find_post_id_violations(array $prepared_tables): array
 		$existing[(int) $row['ID']] = ['post_type' => (string) $row['post_type'], 'post_date' => (string) $row['post_date'], 'post_parent' => (int) $row['post_parent']];
 	}
 
-	return synchy_evaluate_post_id_rules($incoming, $existing, synchy_get_post_id_counter(), synchy_get_post_id_floor(), (int) apply_filters('synchy_post_id_max_counter_jump', 1000000));
+	return synchy_evaluate_post_id_rules($incoming, $existing, synchy_get_post_id_counter(), synchy_get_table_id_floor($wpdb->posts), (int) apply_filters('synchy_post_id_max_counter_jump', 1000000));
 }
 
 /**
@@ -11498,15 +11637,18 @@ function synchy_handle_remote_sync_request(WP_REST_Request $request)
 			);
 		}
 
-		// Post ID ownership (E6, E7): abort before anything is written.
-		$id_violations = synchy_find_post_id_violations((array) ($prepared_sql['tables'] ?? []));
+		// ID ownership for posts (E6, E7) and terms / form definitions (E6, E8): abort before anything is written.
+		$id_violations = array_merge(
+			synchy_find_post_id_violations((array) ($prepared_sql['tables'] ?? [])),
+			synchy_find_table_id_violations((array) ($prepared_sql['tables'] ?? []))
+		);
 
 		if ($id_violations !== []) {
 			return new WP_Error(
 				'synchy_post_id_collision',
 				sprintf(
 					/* translators: 1: first violations */
-					__('Sync stopped: post IDs from the other site would collide with this site\'s records or move its ID counter into the other site\'s range. Nothing was applied. %s', 'synchy'),
+					__('Sync stopped: record IDs from the other site would collide with this site\'s records or move its ID counters into the other site\'s range. Nothing was applied. %s', 'synchy'),
 					implode('; ', array_slice($id_violations, 0, 4))
 				),
 				['status' => 409]

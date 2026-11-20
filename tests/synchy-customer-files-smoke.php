@@ -147,6 +147,21 @@ $v = synchy_evaluate_post_id_rules([], [], 1500004049, 3000000000);
 $assert(count($v) === 1 && str_contains($v[0], 'E6a'), 'E6a: a declared floor above the counter must stop every sync.');
 $assert(synchy_get_post_id_counter() > 0, 'The post ID counter must be readable.');
 
+// 8c. Same rules for terms / term_taxonomy / form definitions (E6, E8). Real case, Nov 2026: live has
+// aj_forms_forms 3 "What Can We Improve" (created 2026-09-10); DDEV lacked it, so its next form was 3.
+$v = synchy_evaluate_table_id_rules('wp_aj_forms_forms', [3 => '2026-11-20 09:00:00'], [3 => '2026-09-10 09:48:50'], 4, 0);
+$assert(count($v) === 1 && str_contains($v[0], 'E8'), 'E8: a different form at the same ID must be flagged.');
+$assert(synchy_evaluate_table_id_rules('wp_aj_forms_forms', [2 => '2026-05-08 00:36:30', 5 => '2026-11-20 09:00:00'], [2 => '2026-05-08 00:36:30'], 4, 0) === [], 'The same form, and a new form near the counter, must pass.');
+$assert(count(synchy_evaluate_table_id_rules('wp_term_taxonomy', [27 => 'category|27'], [27 => 'nav_menu|27'], 30, 0)) === 1, 'E8: another taxonomy at the same term_taxonomy_id must be flagged.');
+$assert(synchy_evaluate_table_id_rules('wp_terms', [27 => null], [27 => null], 30, 0) === [], 'Terms carry no identity here (E5 checks them).');
+$v = synchy_evaluate_table_id_rules('wp_terms', [31 => null], [], 30, 3000000000);
+$assert(count($v) === 1 && str_contains($v[0], 'E6a') && str_contains($v[0], 'wp_terms'), 'E6a: a floor above this table\'s counter must stop a push that writes the table.');
+$assert(synchy_evaluate_table_id_rules('wp_terms', [], [], 30, 3000000000) === [], 'E6a must not fire for a table the package does not write.');
+$assert(count(synchy_evaluate_table_id_rules('wp_terms', [2000000000 => null], [], 30, 0)) === 1, 'E6c: a term far above the counter must be flagged.');
+global $wpdb;
+$assert(isset(synchy_get_id_keyed_sync_tables()[$wpdb->term_taxonomy]), 'term_taxonomy must be checked.');
+$assert(!array_filter(array_keys(synchy_get_id_keyed_sync_tables()), 'synchy_is_ajcore_protected_table'), 'Protected (live-only) tables are never sent, so are not listed.');
+
 // 9. Dry run (read-only): this site's customer files are flagged, and none are in the send list.
 $customer = synchy_get_customer_file_ids();
 $sent = synchy_get_changed_post_ids_for_sync(0);
