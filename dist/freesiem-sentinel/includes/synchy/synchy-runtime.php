@@ -842,7 +842,15 @@ function synchy_get_ajcore_owned_option_prefixes(): array
 
 function synchy_get_ajcore_syncable_option_names(): array
 {
-	return array_values(array_unique(array_map('strval', (array) apply_filters('synchy_ajcore_syncable_option_names', []))));
+	// Shop layout arranged on the dev copy and pushed to production. Keyed by Stripe price ID
+	// (same Stripe account on both sites) and by page ID (pages travel with their raw IDs):
+	// - ajcore_public_product_display_settings: which products show publicly, their order, shortcode builder.
+	// - ajcore_product_catalog: categories, product->category assignment, product->page links, listing page, UI.
+	// Neither holds credentials or per-site state.
+	return array_values(array_unique(array_map('strval', (array) apply_filters('synchy_ajcore_syncable_option_names', [
+		'ajcore_public_product_display_settings',
+		'ajcore_product_catalog',
+	]))));
 }
 
 function synchy_is_ajcore_owned_option(string $option_name): bool
@@ -879,7 +887,6 @@ function synchy_get_ajcore_static_protected_option_names(): array
 		'ajcore_customer_portal_page_id',
 		'ajcore_customer_portal_page_created',
 		'ajcore_customer_portal_menu_items',
-		'ajcore_public_product_display_settings',
 		'ajcore_public_product_dependencies',
 		'ajforms_asana_reference_cache',
 		'ajforms_developer_updates_enabled',
