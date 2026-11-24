@@ -846,8 +846,13 @@ function synchy_get_ajcore_syncable_option_names(): array
 	// (same Stripe account on both sites) and by page ID (pages travel with their raw IDs):
 	// - ajcore_public_product_display_settings: which products show publicly, their order, shortcode builder.
 	// - ajcore_product_catalog: categories, product->category assignment, product->page links, listing page, UI.
-	// Neither holds credentials or per-site state.
+	// These public-catalog options hold no credentials or customer/per-site runtime records.
 	return array_values(array_unique(array_map('strval', (array) apply_filters('synchy_ajcore_syncable_option_names', [
+		// Public product-page content is authored against Stripe on the dev site, then rendered
+		// from this normalized snapshot. Push it with the catalog so the destination receives
+		// the same descriptions, metadata, features, and rewritten Media Library image URLs.
+		// Stripe credentials and all customer/transaction tables remain destination-owned.
+		'ajforms_stripe_products_cache',
 		'ajcore_public_product_display_settings',
 		'ajcore_product_catalog',
 	]))));
@@ -875,12 +880,11 @@ function synchy_get_ajcore_protected_option_names(): array
 
 function synchy_get_ajcore_static_protected_option_names(): array
 {
-	// AJ Core rebuilds portal and Stripe cache from live Stripe and the shared DB.
-	// Sentinel deploys code only; live site identity, shared DB settings, mappings,
+	// AJ Core rebuilds portal runtime data from live Stripe and the shared DB.
+	// Sentinel keeps live site identity, shared DB settings, mappings,
 	// leads, tasks, files, event logs, and sync history must stay local.
 	return [
 		'ajforms_settings',
-		'ajforms_stripe_products_cache',
 		'ajcore_shared_db_settings',
 		'ajcore_site_uuid',
 		'ajcore_portal_sync_settings',
@@ -1070,7 +1074,7 @@ function synchy_get_sync_scope_definitions(): array
 			'type' => 'db',
 			'group' => 'database',
 			'label' => __('Forms', 'synchy'),
-			'description' => __('AJ Core forms, WP Formy, and Fluent Forms custom database tables. Client portal and Stripe cache tables are intentionally excluded.', 'synchy'),
+			'description' => __('AJ Core forms, WP Formy, and Fluent Forms custom database tables. Client portal tables are intentionally excluded; the public Stripe product snapshot travels with Options.', 'synchy'),
 		],
 	];
 }
@@ -1174,7 +1178,10 @@ function synchy_build_sync_scope_help_sections(array $options): array
 	}
 
 	if ($has_ajcore) {
-		$never_syncs[] = __('AJ Core: customer leads/form submissions, client portal data, Stripe/product data, and its connection settings (Live Chat, API keys) — only its plugin code and form definitions sync', 'synchy');
+		if ($has('db_options')) {
+			$syncs[] = __('AJ Core public product details and image references (the Uploads scope carries the image files)', 'synchy');
+		}
+		$never_syncs[] = __('AJ Core: customer leads/form submissions, client portal records, Stripe credentials, transactions, and connection settings (Live Chat, API keys)', 'synchy');
 	}
 
 	if ($has_formy_or_fluentforms) {
@@ -6054,7 +6061,7 @@ function synchy_get_export_filter_groups(): array
 		],
 		'exclude_ajcore_runtime' => [
 			'label' => __('AJ Core runtime and environment data', 'synchy'),
-			'description' => __('AJ Core rebuilds portal and Stripe cache from live Stripe and the shared DB. Keep live shared DB settings, Stripe settings, site UUID, mappings, leads, tasks, service requests, event log, and sync history on the destination while still including the WordPress media library.', 'synchy'),
+			'description' => __('AJ Core rebuilds portal runtime data from live Stripe and the shared DB. Keep live shared DB settings, Stripe settings, site UUID, mappings, leads, tasks, service requests, event log, and sync history on the destination while still including the public product snapshot and WordPress media library.', 'synchy'),
 			'patterns' => [
 				'wp-config.php',
 				'wp-content/plugins/ajcore/config/synced-settings.json',
@@ -6212,10 +6219,10 @@ function synchy_get_sync_database_exclusion_readme_items(): array
 		__('Backup & Restore/Synchy job state, export history, import state, sync state, and saved destination credentials are excluded.', 'synchy'),
 		__('freeSIEM Sentinel options and runtime state are excluded.', 'synchy'),
 		__('AJ Core protected options and portal/customer portal cache prefixes are excluded.', 'synchy'),
-		__('Hostinger, Action Scheduler, analytics, onboarding, survey, Spectra/UAGB, SureForms, WPForms, WP Formy runtime/version, Stripe cache, LifterLMS/course runtime, and similar plugin runtime option prefixes are excluded.', 'synchy'),
+		__('Hostinger, Action Scheduler, analytics, onboarding, survey, Spectra/UAGB, SureForms, WPForms, WP Formy runtime/version, LifterLMS/course runtime, and similar plugin runtime option prefixes are excluded.', 'synchy'),
 		__('Options ending in _db_version or _current_version are excluded.', 'synchy'),
 		__('AJ Core form definitions are included in the Forms database scope; AJ Core leads and lead notes are intentionally excluded as submitted user data.', 'synchy'),
-		__('Client portal and Stripe cache tables are intentionally excluded from the Forms database scope.', 'synchy'),
+		__('Client portal and Stripe runtime tables are intentionally excluded from the Forms database scope; the public product snapshot is included by the Options scope.', 'synchy'),
 	];
 }
 

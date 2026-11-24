@@ -42,7 +42,12 @@ foreach (['wp_aj_portal_files', 'wp_aj_portal_file_users', 'wp_aj_portal_file_ta
 foreach (['ajcore_storage_settings', 'ajcore_jwt_secret', 'ajcore_ajphone_client_secret', 'ajcore_settings_encryption_key', 'ajcore_ra_esign_drafts', 'ajcore_ra_gmail_intake', 'ajcore_ra_zoho_mail', 'ajforms_settings'] as $option) {
 	$assert(synchy_should_sync_option_name($option) === false, "$option must never sync.");
 }
-$assert(synchy_should_sync_option_name('ajcore_public_product_display_settings') === true && synchy_should_sync_option_name('ajcore_product_catalog') === true, 'Shop layout (product order, catalog, product pages) must push.');
+$assert(
+	synchy_should_sync_option_name('ajforms_stripe_products_cache') === true
+	&& synchy_should_sync_option_name('ajcore_public_product_display_settings') === true
+	&& synchy_should_sync_option_name('ajcore_product_catalog') === true,
+	'Public product details, image references, product order, catalog, and product pages must push.'
+);
 $assert(synchy_should_sync_option_name('ajcore_public_product_dependencies') === false, 'Product dependencies stay per site.');
 $assert(synchy_should_sync_option_name('blogname') === true &&synchy_should_sync_option_name('theme_mods_ajnanda') === true, 'Ordinary site and theme options must still sync.');
 add_filter('synchy_ajcore_syncable_option_names', $allow = static fn(): array => ['ajcore_ra_filing_task_status']);
